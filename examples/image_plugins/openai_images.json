@@ -1,0 +1,24 @@
+{
+  "formatVersion": 1,
+  "id": "microscritt.openai-images",
+  "name": "OpenAI Images 兼容",
+  "version": "1.0.0",
+  "settings": [
+    {
+      "key": "size",
+      "label": "尺寸",
+      "type": "select",
+      "required": true,
+      "default": "1024x1024",
+      "options": [
+        { "value": "1024x1024", "label": "1024 × 1024" },
+        { "value": "1024x1536", "label": "1024 × 1536" },
+        { "value": "1536x1024", "label": "1536 × 1024" }
+      ]
+    }
+  ],
+  "permissions": {
+    "endpointSetting": "baseUrl"
+  },
+  "code": "function step(ctx) {\n  if (ctx.phase === \"start\") {\n    return {\n      action: \"http\",\n      state: null,\n      request: {\n        method: \"POST\",\n        url: \"images/generations\",\n        headers: { Authorization: \"Bearer \" + ctx.settings.apiKey },\n        json: {\n          model: ctx.settings.model,\n          prompt: ctx.prompt,\n          size: ctx.settings.size,\n          response_format: \"b64_json\"\n        }\n      }\n    };\n  }\n  if (ctx.response.status < 200 || ctx.response.status >= 300) {\n    var message = \"生图服务返回 HTTP \" + ctx.response.status;\n    try {\n      var errorPayload = JSON.parse(ctx.response.text);\n      if (errorPayload.error && errorPayload.error.message) message += \":\" + errorPayload.error.message;\n    } catch (_) {}\n    return { action: \"error\", message: message };\n  }\n  var payload = JSON.parse(ctx.response.text);\n  var images = [];\n  for (var i = 0; i < payload.data.length; i++) {\n    if (payload.data[i].b64_json) images.push({ base64: payload.data[i].b64_json });\n  }\n  if (images.length === 0) return { action: \"error\", message: \"响应中没有 b64_json 图片\" };\n  return { action: \"done\", images: images };\n}\n"
+}

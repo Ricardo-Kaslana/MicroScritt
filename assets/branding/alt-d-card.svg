@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- 备用方案 D · 角色对话卡(蓝底):白气泡 + 头像点与文字条 -->
+  <rect width="1024" height="1024" fill="#0A7CFF"/>
+  <path d="M 330 306 H 694 A 92 92 0 0 1 786 398 V 622 A 92 92 0 0 1 694 714 H 452 L 358 806 V 714 H 330 A 92 92 0 0 1 238 622 V 398 A 92 92 0 0 1 330 306 Z" fill="#FFFFFF"/>
+  <circle cx="398" cy="478" r="72" fill="#0A7CFF"/>
+  <rect x="520" y="452" width="180" height="52" rx="26" fill="#0A7CFF"/>
+</svg>

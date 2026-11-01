@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 应用图标底色:深色主题用纯黑,与应用深色分组背景一致 -->
+    <color name="ic_launcher_background">#000000</color>
+    <!-- 启动页底色:与 Flutter 启动动画背景一致 -->
+    <color name="launch_background">#000000</color>
+</resources>

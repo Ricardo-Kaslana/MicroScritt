@@ -1,0 +1,67 @@
+name: Bug 报告
+description: 报告可复现的缺陷或异常行为
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。提交前请先搜索已有 issue。
+        **不要粘贴 API Key、配置文件、数据库或导出归档。**
+        安全问题请按 SECURITY.md 私下报告,不要开公开 issue。
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - Android
+        - Windows
+        - iOS
+        - 其他(请在描述中注明)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 应用版本 / commit(如 2.3.0 或 commit hash)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量提供最小、确定的复现路径
+      placeholder: |
+        1. 打开 ...
+        2. 配置 ...
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图
+      description: 请先脱敏,移除 API Key、端点凭据与私密聊天内容
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过已有 issue
+          required: true
+        - label: 我没有在内容中包含真实密钥或私密数据
+          required: true

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Android 自适应图标前景层:透明底,胶囊收进 108dp 画布的安全区内 -->
+  <rect x="202" y="414" width="620" height="212" rx="106" fill="#1C1C1E"/>
+  <circle cx="382" cy="520" r="50" fill="#409CFF"/>
+  <circle cx="512" cy="520" r="50" fill="#30D158"/>
+  <circle cx="642" cy="520" r="50" fill="#FF9F0A"/>
+</svg>

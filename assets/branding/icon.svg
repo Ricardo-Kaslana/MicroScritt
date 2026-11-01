@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- MicroScritt 应用图标母版:浅灰底 + 黑色「灵动岛」胶囊 + 主写/后台/压缩三色引擎点 -->
+  <rect width="1024" height="1024" fill="#F2F2F7"/>
+  <rect x="160" y="392" width="704" height="240" rx="120" fill="#1C1C1E"/>
+  <circle cx="372" cy="512" r="56" fill="#409CFF"/>
+  <circle cx="512" cy="512" r="56" fill="#30D158"/>
+  <circle cx="652" cy="512" r="56" fill="#FF9F0A"/>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- 备用方案 C · 上下文断环(深底):蓝色断环 + 白色方核,对应上下文占用环形图 -->
+  <rect width="1024" height="1024" fill="#1C1C1E"/>
+  <circle cx="512" cy="512" r="256" fill="none" stroke="#0A7CFF" stroke-width="88" stroke-linecap="round"
+          stroke-dasharray="1180 429" transform="rotate(118 512 512)"/>
+  <rect x="436" y="436" width="152" height="152" rx="50" fill="#F2F2F7"/>
+</svg>
