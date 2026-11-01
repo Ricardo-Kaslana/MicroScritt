@@ -94,7 +94,7 @@ List<PngTextChunk> readPngTextChunks(Uint8List bytes) {
       bytes[offset + 7] == t.codeUnitAt(3);
   while (offset + 8 <= bytes.length) {
     final length = _readUint32(bytes, offset);
-    if (dataEndExceeds(bytes, offset, length)) break;
+    if (_dataEndExceeds(bytes, offset, length)) break;
     final dataStart = offset + 8;
     final dataEnd = dataStart + length;
     // 只对文本块做整块复制:IDAT 等占 PNG 绝对体积的大块不白白多拷一份
@@ -114,7 +114,7 @@ List<PngTextChunk> readPngTextChunks(Uint8List bytes) {
 }
 
 /// 块数据是否越过缓冲区末尾(截断 PNG);调用方据此提前停止而不越界读取。
-bool dataEndExceeds(Uint8List bytes, int offset, int length) {
+bool _dataEndExceeds(Uint8List bytes, int offset, int length) {
   final dataStart = offset + 8;
   final dataEnd = dataStart + length;
   return dataEnd > bytes.length;

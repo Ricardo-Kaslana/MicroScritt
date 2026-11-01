@@ -28,7 +28,6 @@ class CharacterCardImporter {
   /// base64 编码与随后的 base64 解码(两次大拷贝)。
   static CharacterCard fromBytes(
     Uint8List bytes, {
-    String filename = '',
     bool includePngImageAsAvatar = true,
   }) {
     if (isPng(bytes)) {

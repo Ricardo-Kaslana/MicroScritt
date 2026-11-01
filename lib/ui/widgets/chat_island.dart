@@ -58,7 +58,6 @@ class IslandHub extends ChangeNotifier {
   void push(
     String text, {
     IslandTone tone = IslandTone.info,
-    IconData? icon,
     Duration ttl = const Duration(milliseconds: 4200),
   }) {
     _timer?.cancel();

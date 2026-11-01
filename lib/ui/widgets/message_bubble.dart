@@ -590,9 +590,10 @@ class _UserMessageBodyState extends State<_UserMessageBody> {
 }
 
 /// 用户气泡里可折叠的 `<tag>…</tag>` 段形态:标签名小写字母/下划线开头,
-/// 内容跨行非贪婪匹配到同名闭标签。仅用于显示层切分。
+/// 可含数字、下划线与连字符,内容跨行非贪婪匹配到同名闭标签。仅用于显示层
+/// 切分;`<system-reminder>` 由调用方排除,不折叠。
 final RegExp kUserFoldableTagPattern = RegExp(
-  r'<([a-z_][a-z0-9_]*)>([\s\S]*?)</\1>',
+  r'<([a-z_][a-z0-9_-]*)>([\s\S]*?)</\1>',
 );
 
 /// 用户气泡内的折叠指令块:默认收起为一枚半透明 chip(说明行作标签),

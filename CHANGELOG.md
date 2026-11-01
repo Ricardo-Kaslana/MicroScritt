@@ -19,11 +19,18 @@
 - 修复会话搜索恰好 200 条时误报「仅显示最新 200 条」;改为多取一条判断
   是否还有更旧结果。
 - 修复推理等级保存顺序:先落库成功再更新内存,失败时保留原值并提示。
+- 修复用户气泡折叠标签不支持连字符的问题;`<system-reminder>` 明确跳过,
+  不再依赖正则恰好匹配不到。
+- 内置生图插件不再提供删除入口(启动时会幂等重种),列表标注「内置」,
+  避免删除后重启又出现的困惑。
 
 ### 变更
 
 - 新增 `.gitattributes`:文本文件统一以 LF 存储与检出,Windows 原生 rc/脚本/
   工程文件保留 CRLF,图片等二进制资产显式标记,消除跨平台行尾漂移。
+- 清理未使用的 API 参数与过宽可见性:`IslandHub.push` 的 `icon`、
+  `CharacterCardImporter.fromBytes` 的 `filename`、`MemoryRepository.set`
+  的 `inTxn` 已移除,`dataEndExceeds` 收回为私有。
 
 ### 文档
 

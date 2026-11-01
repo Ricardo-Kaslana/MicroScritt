@@ -845,6 +845,29 @@ void main() {
     expect(find.textContaining('本回合请详细描写', findRichText: true), findsNothing);
   });
 
+  testWidgets('folds hyphenated hook tags but never system-reminder', (tester) async {
+    const msg = Message(
+      sessionId: 1,
+      role: 'user',
+      content:
+          '我走进酒馆<system-reminder>隐藏的注入</system-reminder>'
+          '<main-note>说明\n正文内容</main-note>',
+      seq: 0,
+    );
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: MessageBubble(message: msg))),
+    );
+
+    expect(find.text('我走进酒馆'), findsOneWidget);
+    expect(find.textContaining('隐藏的注入'), findsNothing);
+    expect(find.text('说明'), findsOneWidget);
+    expect(find.textContaining('正文内容', findRichText: true), findsNothing);
+
+    await tester.tap(find.text('说明'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('正文内容', findRichText: true), findsOneWidget);
+  });
+
   testWidgets('user bubble renders @skill tokens in the token color', (tester) async {
     const msg = Message(
       sessionId: 1,

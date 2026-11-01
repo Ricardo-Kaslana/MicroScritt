@@ -6,6 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/image_plugin_repository.dart';
 import 'package:microscritt/engine/hook_runtime.dart';
+import 'package:microscritt/models/image_plugin.dart';
+import 'package:microscritt/models/image_plugin_seeds.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/image_plugins_screen.dart';
 
@@ -23,10 +25,12 @@ class _FakeRuntime implements HookRuntime {
 void main() {
   late AppDatabase db;
 
-  Widget harness() => ProviderScope(
+  Widget harness({List<ImagePlugin>? plugins}) => ProviderScope(
     overrides: [
       databaseProvider.overrideWithValue(db),
       hookRuntimeProvider.overrideWithValue(_FakeRuntime()),
+      if (plugins != null)
+        imagePluginsProvider.overrideWith((ref) => plugins),
     ],
     child: const MaterialApp(home: ImagePluginsScreen()),
   );
@@ -88,4 +92,28 @@ void main() {
       await tester.runAsync(() => db.db.close());
     },
   );
+
+  testWidgets('built-in plugins have no delete action', (tester) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    const custom = ImagePlugin(
+      id: 'custom.plugin',
+      name: '自定义插件',
+      version: '1.0.0',
+      code: 'function step(){}',
+    );
+    await tester.pumpWidget(
+      harness(plugins: [kDefaultImagePluginSeeds.first, custom]),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('· 内置'), findsOneWidget);
+    expect(find.byIcon(Icons.lock_outline), findsOneWidget);
+    expect(find.byIcon(Icons.delete_outline), findsOneWidget);
+    expect(find.byTooltip('内置插件不可删除'), findsOneWidget);
+    expect(find.byTooltip('删除'), findsOneWidget);
+
+    await tester.runAsync(() => db.db.close());
+  });
 }

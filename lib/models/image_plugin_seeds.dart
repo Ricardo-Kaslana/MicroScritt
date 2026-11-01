@@ -212,3 +212,8 @@ const List<ImagePlugin> kDefaultImagePluginSeeds = [
     permissions: ImagePluginPermissions(endpointSetting: 'baseUrl'),
   ),
 ];
+
+/// 内置插件 id 集合:启动时按 id 幂等重种,因此 UI 不提供删除入口。
+final Set<String> kBuiltinImagePluginIds = Set.unmodifiable({
+  for (final plugin in kDefaultImagePluginSeeds) plugin.id,
+});

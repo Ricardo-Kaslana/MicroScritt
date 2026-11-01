@@ -2,6 +2,7 @@
 ///
 /// 导入先校验体积、结构以及同步 `step(ctx)` 是否可求值,并让用户确认联网
 /// origin 后才写库;删除受引用保护,仍被生图配置引用的插件会被仓库拒绝。
+/// 内置协议插件随启动幂等重种,列表里不提供删除入口。
 library;
 
 import 'dart:convert';
@@ -11,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/image_plugin.dart';
+import '../models/image_plugin_seeds.dart';
 import '../state/providers.dart';
 import 'common/confirm_dialog.dart';
 import 'common/empty_state.dart';
@@ -198,19 +200,26 @@ ${plugin.code}
               itemCount: plugins.length,
               itemBuilder: (context, index) {
                 final plugin = plugins[index];
+                final builtin = kBuiltinImagePluginIds.contains(plugin.id);
                 return GroupCard(
                   children: [
                     ListTile(
                       leading: const Icon(Icons.extension_outlined),
                       title: Text(plugin.name),
-                      subtitle: Text('${plugin.version} · ${plugin.id}'),
+                      subtitle: Text(
+                        '${plugin.version} · ${plugin.id}${builtin ? ' · 内置' : ''}',
+                      ),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           IconButton(
-                            tooltip: '删除',
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () => _delete(plugin),
+                            tooltip: builtin ? '内置插件不可删除' : '删除',
+                            icon: Icon(
+                              builtin
+                                  ? Icons.lock_outline
+                                  : Icons.delete_outline,
+                            ),
+                            onPressed: builtin ? null : () => _delete(plugin),
                           ),
                           Switch(
                             value: plugin.enabled,

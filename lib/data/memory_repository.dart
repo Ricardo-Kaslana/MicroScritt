@@ -3,8 +3,6 @@
 /// 后台快状态轮只读记忆;写入由用户触发的初始化/重生成与手工编辑产生。
 library;
 
-import 'package:sqflite/sqflite.dart';
-
 import '../models/memory.dart';
 import 'database.dart';
 
@@ -19,19 +17,8 @@ class MemoryRepository {
     return rows.map(Memory.fromMap).toList();
   }
 
-  /// 用 [content] 整段替换会话记忆(删旧插新)。
-  /// [inTxn] 非空时在调用方的事务里执行(后台一轮的变量/记忆/生图写入
-  /// 需要原子化);否则自带事务。
-  Future<void> set(int sessionId, String content, {DatabaseExecutor? inTxn}) async {
-    if (inTxn != null) {
-      await inTxn.delete('memories', where: 'session_id = ?', whereArgs: [sessionId]);
-      await inTxn.insert('memories', {
-        'session_id': sessionId,
-        'content': content,
-        'updated_at': DateTime.now().millisecondsSinceEpoch,
-      });
-      return;
-    }
+  /// 用 [content] 整段替换会话记忆(删旧插新);整段写入自带事务。
+  Future<void> set(int sessionId, String content) async {
     await db.db.transaction((txn) async {
       await txn.delete('memories', where: 'session_id = ?', whereArgs: [sessionId]);
       await txn.insert('memories', {
