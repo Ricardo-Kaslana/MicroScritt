@@ -39,7 +39,7 @@
 | Windows | 主要维护平台,可构建运行 |
 | iOS | 源码存在,JS runtime 未接线,生图不可用;未在真机完整验证 |
 
-最低工具链:Flutter 3.35 / Dart 3.9。
+移动端「保存到本地」与系统分享面板已在真机验证。最低工具链:Flutter 3.35 / Dart 3.9。
 
 ### 快速开始
 
@@ -87,7 +87,6 @@ Data(sqflite) → Backend(LLM/生图抽象) → Context(组装管线)
 ### 已知限制
 
 - iOS/macOS 的 JS runtime 未接线,生图插件在这些平台不可用。
-- 移动端「保存到本地」与系统分享面板尚未在真机完整验证。
 - 会话内搜索使用 `LIKE` 扫描,不对纯图片消息或显示层正则改写内容生效。
 - 生图排队进度不逐事件回调,靠响应体提前截断减少等待。
 
@@ -132,7 +131,7 @@ A minimal, mobile-first AI roleplay (RP) chat app. Pure client-side Flutter — 
 | Windows | Primary platform, builds and runs |
 | iOS | Sources present; JS runtime not wired, image generation unavailable; not fully verified on device |
 
-Minimum toolchain: Flutter 3.35 / Dart 3.9.
+Mobile save-to-local and system share dialogs have been verified on a real device. Minimum toolchain: Flutter 3.35 / Dart 3.9.
 
 ### Quick start
 
@@ -180,7 +179,6 @@ Data(sqflite) → Backend(LLM/image abstractions) → Context(assembly)
 ### Known limitations
 
 - The JS runtime is not wired for iOS/macOS, so image plugins are unavailable there.
-- Mobile save-to-local and system share dialogs have not been fully verified on a real device.
 - In-session search uses a `LIKE` scan and does not cover image-only messages or text produced by display-layer regex rewrites.
 - Image-queue progress is not exposed event-by-event; responses are cut early once the image link arrives.
 
