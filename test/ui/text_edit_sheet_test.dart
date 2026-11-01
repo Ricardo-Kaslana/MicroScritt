@@ -1,3 +1,5 @@
+// 通用长文编辑底单:小视口 + 软键盘 inset 下不溢出、可调编辑区高度,
+// 以及复制按钮的剪贴板反馈。
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -5,8 +7,8 @@ import 'package:microscritt/ui/common/text_edit_sheet.dart';
 
 void main() {
   testWidgets('小视口 + 键盘弹起时编辑底单不溢出', (tester) async {
-    // 复现 BZ 批后的溢出:可用高度不足(小窗 + viewInsets 垫高)时,
-    // 固定 editorHeight 曾把 Column 撑出 138px。
+    // 回归防护:可用高度不足(小窗 + viewInsets 垫高)时,固定 editorHeight
+    // 曾把 Column 撑出 138px。
     tester.view.physicalSize = const Size(360, 640);
     tester.view.devicePixelRatio = 1;
     tester.view.viewInsets = const FakeViewPadding(bottom: 244.0);

@@ -1,3 +1,9 @@
+/// 会话上下文面板:按组装顺序分段展示实际发给 LLM 的 system 与消息组成。
+///
+/// 分段严格镜像 `ContextAssembler.assemble` 的产出顺序,细分条目惰性构建;
+/// 由聊天页 AppBar 以底部抽屉打开,数据来自 `ChatState.lastContext`。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/context_snapshot.dart';
@@ -5,14 +11,14 @@ import '../state/chat_controller.dart';
 import 'common/empty_state.dart';
 import 'common/section_header.dart';
 
-/// 上下文面板:实时展示当前会话发给 LLM 的上下文组成(分段 + 字符数)、
-/// 历史消息条数,以及 token 用量与缓存命中率。由聊天页 AppBar 以底部抽屉打开,
-/// 监听 chatControllerProvider,发送/流式过程中保持最新。
+/// 上下文面板:展示当前会话最近一次组装的上下文(分段 + 字符数)、消息数组
+/// 条数,以及 token 用量与缓存命中率。由聊天页 AppBar 以底部抽屉打开,监听
+/// chatControllerProvider,随 load/发送/压缩/记忆应用等重算点自动刷新。
 ///
 /// 分段严格按组装器实际顺序排列([ContextSnapshot.segments]),每段默认折叠,
-/// 展开后查看其完整内容;预设/规则/世界书与会话历史还进一步按条目划分。段落
-/// 按缓存角色打上小标签:稳定前缀(进 system 稳定段)/ 消息数组(随 messages
-/// 发出)/ 状态旁路(缓存断点后的合成 user 消息),并可一键全部展开/收起。
+/// 展开后查看其完整内容;预设/规则/世界书/附件与会话历史还进一步按条目划分。
+/// 段落按缓存角色打上小标签:稳定前缀(进 system 稳定段)或消息数组(随
+/// messages 发出),未知键兜底为「通知」档;可一键全部展开/收起。
 class ContextPanel extends ConsumerStatefulWidget {
   const ContextPanel({super.key});
 
@@ -69,10 +75,10 @@ class _ContextPanelState extends ConsumerState<ContextPanel> {
                     ),
                     // 历史截断标注:加载窗口下界之外还有更早历史时,面板只显示
                     // 已加载的部分 —— 不加说明会被误读成"旧消息被丢弃"(消息全部
-                    // 在库,聊天区上滑可逐页加载完整记录)。组装自 2026-09-28 批
-                    // 起不再按条数裁剪,「窗口之外」与「未进上下文」已是同一件
-                    // 事,判据收敛到 canLoadOlder。不写具体条数:组装器只见得到
-                    // 已加载部分,精确总数会低报。
+                    // 在库,聊天区上滑可逐页加载完整记录)。组装已不按条数裁剪,
+                    // 「窗口之外」与「未进上下文」是同一件事,判据收敛到
+                    // canLoadOlder。不写具体条数:组装器只见得到已加载部分,
+                    // 精确总数会低报。
                     if (chat.canLoadOlder) const _HistoryTruncationTile(),
                   ],
                 ),
@@ -184,21 +190,22 @@ class _PanelHeader extends StatelessWidget {
   }
 }
 
-/// 上下分段在缓存布局中的角色,决定标签颜色与图标色调。
+/// 上下分段在缓存布局中的角色,决定标签文字与色调。
 enum _SegmentBucket {
   /// 进 system 稳定段:preset / rules / character / postHistory / 常驻世界书。
-  /// (CW 批起技能不再进 system —— 只有 @技能名 主动触发的附件行,归 messages。)
+  /// 技能不进 system —— 只有 @技能名 主动触发的附件行,归 messages。
   stable,
 
   /// 随 messages 数组发出:记忆第 0 条 + 压缩摘要(数组头部合成消息)+ 会话历史
-  /// + 已落库的附件行。
+  /// + 已落库的附件行(技能/触发世界书/压缩与记忆差异通知)。
   history,
 
-  /// 一次性通知(压缩/记忆 diff):合成插在最新用户消息之前,发出即消失。
-  /// (变量自 CL 批起只进后台 agent 上下文,主写分段里不会出现。)
+  /// 兜底档:组装器当前不产出未知键;若出现新分段键,按「通知」标签与
+  /// tertiary 色调展示,面板不因未知键缺失分类而报错。
   state,
 }
 
+/// 分段键 → 缓存角色;未知键归兜底档(见 [_SegmentBucket.state])。
 _SegmentBucket _bucketOf(String key) => switch (key) {
   'preset' ||
   'rules' ||
@@ -216,6 +223,7 @@ _SegmentBucket _bucketOf(String key) => switch (key) {
       _SegmentBucket.state => ('通知', scheme.tertiary),
     };
 
+/// 分段键 → 图标;未知键(含已不再产出的 variables)回退通用文章图标。
 IconData _segmentIcon(String key) => switch (key) {
   'preset' => Icons.auto_fix_high,
   'rules' => Icons.gavel,
@@ -226,7 +234,7 @@ IconData _segmentIcon(String key) => switch (key) {
   'history' => Icons.forum_outlined,
   'summary' => Icons.compress,
   'attachments' => Icons.attach_file,
-  // 'variables' 分段已随 CL 批移除:变量只进后台 agent 上下文,主写快照不再产出。
+  // 变量只进后台 agent 上下文,主写快照不产出 variables 分段。
   _ => Icons.article_outlined,
 };
 
@@ -250,7 +258,7 @@ class _SegmentTile extends StatefulWidget {
 class _SegmentTileState extends State<_SegmentTile> {
   bool _expanded = false;
 
-  /// 历史/世界书子项的初始展示条数:超长历史点开时先铺一页,
+  /// 细分条目(历史/世界书/预设等)的初始展示条数:超长历史点开时先铺一页,
   /// 其余按需加载,避免一次布局几百条消息内容。
   static const int _subEntryPageSize = 60;
   int _visibleSubEntries = _subEntryPageSize;
@@ -686,7 +694,10 @@ class _SelectableBlock extends StatelessWidget {
   }
 }
 
-/// token 用量卡片:主写/后台 + 缓存命中率。
+/// token 用量卡片:主写/后台分账 + 缓存命中率。
+///
+/// 数值取自 [ChatState] 的累计字段;`inputTokens == 0` 时命中率按 0% 处理
+/// (避免除零);输入与输出都为 0 时显示"尚未产生用量"。
 class _TokensCard extends StatelessWidget {
   final ChatState chat;
   const _TokensCard({required this.chat});
@@ -906,6 +917,7 @@ class _InfoRow extends StatelessWidget {
   }
 }
 
+/// 面板内的弱化空态提示行(分段为空等)。
 class _EmptyHint extends StatelessWidget {
   final String text;
   const _EmptyHint(this.text);

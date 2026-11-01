@@ -1,3 +1,5 @@
+// 聊天页后台状态与主写控制:后台维护收尾的灵岛闪示、流式中断键与部分回复
+// 落库、空记忆初始化提示的出现/初始化/关闭。
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -65,6 +67,8 @@ class _MemoryInitBackend implements LlmBackend {
   }
 }
 
+/// 等 load 的异步 I/O 落定(sessionId 非空)再继续,否则关闭 DB 会撞
+/// database_closed。
 Future<void> _pumpUntilLoaded(WidgetTester tester) async {
   await tester.runAsync(() async {
     for (var i = 0; i < 60; i++) {
@@ -120,7 +124,7 @@ void main() {
       );
       await _pumpUntilLoaded(tester);
 
-      // 尚未发消息:后台agent 状态条不显示(处于 idle)。
+      // 尚未发消息:灵岛的后台状态粒不显示(处于 idle)。
       expect(find.textContaining('后台agent'), findsNothing);
 
       // 发一条消息 → 主回复 + 后台维护都跑完(点击发送按钮触发;输入框为

@@ -1,3 +1,5 @@
+// 内置生图协议插件测试:经真实 JS 引擎(QuickJS 优先、回落 Node)
+// 驱动两条种子插件,覆盖 7 行字段体、链接截断、零字节重试与防重复计费。
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -11,16 +13,11 @@ import 'package:microscritt/models/image_plugin_seeds.dart';
 import '../support/held_sse_server.dart';
 import '../support/plugin_js_engine.dart';
 
-/// 用真实 JS 引擎驱动两条内置协议插件,镜像被删的 Dart 后端测试的全部关键不变量。
-///
-/// 引擎经 [probePluginJsEngine] 选择:QuickJS(生产同路径)可用则用之,否则回落
-/// Node —— Windows 的 `flutter test` 宿主加载不到 quickjs 桥接库,而种子 JS 只用
-/// ES5 语法,两方言行为一致。**不能**用「probe 失败就 return」写跳过:那会让这
-/// 份文件长期以 6 个用例 0 秒通过的姿态掩盖零覆盖,超时裁剪/轮询节奏这类回归
-/// 全都跑不到。
 void main() {
   PluginJsEngine? js;
 
+  // Windows 的 flutter test 宿主加载不到 QuickJS 桥接库,引擎回落 Node;
+  // 种子 JS 只用 ES5 语法,两引擎行为一致;都不可用时 markTestSkipped,不能静默 return。
   setUpAll(() async {
     js = await probePluginJsEngine();
   });
@@ -157,7 +154,7 @@ void main() {
 
     await chat(origin(server), negative: "bad 'words`here").generateImage("a 'b`c\\d");
 
-    // 单引号/反引号都该剥(旧 _quoteChars 含 `),反斜杠是 tag 语法必须保留。
+    // 单引号/反引号都该剥,反斜杠是 NovelAI tag 语法必须保留。
     expect(content, contains(r'提示词:a bc\d'));
     expect(content, contains('负面提示词:bad wordshere'));
   });
@@ -184,7 +181,7 @@ void main() {
     expect(nai['size'], '横图');
     expect(nai['steps'], 35);
 
-    // 未配置负面词时,旧后端只把默认词放进 7 行消息、**不进** nai 覆盖:
+    // 未配置负面词时,兜底默认词只进 7 行消息、不进 nai 覆盖:
     // 网关对未预期的 nai.negative 会 400,多发就是整轮生图失败。
     final bare = PluginImageBackend(
       config: ImageConfig(
@@ -452,7 +449,7 @@ void main() {
     );
     expect(requests.first, 'POST /api/web/jobs');
     expect(requests.last, 'GET /api/jobs/job-9');
-    // 刚提交的任务必然在排队,立即问只是白打一次(旧后端 firstPollDelay=1s)。
+    // 刚提交的任务必然在排队,立即问只是白打一次;插件在首询前先等 1s。
     expect(sw.elapsedMilliseconds, greaterThanOrEqualTo(900));
   });
 
@@ -478,8 +475,8 @@ void main() {
     sw.stop();
 
     expect(polls, 3);
-    // 排队期 1s 一次:三次轮询至少 1s(首询)+ 1s + 1s。旧实现无 sleep,会连着
-    // 打完并在几分钟内吃光宿主步数上限。
+    // 排队期 1s 一次:三次轮询至少 1s(首询)+ 1s + 1s;没有等待就会空转,
+    // 几分钟内打满宿主步数上限。
     expect(
       sw.elapsedMilliseconds,
       greaterThanOrEqualTo(2500),

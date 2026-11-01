@@ -1,3 +1,4 @@
+// 生图插件宿主测试:http/sleep/done 状态机、预算与截断、origin 权限。
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -50,7 +51,8 @@ function step(ctx) {
     permissions: const ImagePluginPermissions(endpointSetting: 'baseUrl'),
   );
 
-  // baseUrl 现由核心列提供(宿主合并进 ctx.settings),不再放 pluginSettings。
+  // baseUrl 由核心配置列提供,宿主合并进 ctx.settings;pluginSettings 只放
+  // 插件声明的动态字段。
   ImageConfig config(String baseUrl) => ImageConfig(
     kind: ImageBackendKind.plugin,
     apiKey: 'k',

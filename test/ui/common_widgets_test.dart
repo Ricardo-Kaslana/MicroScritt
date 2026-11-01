@@ -1,3 +1,5 @@
+// 通用小组件:EmptyState、确认对话框返回值、可搜索列表(列表/网格)与
+// 搜索框的焦点及清除行为。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/ui/common/app_search_field.dart';

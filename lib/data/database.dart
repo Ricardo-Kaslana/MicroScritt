@@ -1,3 +1,9 @@
+/// 数据库打开与生命周期入口:`AppDatabase` 及同库的 schema/seeds 两个 part。
+///
+/// 单一基线:旧版本库归档后按基线重建,不保留增量迁移链;桌面端数据根固定
+/// 在 `~/.microscritt`,移动端沿用应用私有 Documents 目录。
+library;
+
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -12,6 +18,10 @@ import '../models/regex_script_seeds.dart';
 part 'database_schema.dart';
 part 'database_seeds.dart';
 
+/// 应用数据库句柄:持有 sqflite 连接、基线版本与跨仓库事务入口。
+///
+/// schema(建表)与 seeds(默认数据)拆在同库 part 文件中,共享本库导入与
+/// 库私有作用域。
 class AppDatabase {
   final Database db;
   AppDatabase(this.db);
@@ -79,6 +89,11 @@ class AppDatabase {
     }
   }
 
+  /// 打开(必要时创建)数据库。顺序:建父目录 → 桌面默认路径下从旧位置
+  /// 搬迁 → 检测旧版本库并归档 → 按 [schemaVersion] 打开。
+  ///
+  /// [factory] 供测试注入内存库;显式传 [path] 的调用方自管位置(跳过搬迁)。
+  /// 降级打开是空操作 —— 旧版本库已在打开前归档重建,正常流程不会走到这里。
   static Future<AppDatabase> open({
     DatabaseFactory? factory,
     String? path,
@@ -141,7 +156,5 @@ class AppDatabase {
     );
   }
 
-  // 建表 DDL 体量较大,拆在同库 part 文件:schema(建表)/seeds(默认数据)。
-  // part 共享本库导入与库私有作用域 —— 种子函数无需公开。
   static Future<void> _onCreate(Database db, int version) => _createSchema(db);
 }

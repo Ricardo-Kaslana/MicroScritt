@@ -1,3 +1,4 @@
+// 正则脚本仓储:插入位置递增、显式 position 排序与增删改往返。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/regex_script_repository.dart';
 import 'package:microscritt/models/regex_script.dart';
@@ -20,7 +21,7 @@ void main() {
     final repo = RegexScriptRepository(db);
     final id1 = await repo.insert(const RegexScript(name: 'a', findRegex: 'a', replace: 'a'));
     final id2 = await repo.insert(const RegexScript(name: 'b', findRegex: 'b', replace: 'b'));
-    // 手动把 b 挪到最前(库里可能还有前面测试留下的行,只断言相对顺序)。
+    // 手动把 b 的 position 挪到 a 之前(排序按 position 升序,只断言相对顺序)。
     await repo.update(RegexScript(id: id2, name: 'b', findRegex: 'b', replace: 'b', position: -1));
     await repo.update(RegexScript(id: id1, name: 'a', findRegex: 'a', replace: 'a', position: 5));
 

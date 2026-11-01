@@ -1,10 +1,13 @@
+// 斜杠命令执行:/test /continue /clear /compact /rerun,含忙碌门控与
+// 压缩用量记账的命令层入口。
 part of 'chat_controller.dart';
 
 /// 斜杠命令:/test /continue /clear /compact /rerun 与压缩用量记账。
 abstract class ChatControllerCommands extends ChatControllerPipeline {
   /// 执行一个快捷命令(斜杠输入或命令按钮共用)。
   /// [args] 是命令名之后的文本,当前仅 `/rerun` 消费为修改方向。
-  /// 返回一段给 UI 展示的反馈文本(null 表示无需提示)。
+  /// 忙碌期拒绝并给出可见错误;返回一段给 UI 展示的反馈文本
+  /// (null 表示无需提示)。
   Future<String?> runCommand(SlashCommand cmd, {String args = ''}) async {
     if (state.streaming || _busy) {
       // 忙碌期拒绝要有可见提示:命令输入同样可能已被 UI 清空。
@@ -100,8 +103,8 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
     final config = ref.read(backendConfigProvider);
     if (sessionId == null || backend == null || config == null) return null;
 
-    // 本轮令牌(EF 批换发语义):入口换新实例并捕获,取消判定只认这个实例;
-    // 并发在飞的后台轮持有自己的实例,不受影响。
+    // 本轮令牌:入口换新实例并捕获,取消判定只认这个实例;并发在飞的后台轮
+    // 持有自己的实例,不受影响。
     _mainToken = InterruptToken();
     final token = _mainToken;
 

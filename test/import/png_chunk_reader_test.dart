@@ -1,3 +1,5 @@
+// PNG 文本块读取测试:tEXt/zTXt/iTXt 解码、Latin-1 兜底与同名块拼接;
+// buildPngWithText 同时是角色卡导入测试的夹具来源。
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -6,7 +8,7 @@ import 'package:microscritt/import/png_chunk_reader.dart';
 
 Uint8List _chunk(String type, List<int> data) {
   final len = [(data.length >> 24) & 0xff, (data.length >> 16) & 0xff, (data.length >> 8) & 0xff, data.length & 0xff];
-  return Uint8List.fromList([...len, ...type.codeUnits, ...data, 0, 0, 0, 0]); // dummy CRC (reader skips it)
+  return Uint8List.fromList([...len, ...type.codeUnits, ...data, 0, 0, 0, 0]); // 假 CRC:读取器不校验
 }
 
 Uint8List buildPngWithText(String keyword, String text) {
@@ -15,7 +17,7 @@ Uint8List buildPngWithText(String keyword, String text) {
   return Uint8List.fromList([...sig, ..._chunk('tEXt', data), ..._chunk('IEND', [])]);
 }
 
-/// Builds a PNG from its signature plus raw chunk payloads.
+/// 由 PNG 签名 + 原始块载荷拼出字节流(夹具用,不写真实 CRC)。
 Uint8List _buildPng(List<List<int>> chunks) {
   const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
   return Uint8List.fromList([sig, ...chunks].expand((x) => x).toList());

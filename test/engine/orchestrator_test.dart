@@ -1,3 +1,4 @@
+// 后台编排器测试:快状态批次/游标、变量条件写回冲突、后台生图与重跑替换落点。
 import 'dart:async';
 import 'dart:convert';
 
@@ -58,7 +59,7 @@ class _CapturingBackend implements LlmBackend {
   final requests = <LlmRequest>[];
   String? lastPrompt;
 
-  /// 捕获完整请求(v48:断言推理强度透传)。
+  /// 捕获完整请求,供断言推理强度等字段透传。
   LlmRequest? lastRequest;
   _CapturingBackend([this.text = '{"variables":{},"memory":null}']);
 
@@ -139,7 +140,7 @@ void main() {
     await seedMessage(msgRepo, sessionId);
 
     // 技能自 v37 起是全局目录、用户手动管理:编排器不再读取/写入技能状态;
-    // 记忆自 CW 批起不经后台逐轮写入(LLM 回传的 memory 字段被丢弃)。
+    // 记忆不经后台逐轮写入(LLM 回传的 memory 字段被丢弃)。
     final orch = Orchestrator(BackgroundEngine(_JsonBackend()), varRepo, memRepo, msgRepo, ImageGuideRepository(db));
     final turn = await orch.runAfterTurn(sessionId: sessionId, model: 'm');
     expect(turn.skipped, isFalse);
@@ -152,7 +153,7 @@ void main() {
   });
 
   test('forwards the background reasoning level into the engine request', () async {
-    // v48:编排器把后台推理强度原样透传给引擎(与 temperature/maxTokens 同待遇),
+    // 编排器把后台推理强度原样透传给引擎(与 temperature/maxTokens 同待遇),
     // 落到 LlmRequest.reasoningLevel —— 链路某层漏传即在此失败。
     final db = await openTestDb();
     final charId = await CharacterRepository(db).insert(const CharacterCard(name: 'A'));
@@ -182,7 +183,7 @@ void main() {
     final msgRepo = MessageRepository(db);
     await seedMessage(msgRepo, sessionId);
 
-    // A backend that errors → engine returns null.
+    // 后端报错 → 引擎返回失败,轮次不落库。
     final engine = BackgroundEngine(_ErrorBackend());
     final orch = Orchestrator(engine, varRepo, memRepo, msgRepo, ImageGuideRepository(db));
     final turn = await orch.runAfterTurn(sessionId: sessionId, model: 'm');
@@ -214,7 +215,7 @@ void main() {
     );
     final turn = await orch.runAfterTurn(sessionId: sessionId, model: 'm');
     expect(turn.result, isNotNull);
-    // A3:生图任务与轮次解耦 —— 图片落库要等 imageTask 收敛。
+    // 生图任务与轮次解耦 —— 图片落库要等 imageTask 收敛。
     await turn.imageTask;
     final msgs = await MessageRepository(db).bySession(sessionId, includeImages: true);
     expect(msgs, hasLength(2)); // seed 消息 + 图片消息
@@ -249,7 +250,7 @@ void main() {
     await turn.imageTask;
     expect(failureDetail, contains('provider down'));
 
-    // No image message was stored, but the non-image updates still applied.
+    // 生图失败不留图片消息,但非图像的状态更新照常落库。
     expect(await MessageRepository(db).bySession(sessionId), hasLength(1)); // 只有那条 seed 消息
     expect(await VariableRepository(db).bySession(sessionId), {'hp': '8'});
   });
@@ -764,7 +765,7 @@ void main() {
       afterSeq: 2,
     );
     expect(turn.skipped, isFalse);
-    // ES 批:增量游标只作跳过判据;送入的是 recent 末尾滑动窗口
+    // 增量游标只作跳过判据;送入的是 recent 末尾滑动窗口
     // (image 窗口 6 条 ≥ 全部 5 条)—— 生图轮看到完整最近场景而非
     // 仅游标后的 2 条新消息。
     expect(backend.lastPrompt, contains('msg0'));
@@ -885,7 +886,7 @@ void main() {
     expect(turn.skipped, isFalse);
     expect(turn.result, isNotNull);
     expect(turn.result!.usage.inputTokens, 0);
-    // 生图指导照常携带;ES 批起记忆以只读锚定段回喂(贴合剧情的场景锚点)。
+    // 生图指导照常携带;记忆以只读锚定段回喂(贴合剧情的场景锚点)。
     expect(backend.lastPrompt, contains('1girl, silver hair, black coat'));
     expect(backend.lastPrompt, contains('<memory>'));
     expect(backend.lastPrompt, contains('Old fact: the sword is cursed.'));
@@ -919,7 +920,7 @@ void main() {
     expect(turn.result, isNotNull);
 
     // variables 虽被 LLM 返回但被跳过(未落库);记忆不再有逐轮写入路径,
-    // 即便 LLM 回传 memory 字段也恒为空(CW 批)。
+    // 即便 LLM 回传 memory 字段也恒为空。
     expect(await varRepo.bySession(sessionId), isEmpty);
     expect(await memRepo.bySession(sessionId), isEmpty);
   });
@@ -1005,7 +1006,7 @@ void main() {
     expect(variableTurn.cursorSeq, 29);
     expect(variableTurn.hasMoreVariables, isFalse);
 
-    // 场景 B:只开 image → 窗口放宽到 6 条(生图需要最近完整场景,ES 批)。
+    // 场景 B:只开 image → 窗口放宽到 6 条(生图需要最近完整场景)。
     // 需给 image 接一个 backend 才会真正发起(否则按"不可执行"跳过)。
     backend.lastPrompt = null;
     final orchImage = Orchestrator(
@@ -1617,7 +1618,7 @@ void main() {
     });
 
     test('fails without writing when the LLM produces no valid memory (retries exhausted)', () async {
-      // BM 批:缺 memory 字段在引擎层纳入重试;三次尝试耗尽后引擎返回
+      // 缺 memory 字段在引擎层纳入重试;三次尝试耗尽后引擎返回
       // parseFailure,编排器不再落库(旧的"成功但无记忆 → skipped"路径已不可达)。
       final db = await openTestDb();
       final charId = await CharacterRepository(db).insert(card);

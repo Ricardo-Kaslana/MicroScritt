@@ -1,3 +1,4 @@
+// 生图风格预设测试:名称唯一、参数落在协议支持范围与内容红线。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/image_style_preset.dart';
 

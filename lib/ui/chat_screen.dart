@@ -1,3 +1,9 @@
+/// 聊天页:消息流渲染、输入发送、悬浮滚动导航与全部会话入口。
+///
+/// 消息列表以 `reverse` 渲染显示窗口(贴顶分页),与上下文组装窗口刻意
+/// 分离;进入会话先透明收敛到最新消息再显示,滚动路径上零整页 setState。
+library;
+
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -38,12 +44,24 @@ import 'user_screen.dart';
 import 'widgets/message_list.dart';
 import 'widgets/chat_island.dart';
 
+/// 聊天页:一条会话的消息流、输入发送与全部会话侧入口。
+///
+/// 由会话列表页 push 进入。AppBar 提供搜索记录、上下文面板、状态面板与
+/// 会话菜单(技能/Hooks/导出/删除);输入区内嵌模型 chip、上下文使用率
+/// 圆环与发送/中断键。[ChatState.messages] 只是显示窗口(贴顶分页补更早
+/// 历史),上下文组装另读仓库的活跃窗口 —— 翻阅历史不改变发给 LLM 的内容。
+///
+/// 流式回复期间草稿走独立 provider,消息列表单独包一层 Consumer 重建;
+/// 停止经中断键(取消当前轮的中断令牌),重试走消息操作里的重新生成。
 class ChatScreen extends ConsumerStatefulWidget {
+  /// 会话 id;控制器据此 load 显示窗口与上下文基线。
   final int sessionId;
 
   /// 所属角色 id:聊天背景/AppBar 头像按 id 从仓库惰性取列(列表投影已把
   /// avatar/background BLOB 排除,卡里不再自带大图;列里没有则回退卡内已有值)。
   final int characterId;
+
+  /// 路由传入的角色卡快照;进入后按 [characterId] 惰性刷新背景/头像列。
   final CharacterCard character;
   const ChatScreen({
     super.key,
@@ -81,8 +99,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _entrySettling = false;
 
   /// controller 状态是否已是本屏会话的数据(`chat.sessionId == widget.sessionId`)。
-  /// 会话切换窗口内(DR 批起 load 只清元数据、暂存上一会话的转录直到新数据
-  /// 就绪)为 false:旧转录按初始定位隐藏,滚动尺寸通知也不做贴底跟随。
+  /// 会话切换窗口内(load 只清元数据、暂存上一会话的转录直到新数据就绪)为
+  /// false:旧转录按初始定位隐藏,滚动尺寸通知也不做贴底跟随。
   bool _screenDataReady = false;
 
   /// 本屏会话的数据是否已完成过一次进入定位。切换会话时复位。用独立标记而
@@ -115,7 +133,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   /// 「回到顶部」逐页取旧进行中([_scrollToTop]):循环 loadOlder 直到历史
   /// 取尽再跳绝对顶部。期间悬浮导航组常驻显示进度(不随贴顶/自动隐藏消失),
-  /// [_maybeLoadOlder] 的锚定分页也不再并发触发。走 [ValueNotifier]:进度态
+  /// [_maybeLoadOlder] 的分页也不再并发触发。走 [ValueNotifier]:进度态
   /// 只重建导航组那一小块。`dispose` 一并释放。
   final _autoTopRunning = ValueNotifier<bool>(false);
 
@@ -149,9 +167,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   ImageProvider? _assistantAvatarImage;
 
   /// 上下文 token 估算缓存:流式回复期间 build 随每个流式块反复重建,而
-  /// `lastContext` 只在每轮生成开始时被替换(同一轮内是同一个 snapshot 实例)。
-  /// 直接按该实例身份缓存估算结果,实例不变就复用 —— 避免每帧都对完整 system
-  /// + 全部消息做一次 O(总字符数) 的求和。
+  /// `lastContext` 只在每轮生成开始(或 load)时整体替换,同一轮内是同一个
+  /// snapshot 实例。直接按该实例身份缓存估算结果,实例不变就复用 —— 避免每帧
+  /// 都对完整 system + 全部消息做一次 O(总字符数) 的求和。
   ContextSnapshot? _ctxEstimateSnap;
   int _ctxEstimateTokens = 0;
 
@@ -273,7 +291,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // 直接写 ValueNotifier(同值赋值内部会跳过通知):滚动期间不再触发
     // 整页 setState,贴底/贴顶标记只驱动悬浮导航组那一小块重建。
     _syncScrollFlags();
-    // 窗口化加载(DV 批):贴近顶部且还有更早历史时向上分页。
+    // 窗口化加载:贴近顶部且还有更早历史时向上分页。
     // 除 80px 的贴顶判定外,额外在「距顶部约 1.5 个视口」时预取一页 ——
     // 快速上滑不必先撞到旧顶部再等数据。
     if (_nearTop.value || _shouldPrefetchOlder()) _maybeLoadOlder();
@@ -452,6 +470,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  /// 发送当前输入:斜杠命令走命令通道(命令名后的文本作为参数),普通文本
+  /// 交给控制器。只有控制器真正接受才清空输入 —— 忙碌期(生图/压缩)被拒时
+  /// 文字留在输入框,避免用户输入凭空消失。
   void _send() {
     final text = _input.text.trim();
     if (text.isEmpty) return;
@@ -639,6 +660,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   /// 会话内搜索:选中命中消息后先扩展显示窗口(目标可能远在首屏窗口之外),
   /// 再滚到该条并短暂高亮。组装窗口不受影响(见 ChatController.revealMessage)。
+  /// 扩窗期间先压住贴底跟随;定位失败(消息已删/不可见)时恢复原标记并提示。
   Future<void> _openChatSearch() async {
     if (!_screenDataReady) {
       _islandHub.push('会话正在加载,请稍后再试', tone: IslandTone.info);
@@ -712,6 +734,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
+  /// 角色/用户状态卡的通用弹层:入口行点击后先关闭弹层再执行跳转,
+  /// 避免导航压在底单上。
   void _showAvatarStatusCard({
     required ImageProvider? avatar,
     required IconData fallbackIcon,
@@ -763,6 +787,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  /// 导出当前会话为 v4 归档:桌面端直接选路径并流式写出,移动端先写临时
+  /// 文件再由用户选择「保存到本地」或系统分享;取消与失败由
+  /// `saveSessionArchive` 统一提示。
   Future<void> _exportSession() async {
     await saveSessionArchive(
       context,
@@ -777,7 +804,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
-  /// 打开状态面板(AppBar 菜单与后台agent 状态条共用)。
+  /// 打开状态面板(AppBar 状态按钮与灵动岛的状态入口共用)。
   void _openStatus() {
     final character = ref.read(chatControllerProvider).character;
     if (character == null) return; // 尚未加载完成
@@ -789,6 +816,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
+  /// 删除当前会话:确认后级联删除消息与关联行(不可恢复),刷新会话列表
+  /// 并退出聊天页;用户取消则不做任何写入。
   Future<void> _deleteSession() async {
     final confirmed = await showConfirmDialog(
       context,
@@ -832,6 +861,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  /// 按消息保留的原始图片描述重绘;结果(错误或成功提示)经灵动岛闪示,
+  /// 图片原地替换后由列表修订号触发重新读库。
   Future<void> _regenerateImage(Message m) async {
     final id = m.id;
     if (id == null) return;
@@ -845,6 +876,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
+  /// 长按/右键菜单:按消息角色与内容动态给出操作项 —— 空正文不提供复制/
+  /// 编辑,重新生成图片只在助手消息带图且留有原始描述时出现(没有描述就
+  /// 无法重绘);删除恒定提供。
   Future<void> _messageActions(Message m) async {
     final isUser = m.role == 'user';
     final hasText = m.content.trim().isNotEmpty;
@@ -1030,7 +1064,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
     final displayUserName = user.name;
 
-    // 滚动定位判定(DR 批重构,分三段互斥的情形):
+    // 滚动定位判定(三种互斥情形):
     final count = chat.messages.length;
     // controller 状态是否已是本屏会话的数据。会话切换窗口内(load 的元数据
     // 清空在微任务里、数据在若干跳 DB 读之后才落地)state 里暂存的是上一
@@ -1084,7 +1118,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         _scrollToBottom(animate: !chat.streaming, force: fromSend);
       }
     }
-    // 流式草稿(EF 批起在独立 provider,不再驱动整页重建)经 listen 跟随:
+    // 流式草稿在独立 provider(不驱动整页重建),经 listen 跟随:
     // 每个草稿块只触发这条回调(贴底时滚动一下),页面 build 不再陪跑。
     ref.listen<String>(chatDraftProvider, (_, _) {
       if (_screenDataReady &&
@@ -1213,7 +1247,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           Column(
             children: [
               // 顶部状态(错误/用量/后台/记忆提示/命令反馈)全部收纳进消息区悬浮的
-              // 灵动岛(见下方 ChatIsland),Column 里不再有条件插拔的横幅与状态条。
+              // 灵动岛(见下方 ChatIsland),Column 里不按状态插拔横幅,避免布局跳动。
               Expanded(
                 key: const ValueKey('messages-area'),
                 child: Stack(
@@ -1229,7 +1263,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                       child: Opacity(
                         key: const ValueKey('message-list-visibility'),
                         opacity: _entrySettling ? 0 : 1,
-                        // 消息列表单独包一层 Consumer(EF 批):流式草稿独立 provider
+                        // 消息列表单独包一层 Consumer:流式草稿独立 provider
                         // 约 25FPS 一刷,只有这一小块随它重建;页面级 watch 不再被
                         // 草稿拖着整页陪跑(AppBar/输入区/灵动岛/上下文面板)。
                         // 正则/词典/对话高亮等列表专属 watch 也顺势收进来。
@@ -1295,8 +1329,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     ),
                     // 灵动岛:错误警报 / 用量分账(主写·后台·压缩)/ 主写流式与后台
                     // 维护实况 / 后台运行后摘要闪示 / 初始化记忆行动项 / 命令反馈
-                    // 闪示,统一由这颗悬浮胶囊承载(旧的错误横幅、token 用量条、
-                    // 后台状态条、记忆提示条、压缩动画条与反馈 SnackBar 均已退役)。
+                    // 闪示,统一由这颗悬浮胶囊承载。
                     // 贴顶翻历史时收起用量粒(_nearTop 经 AnimatedBuilder 只重建这
                     // 一小块);入场收敛期整粒隐藏。恒驻 Stack 子树(hidden 时渲染
                     // 零高占位),不改变消息区的元素下标,State 稳定。
@@ -1367,8 +1400,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                   ],
                 ),
               ),
-              // /compact 的「压缩中」活动态由灵动岛呈现(原先输入区上方的
-              // _CompactingIndicator 动画条已退役)。
+              // /compact 的「压缩中」活动态由灵动岛呈现。
               // 模型选择 chip + 上下文使用率圆环:内嵌在输入框内部右下角。
               _CommandInputSection(
                 interruptible: chat.streaming || chat.busyCommand != null,
@@ -1403,7 +1435,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 /// 列表(拖动/滚轮/惯性)期间整组自动隐藏,滚动真正停止后延迟恢复(由
 /// ChatScreen 的滚动通知驱动 `_navAutoHidden`)。
 ///
-/// 四个显隐/折叠开关全部是 [ValueListenable] 且由本组通过 [AnimatedBuilder]
+/// 六个显隐/折叠开关全部是 [ValueListenable] 且由本组通过 [AnimatedBuilder]
 /// 自行监听:滚动期间这些开关频繁翻转(贴底/贴顶阈值跨越、自动隐藏/恢复),
 /// 若在 ChatScreen 里走 setState 会连消息列表一起整页重建,滑动掉帧、表现为
 /// 一卡一卡;这里只重建这一小块,滚动路径上零 setState。页面内悬浮的滚动
@@ -1551,6 +1583,11 @@ const double _kInputMaxWidth = 760;
 const double _kWideInputRowMinWidth = 480;
 
 /// 输入区:常驻命令按钮行(可折叠)+ 斜杠命令建议 + 消息输入框 + 发送/中断键。
+///
+/// 输入框底部一行内嵌模型 chip、推理徽标与上下文圆环;窄行(手机)让 chip
+/// 吃满剩余宽度并省略长模型名,宽行(桌面/平板横屏)按内容自适应靠右,
+/// 两者顺序一致。流式或耗时命令进行中发送键换成中断键,中断经控制器取消
+/// 当前轮的中断令牌实现。
 class _CommandInputSection extends ConsumerWidget {
   final bool interruptible;
   final List<SlashCommand> suggestions;
@@ -2076,7 +2113,7 @@ class _AvatarStatusSheet extends StatelessWidget {
   }
 }
 
-/// 输入框控制器:`@技能名` 记号以主题蓝高亮渲染(CY 批)。
+/// 输入框控制器:`@技能名` 记号以主题蓝高亮渲染。
 ///
 /// 只影响显示层 —— [text]/[value] 仍是原始输入,发送管线照常按文本判据
 /// (`contains('@$name')`)识别触发。[skillNames] 由 ChatScreen 每次 build

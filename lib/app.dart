@@ -1,3 +1,6 @@
+/// 应用根组件:主题模式、冷启动动画与首页路由。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'models/app_settings.dart';
@@ -6,6 +9,7 @@ import 'ui/character_screen.dart';
 import 'ui/startup_splash.dart';
 import 'ui/theme/app_theme.dart';
 
+/// MicroScritt 的 MaterialApp 根组件。
 class MicroScrittApp extends ConsumerWidget {
   const MicroScrittApp({super.key});
 

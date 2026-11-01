@@ -1,13 +1,18 @@
+/// 会话级生图指导(`image_guides` 表)的读写,与 memories 对称。
+library;
+
 import '../models/image_guide.dart';
 import 'database.dart';
 
-/// 会话级生图指导读写(schema v38 `image_guides` 表,与 memories 对称):
-/// 每会话至多一行。后台agent 每轮读取最新文本携带进生图维护;用户在状态面板
-/// 手动编辑或 LLM 生成初始指导后落库,下一轮后台即生效(无冻结语义)。
+/// 会话级生图指导仓储:每会话至多一行。
+///
+/// 生图轮每轮读取最新文本注入后台提示词,不冻结;用户在状态面板手动编辑
+/// 或触发生成初始指导后落库,下一轮即生效。
 class ImageGuideRepository {
   final AppDatabase db;
   ImageGuideRepository(this.db);
 
+  /// 会话的生图指导行(空列表 = 尚未生成)。
   Future<List<ImageGuide>> bySession(int sessionId) async {
     final rows = await db.db.query('image_guides', where: 'session_id = ?', whereArgs: [sessionId]);
     return rows.map(ImageGuide.fromMap).toList();
@@ -25,6 +30,7 @@ class ImageGuideRepository {
     });
   }
 
+  /// 清空会话生图指导(删行;下一轮后台不再携带指导)。
   Future<void> clear(int sessionId) async {
     await db.db.delete('image_guides', where: 'session_id = ?', whereArgs: [sessionId]);
   }

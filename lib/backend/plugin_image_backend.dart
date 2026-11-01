@@ -1,3 +1,10 @@
+/// 生图插件宿主:执行同步 JS `step(ctx)` 状态机并提供受限网络能力。
+///
+/// 宿主只执行 `http`/`sleep`/`done`/`error` 四种动作,强制 origin 白名单、
+/// 请求/响应大小上限、总预算与禁重定向;插件抛出的业务错误转成
+/// [ImagePluginException] 透给 UI。
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show HandshakeException, SocketException;
@@ -11,9 +18,15 @@ import '../models/image_plugin.dart';
 import '../models/image_result.dart';
 import 'image_backend.dart';
 
+/// 单步 JS 求值器:输入完整脚本,返回 `step` 结果的 JSON 字符串;
+/// null 表示引擎不可用、执行失败或单步超时。
 typedef ImagePluginEvaluator = Future<String?> Function(String js);
 
+/// 插件执行失败(校验不通过、JS 报错、超时或上游返回错误)。
+///
+/// [message] 面向用户展示,插件作者写的错误文案通常可直接使用。
 class ImagePluginException implements Exception {
+  /// 面向用户的失败原因。
   final String message;
 
   const ImagePluginException(this.message);
@@ -37,9 +50,17 @@ class PluginImageBackend implements ImageBackend {
   /// 5 分钟预算下最多约 1200 步,故上限必须显著高于轮询需求量,否则长排队
   /// 会被误报成「步数超过上限」而不是正常等到出图。真正的耗时兜底是总预算。
   static const int _maxSteps = 2048;
+
+  /// 插件状态/设置序列化后的上限,防止单步上下文无限膨胀。
   static const int _maxStateBytes = 256 * 1024;
+
+  /// 单次 HTTP 请求体与响应体的字节上限。
   static const int _maxBodyBytes = 8 * 1024 * 1024;
+
+  /// 单幅图片解码后的字节上限。
   static const int _maxImageBytes = 8 * 1024 * 1024;
+
+  /// 单次生成允许返回的图片数上限(与配置的每次生图数量一致)。
   static const int _maxImages = 6;
 
   /// 插件可请求的单请求超时上限(下限是 [requestTimeout] 之外的 `timeoutMs`)。
@@ -55,11 +76,22 @@ class PluginImageBackend implements ImageBackend {
     'HEAD',
   };
 
+  /// 本次生图使用的参数与凭据。
   final ImageConfig config;
+
+  /// 当前插件定义;null 或 id 不匹配时拒绝执行。
   final ImagePlugin? plugin;
+
+  /// JS 求值器;null 表示当前平台不支持插件。
   final ImagePluginEvaluator? evaluator;
+
+  /// 测试注入的 HTTP client;生产为 null,每次操作独享新建。
   final http.Client? client;
+
+  /// 单次操作(含全部轮询与重试)的总预算。
   final Duration timeout;
+
+  /// 未声明 `timeoutMs` 的单次 HTTP 请求默认超时。
   final Duration requestTimeout;
 
   const PluginImageBackend({
@@ -80,6 +112,7 @@ class PluginImageBackend implements ImageBackend {
     return _parseImages(done['images']);
   }
 
+  /// 执行插件的 `test` 操作;插件不支持时返回 null。
   Future<ImageProbe?> probe() async {
     if (plugin?.supportsTest != true) return null;
     final done = await _run('test', budget: const Duration(seconds: 30));
@@ -91,6 +124,7 @@ class PluginImageBackend implements ImageBackend {
     );
   }
 
+  /// 执行插件的 `listModels` 操作;插件不支持或结果非法时返回空列表。
   Future<List<String>> listModels() async {
     if (plugin?.supportsListModels != true) return const [];
     final done = await _run('listModels', budget: const Duration(seconds: 30));

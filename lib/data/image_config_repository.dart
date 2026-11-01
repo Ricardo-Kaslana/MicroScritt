@@ -1,21 +1,20 @@
+/// 生图配置(`image_providers` 多行表)的持久化。
+///
+/// 一行一套完整配置(自带 `api_key` 与 `is_active`),凭据互不覆盖;运行
+/// 链路只消费活跃行映射出的中立 [ImageConfig],本仓库不 import 任何生图后端。
+library;
+
 import 'dart:convert';
 
 import 'package:sqflite/sqflite.dart';
 import '../models/image_config.dart';
 import 'database.dart';
 
-/// 生图配置持久化(多行表 `image_providers`,一行一套完整配置)。
+/// 生图配置仓储:多行 CRUD、活跃行切换与运行链路配置投影。
 ///
-/// 每行自带 `api_key` 与 `is_active` —— 两家的凭据因此互不覆盖,切服务不再需要
-/// 重新粘贴密钥(旧单行 `image_configs` 只有一个 `api_key` 列,切一次覆盖一次)。
-///
-/// 与旧表的关系:老表 `image_configs` 原地保留、**不再读写**(与 `backend_configs`
-/// 在 `llm_providers` 落地后的处置一致,降级回旧版时旧代码仍能读到原配置);
-/// v60 迁移把老行搬成第一套并置为活跃。
-///
-/// 运行链路(两个生图后端 / `imageBackendProvider` / 编排器)只消费
-/// `models/` 的中立 [ImageConfig] —— [loadActiveConfig] 把活跃行剥回它,故调用方
-/// 零改动。本仓库只依赖 `models/`,不 import 任何生图后端。
+/// 每行自带凭据与活跃标记,切服务不需要重新粘贴密钥。生图只有单一插件
+/// 路径:[loadActiveConfig] 把活跃行剥回 [ImageConfig],调用方零改动;
+/// 没有活跃行时返回 null,调用方据此跳过生图。
 class ImageConfigRepository {
   final AppDatabase db;
   ImageConfigRepository(this.db);
@@ -120,8 +119,8 @@ class ImageConfigRepository {
     );
   }
 
-  /// 当前活跃配置,剥回运行链路消费的 [ImageConfig]。没有活跃行时返回 null
-  /// (调用方据此跳过生图,与旧单行配置为空时的行为一致)。
+  /// 当前活跃配置,剥回运行链路消费的 [ImageConfig]。没有活跃行时返回 null,
+  /// 调用方据此整轮跳过生图。
   Future<ImageConfig?> loadActiveConfig() async {
     final rows = await db.db.query(_table, where: 'is_active = 1', limit: 1);
     if (rows.isEmpty) return null;
@@ -137,7 +136,7 @@ class ImageConfigRepository {
   );
 
   ImageConfig _configFromRow(Map<String, Object?> r) => ImageConfig(
-    // 老库(无 kind 列 / 值为 null)回落对话式网关,与历史列默认值一致。
+    // kind 脏值/历史协议名一律回落插件路径([ImageBackendKind.plugin])。
     kind: ImageBackendKind.fromWire(r['kind'] as String?),
     baseUrl: r['base_url'] as String,
     apiKey: r['api_key'] as String,
@@ -152,12 +151,14 @@ class ImageConfigRepository {
     steps: r['steps'] as int?,
     artist: r['artist'] as String?,
     noiseSchedule: r['noise_schedule'] as String?,
-    // 老库迁移后 count 为默认 1;防御性钳制到 1-6(设置页同范围)。
+    // count 缺失/脏值回落 1;防御性钳制到 1-6(设置页同范围)。
     count: ((r['count'] as int?) ?? 1).clamp(1, 6),
     pluginId: r['plugin_id'] as String?,
     pluginSettings: _pluginSettingsFromJson(r['settings_json'] as String?),
   );
 
+  // settings_json 在启动水合时即被读取:手改库/坏 JSON/非对象一律回落空表,
+  // 脏值不得炸掉生图配置加载。
   static Map<String, dynamic> _pluginSettingsFromJson(String? source) {
     if (source == null || source.isEmpty) return const {};
     try {

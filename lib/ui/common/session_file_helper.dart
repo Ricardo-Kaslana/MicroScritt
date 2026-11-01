@@ -1,3 +1,10 @@
+/// 大会话归档的保存与分享通道。
+///
+/// 归档含完整对话、变量与图片,体积可达数百 MB:移动端先流式写临时文件,再让
+/// 用户选「保存到本地」(原生按流复制)或系统分享;桌面端写同目录 `.part` 后
+/// 原子替换,失败不留截断的目标文件。
+library;
+
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -28,10 +35,13 @@ bool get _isMobileExport =>
 /// 大会话归档的落盘通道:
 /// - Android/iOS:先流式写临时文件,再让用户选择「保存到本地」(系统另存为
 ///   对话框,由原生侧按流复制)或「分享」(系统分享面板);
-/// - 桌面:`saveFile(bytes: null)` 只返回用户选择的路径(不写文件),归档直接
-///   流式写临时文件后复制过去,失败不会留下截断的目标文件。
+/// - 桌面:`saveFile(bytes: null)` 只返回用户选择的路径(不写文件),归档
+///   流式写到同目录 `.part` 后再 rename 替换,失败不会留下截断的目标文件。
 ///
 /// 返回 false 表示用户取消或失败(已有 SnackBar 反馈)。
+///
+/// 「分享」会把整份归档交给用户选择的目标应用,内容不做脱敏;分享分支的
+/// 临时档要留到接收方读完才可清理,因此不随函数返回删除。
 Future<bool> saveSessionArchive(
   BuildContext context, {
   required String fileName,
@@ -176,6 +186,7 @@ Future<bool> _shareOnMobile(
   );
   if (file == null) return false;
   if (!context.mounted) return true;
+  // 分享的临时档不在返回后删除:接收方可能稍后才读,交给一天后的清扫回收。
   final box = context.findRenderObject();
   final origin = box is RenderBox
       ? box.localToGlobal(Offset.zero) & box.size

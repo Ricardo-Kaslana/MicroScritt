@@ -1,3 +1,7 @@
+/// 页面菜单动作的统一声明:三点菜单与底部操作弹层共用同一个 [MenuAction]
+/// 列表,页面只描述动作,排版与危险色由本文件统一渲染。
+library;
+
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';

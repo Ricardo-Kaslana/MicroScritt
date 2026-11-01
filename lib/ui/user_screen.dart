@@ -1,3 +1,9 @@
+/// 用户设置:用户名与头像,从设置页「用户」进入。
+///
+/// 用户名会注入 Hook 上下文(`__ctx.userName`),默认 USER 替换脚本把正文里
+/// 的 `{{user}}` 替换成它;头像只在用户气泡旁展示,不进上下文。
+library;
+
 import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -9,9 +15,10 @@ import '../state/providers.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/shrink_image.dart';
 
-/// 用户管理:设置用户名 + 上传/更换头像。
-/// 用户名会注入到 Hook 上下文(`__ctx.userName`),默认 USER 替换脚本把正文中
-/// 的 `{{user}}` 替换为这里的用户名;头像用于在用户气泡旁展示。
+/// 用户管理屏:设置用户名与头像,保存后同步内存快照与文本配置文件。
+///
+/// 头像先缩到安全尺寸再落库,避免大图撑爆 Android CursorWindow;
+/// `_saving` 期间禁用保存按钮,防止重复提交。
 class UserScreen extends ConsumerStatefulWidget {
   const UserScreen({super.key});
 
@@ -51,6 +58,8 @@ class _UserScreenState extends ConsumerState<UserScreen> {
     if (shrunk != null) setState(() => _avatarBase64 = shrunk);
   }
 
+  /// 保存用户资料:先落库再刷新内存快照,并回写文本配置文件
+  /// (`syncAppConfigFile` 写失败只打日志,不影响本次保存)。
   Future<void> _save() async {
     final user = UserProfile(name: _name.text.trim(), avatarBase64: _avatarBase64);
     setState(() => _saving = true);

@@ -1,5 +1,10 @@
-/// 会话级生图指导(CW 批,schema v38 `image_guides` 表):后台agent 生成
-/// 场景描述(imagePrompt/imagePrompts)时遵循的可编辑规范文本。
+/// 会话级生图指导模型(`image_guides` 表,schema v38)。
+///
+/// 后台agent 生成场景描述(imagePrompt/imagePrompts)时遵循的可编辑规范文本。
+library;
+
+/// 会话级生图指导(`image_guides` 表):后台agent 生成场景描述时遵循的
+/// 可编辑规范文本。
 ///
 /// 与记忆(`memories` 表)刻意分离:
 /// - 记忆是给**主写模型**看的长期事实,以"第 0 条消息"冻结进主写上下文;

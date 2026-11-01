@@ -1,3 +1,4 @@
+// 显示层正则脚本测试:编译过滤与排序、按实例记忆化、替换引用展开与链式执行。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/display_regex.dart';
 import 'package:microscritt/models/regex_script.dart';

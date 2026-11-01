@@ -1,3 +1,4 @@
+// 用户档案模型与 {{user}} 显示层占位符替换测试。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/user.dart';
 

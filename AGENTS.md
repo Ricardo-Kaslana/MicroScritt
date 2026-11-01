@@ -30,6 +30,7 @@ Data(sqflite)→ Backend(LLM 抽象 + 生图抽象)→ Context(组装管线)→ 
 
 - 约定式提交(`feat:` / `fix:` / `test:` / `refactor:` / `docs:` / `chore:`),中文描述;不附署名尾注。
 - **提交前必须同步文档**:代码变更在提交前把对应内容更新到 `CHANGELOG.md`(Keep a Changelog 格式,Unreleased 段)。`docs/ARCHITECTURE.md` 记录当前架构、不变量与已知局限,仅当批次改变架构或现状时更新对应行。纯文档提交除外。
+- **注释规范**:文件头、公共 API 文档、实现注释与版式的统一要求见 `CONTRIBUTING.md` 的「注释规范」;注释只解释为什么与约束,不逐行复述代码。
 
 ## 常用命令
 

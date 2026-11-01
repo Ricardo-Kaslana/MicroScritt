@@ -1,3 +1,4 @@
+// 测试数据库工厂:内存库 + 清空种子,让仓库/UI 测试从稳定空状态起步。
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/llm_provider_repository.dart';

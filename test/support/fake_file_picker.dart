@@ -1,3 +1,4 @@
+// file_picker 的平台替身:让「选择文件 → 读字节 → 解析 → 落库」链路可测。
 import 'dart:io';
 import 'dart:typed_data';
 

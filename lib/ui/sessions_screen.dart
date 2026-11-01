@@ -1,3 +1,9 @@
+/// 角色会话列表:搜索、新建、重命名、删除与会话归档导入导出。
+///
+/// 导出经系统保存/分享(移动端)或另存为(桌面),归档流式写盘;导入是
+/// 两遍扫描的流式读取,截断/坏档在写库前报错,取消不留下数据。
+library;
+
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -20,7 +26,12 @@ import 'common/scroll_to_top_fab.dart';
 import 'common/session_file_helper.dart';
 import 'common/shrink_image.dart';
 
-/// 角色的会话列表:进入/新建/重命名/导出/删除。
+/// 角色的会话列表,从角色卡点击进入:点击会话进聊天页,搜索匹配标题与
+/// 最近消息。
+///
+/// 新建会话时若角色有开场白,会作为助手首条消息落库;删除会话级联删除
+/// 消息。导入归档可能落到其它(或新建)角色名下,完成后整族会话 provider
+/// 一起失效。
 class SessionsScreen extends ConsumerStatefulWidget {
   final int characterId;
   final CharacterCard character;
@@ -127,6 +138,8 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
     ref.invalidate(sessionInfosProvider(widget.characterId));
   }
 
+  /// 导出会话归档:保存/分享通道交给 `saveSessionArchive`,取消与失败
+  /// 由其统一提示;归档内容由 `SessionExporter` 流式写出。
   Future<void> _export(
     BuildContext context,
     WidgetRef ref,

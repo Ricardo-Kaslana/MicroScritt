@@ -1,19 +1,27 @@
+/// 会话级记忆(`memories` 表,每会话至多一行)的持久化。
+///
+/// 后台快状态轮只读记忆;写入由用户触发的初始化/重生成与手工编辑产生。
+library;
+
 import 'package:sqflite/sqflite.dart';
 
 import '../models/memory.dart';
 import 'database.dart';
 
+/// 记忆仓储:按会话整段读写,支持手工逐条修订。
 class MemoryRepository {
   final AppDatabase db;
   MemoryRepository(this.db);
 
+  /// 会话的记忆行(正常至多一行)。
   Future<List<Memory>> bySession(int sessionId) async {
     final rows = await db.db.query('memories', where: 'session_id = ?', whereArgs: [sessionId], orderBy: 'updated_at');
     return rows.map(Memory.fromMap).toList();
   }
 
   /// 用 [content] 整段替换会话记忆(删旧插新)。
-  /// [inTxn] 非空时在调用方的事务里执行(C3:后台一轮写入原子化);否则自带事务。
+  /// [inTxn] 非空时在调用方的事务里执行(后台一轮的变量/记忆/生图写入
+  /// 需要原子化);否则自带事务。
   Future<void> set(int sessionId, String content, {DatabaseExecutor? inTxn}) async {
     if (inTxn != null) {
       await inTxn.delete('memories', where: 'session_id = ?', whereArgs: [sessionId]);

@@ -1,3 +1,5 @@
+// 主写对话引擎测试:请求为提示词权威、snapshot 只提供纯文本消息数组,
+// hook 改写不被快照盖回。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/context/context_assembler.dart';
@@ -26,9 +28,8 @@ void main() {
       history: const [],
     );
 
-    // The request is authoritative for the prompt (allow afterContextAssembly
-    // / beforeGenerate hooks to rewrite it); the snapshot only supplies the
-    // pure-text message array.
+    // 请求是提示词的权威来源(afterContextAssembly/beforeGenerate hook 可改写);
+    // snapshot 只负责提供纯文本消息数组。
     final events = await engine
         .generate(snapshot, const LlmRequest(model: 'm', systemPrompt: 'REWRITTEN', messages: []))
         .toList();

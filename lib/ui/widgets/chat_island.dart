@@ -1,3 +1,10 @@
+/// 聊天页顶部悬浮的「灵动岛」:汇总错误、三路 token 用量、后台状态、
+/// 记忆初始化与命令反馈。
+///
+/// 同一时刻只显示一条最高优先级的活动,模式切换以形变过渡;瞬态信息按
+/// TTL 自动收敛回底层状态。常驻形态只有用量粒,不占布局(消息从其下方滚过)。
+library;
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -6,26 +13,6 @@ import 'package:flutter/material.dart';
 import '../../engine/background_status.dart';
 import '../../state/chat_controller.dart';
 import '../theme/brand.dart';
-
-/// 聊天页「灵动岛」:悬浮在消息区顶部的深色胶囊,统一承载原本散落在聊天顶部的
-/// 全部裸露状态 —— 错误横幅、token 用量条(主写/后台/压缩三路记账)、后台agent
-/// 状态条(运行时 + 运行后摘要)、「初始化记忆」提示条、/compact 运行动画条,
-/// 以及命令反馈(如压缩成功)的 SnackBar。以上 UI 全部退役,由本组件一处收纳。
-///
-/// 交互语言(对齐 iOS 灵动岛):
-/// - **形变** —— 模式切换时胶囊以 AnimatedSize + 缩放回弹过渡,宽度/高度随内容
-///   连续变化,而不是一行行文本的生灭;
-/// - **优先级** —— 同一时刻只显示最高优先级的活动:命令反馈闪示 > 错误警报 >
-///   压缩中 / 流式中 / 后台维护中(三者在现实中互斥)> 后台结果闪示 > 记忆
-///   初始化行动项 > 用量粒 > 隐藏;
-/// - **瞬态** —— 后台运行后摘要与命令反馈是「闪示」:弹出抢一下注意力,TTL 到了
-///   自动收敛回底层状态(详情可在状态面板回看),聊天顶部不再长期悬着一行字;
-/// - **常驻最小化** —— 用量粒是唯一常驻态,且只在有用量时出现;用户贴顶翻历史时
-///   自动让位(idleHushed),入场收敛期整体隐藏。
-///
-/// 视觉:黑胶囊是灵动岛的辨识度来源,亮暗主题都不翻白;语义色用 iOS 系统调
-/// (蓝=主写、绿=后台、橙=压缩、紫=记忆、红=错误/中断)。悬浮于聊天背景图与
-/// 消息之上,靠阴影与描边保证可读性,不占布局空间(消息从其下方滚过)。
 
 /// 灵动岛语义色(iOS 系统调,与 AppTheme 的 iOS 设计语言同源)。
 /// 三点与胶囊取自 [AppBrand],与图标母版同源。
@@ -42,7 +29,7 @@ const _pillDark = AppBrand.capsuleDark;
 /// 瞬态通知的语义色调。
 enum IslandTone { info, success, danger }
 
-/// 语义色调 → 灵岛语义色。
+/// 语义色调 → 灵动岛语义色。
 Color _toneColor(IslandTone tone) => switch (tone) {
   IslandTone.success => _toneGreen,
   IslandTone.danger => _toneRed,
@@ -119,9 +106,19 @@ enum _IslandMode {
   flashNotice,
 }
 
-/// 聊天页灵动岛。必须作为 Stack 的直接后代使用(内部返回 [Positioned]),
+/// 聊天页灵动岛:必须作为 [Stack] 的直接后代使用(内部返回 [Positioned]),
 /// 悬浮在消息列表顶部,不参与外层 Column 的布局排布。
+///
+/// 优先级(同一时刻只显示一条):命令反馈闪示 > 错误警报 > 压缩/流式/后台
+/// 维护(三者现实互斥) > 后台结果闪示 > 记忆初始化行动项 > 用量粒 > 隐藏。
+/// 后台结果与命令反馈是「闪示」:TTL 到期自动收敛回底层状态,详情在状态
+/// 面板回看;用量粒只在有用量时出现,贴顶翻历史与入场收敛期让位。
+///
+/// 视觉:黑胶囊是辨识度来源,亮暗主题都不翻白;语义色用 iOS 系统调
+/// (蓝 = 主写、绿 = 后台、橙 = 压缩、紫 = 记忆、红 = 错误/中断)。悬浮在
+/// 聊天背景与消息之上,靠阴影与描边保证可读性。
 class ChatIsland extends StatefulWidget {
+  /// 聊天状态快照(错误、流式标记、三路 token 与后台状态);只读。
   final ChatState chat;
 
   /// 「初始化记忆」行动项是否可见(记忆为空 + 未手动关闭 + 后台不在运行)。
@@ -139,14 +136,23 @@ class ChatIsland extends StatefulWidget {
   /// 瞬态通知中枢(命令反馈);null 表示本页没有可闪示的通知源。
   final IslandHub? hub;
 
+  /// 点按后台结果闪示时打开状态面板。
   final VoidCallback onOpenStatus;
+
+  /// 中断正在进行的后台维护。
   final VoidCallback onInterrupt;
+
+  /// 点击「初始化记忆」行动项。
   final VoidCallback onInitMemory;
+
+  /// 关闭记忆初始化提示。
   final VoidCallback onDismissMemoryInit;
+
+  /// 关闭错误警报。
   final VoidCallback onDismissError;
 
-  /// 备用模型一键切换(P1 契约层):[ChatState.fallbackModelHint] 非空时
-  /// 错误横幅渲染「切换备用模型」胶囊按钮;null(无建议/宿主未接)不渲染。
+  /// 备用模型一键切换:[ChatState.fallbackModelHint] 非空时错误横幅渲染
+  /// 「切换备用模型」胶囊按钮;null(无建议或宿主未接线)不渲染。
   final VoidCallback? onSwitchFallbackModel;
 
   const ChatIsland({
@@ -269,10 +275,14 @@ class _ChatIslandState extends State<ChatIsland> {
     super.dispose();
   }
 
-  /// 备用模型建议在场(P1 契约层):错误横幅据此渲染「切换备用模型」胶囊。
+  /// 备用模型建议在场:错误横幅据此渲染「切换备用模型」胶囊。
   bool get _hasFallbackSuggestion =>
       (widget.chat.fallbackModelHint ?? '').isNotEmpty && widget.onSwitchFallbackModel != null;
 
+  /// 按优先级从高到低解析当前要显示的模式。
+  ///
+  /// 判定顺序即优先级,改动时同步 [ChatIsland] 类注释;hidden 最先短路,
+  /// 保证入场收敛期内部定时器仍会被 [_syncAnimations] 停掉。
   _IslandMode _resolve() {
     if (widget.hidden) return _IslandMode.hidden;
     if (widget.hub?.active != null) return _IslandMode.flashNotice;
@@ -366,6 +376,8 @@ class _ChatIslandState extends State<ChatIsland> {
     );
   }
 
+  /// 整粒点击:idle/liveStream/alert 切换明细,后台结果闪示打开状态面板,
+  /// 命令反馈点击收起;行动项与活动态交给各自的按钮命中区。
   void _onTapPill(_IslandMode mode) {
     switch (mode) {
       case _IslandMode.idle:
@@ -377,16 +389,14 @@ class _ChatIslandState extends State<ChatIsland> {
         widget.hub?.dismiss();
       case _IslandMode.alert:
         // 警报粒点开看完整错误:收拢态最多两行,服务端长报错(URL/JSON 体)
-        // 会被省略,而全文此前无处可看(EO 批)。
+        // 会被省略,而全文没有别处可看。
         setState(() => _expanded = !_expanded);
       default:
       // 行动项/活动态:各按钮自有命中区,整粒点击不做事。
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // 岛面
-  // ---------------------------------------------------------------------------
+  // ===== 岛面 =====
 
   Widget _pill(BuildContext context, _IslandMode mode) {
     final dark = Theme.of(context).brightness == Brightness.dark;
@@ -548,7 +558,7 @@ class _ChatIslandState extends State<ChatIsland> {
   }
 
   /// 展开态:三路引擎的分账明细(idle)、流式实况 + 分账(liveStream)或
-  /// 完整错误文本(alert,EO 批)。
+  /// 完整错误文本(alert)。
   Widget _detail(BuildContext context, _IslandMode mode) {
     final chat = widget.chat;
     final labelStyle = TextStyle(
@@ -723,9 +733,7 @@ class _ChatIslandState extends State<ChatIsland> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 零件
-// ---------------------------------------------------------------------------
+// ===== 零件 =====
 
 /// 主写/后台/压缩三路引擎的迷你标识点(蓝绿橙),灵岛的常驻签名。
 class _EngineDots extends StatelessWidget {

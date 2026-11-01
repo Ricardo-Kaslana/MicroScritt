@@ -1,3 +1,4 @@
+// Hooks 管理页:空态、列表启停、删除与新建;内置种子 Hook 由用例自行清空。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,8 +20,8 @@ void main() {
   testWidgets('empty state shows guidance', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      // 默认 USER 替换脚本是全新安装种入的,v15 起 hooks 表非空;
-      // 本测试验证空清单行为,故先清空。
+      // 全新安装会种入两条内置输入改写 Hook(main/jump);本测试验证空清单
+      // 行为,故先清空。
       await db.db.delete('hooks');
     });
     await tester.pumpWidget(harness());
@@ -33,7 +34,8 @@ void main() {
   testWidgets('lists existing hooks with trigger labels and toggles', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      await db.db.delete('hooks'); // 排除全新安装种入的默认 USER 替换 hook
+      // 排除全新安装种入的内置输入改写 Hook。
+      await db.db.delete('hooks');
       await HookRepository(
         db,
       ).insert(const Hook(name: '净化回复', triggerPoint: HookTriggerPoint.afterStream, jsCode: '__ctx.text = "x"'));
@@ -43,7 +45,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('净化回复'), findsOneWidget);
-    // 列表项只显示名称,不再展示触发点标签。
+    // 列表项只显示名称;触发点中文标签只出现在编辑页下拉。
     expect(find.text('流式后(改写回复)'), findsNothing);
 
     await tester.runAsync(() async {
@@ -62,7 +64,8 @@ void main() {
   testWidgets('deletes a hook via the visible row delete button', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      await db.db.delete('hooks'); // 排除全新安装种入的默认 USER 替换 hook
+      // 排除全新安装种入的内置输入改写 Hook。
+      await db.db.delete('hooks');
       await HookRepository(
         db,
       ).insert(const Hook(name: '净化回复', triggerPoint: HookTriggerPoint.afterStream, jsCode: '__ctx.text = "x"'));
@@ -119,6 +122,7 @@ void main() {
     await tester.runAsync(() async {
       await tester.tap(find.widgetWithText(TextButton, '保存'));
       final container = ProviderScope.containerOf(tester.element(find.byType(HooksScreen, skipOffstage: false)));
+      // 保存走真实写库 + provider 失效,完成时机不稳定,按条件轮询。
       for (var i = 0; i < 80; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
         await tester.pump();

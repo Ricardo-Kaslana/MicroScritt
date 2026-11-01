@@ -1,3 +1,4 @@
+// token 简写解析、显示格式化与上下文用量估算测试。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/llm_units.dart';
 

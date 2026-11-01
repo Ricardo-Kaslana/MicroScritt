@@ -1,3 +1,4 @@
+// 条件轮询等待工具:替代固定延时,消除真实 I/O 在慢机器上的偶发失败。
 import 'package:flutter_test/flutter_test.dart';
 
 /// 轮询等待 [condition] 成立,最多 [maxPolls] 次、每次间隔 [interval]。

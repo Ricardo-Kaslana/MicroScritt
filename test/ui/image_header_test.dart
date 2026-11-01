@@ -1,3 +1,5 @@
+// 图片头解析:PNG/JPEG/GIF/WebP/BMP 的宽高读取、宽高比换算、截断/未知
+// 数据回退 null,以及只读文件头解宽高比的磁盘路径。
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';

@@ -1,3 +1,5 @@
+// `imageBackendProvider` 恒路由到 PluginImageBackend(内置协议也是仓库自带
+// 插件),这是"新增生图服务不改调用方"的唯一接缝,单独钉住。
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/image_backend.dart';
@@ -6,8 +8,6 @@ import 'package:microscritt/models/image_config.dart';
 import 'package:microscritt/models/image_plugin.dart';
 import 'package:microscritt/state/providers.dart';
 
-/// `imageBackendProvider` 恒路由到 [PluginImageBackend](内置协议亦是仓库自带
-/// 插件),这是"新增生图服务不改调用方"的唯一接缝,单独钉住。
 void main() {
   const catalog = [
     ImagePlugin(

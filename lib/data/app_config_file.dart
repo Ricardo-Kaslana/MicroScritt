@@ -1,3 +1,9 @@
+/// 文本配置文件 `microscritt-config.json`(用户名 + LLM provider 目录)的读写。
+///
+/// 文件与数据库同目录,启动时以文件为准应用用户名与 provider,UI 修改后
+/// 回写;坏文件只打日志、不改库。文件含明文 API Key,不得随仓库分发。
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -65,7 +71,8 @@ class AppConfigFile {
     await writeSnapshot(db);
   }
 
-  /// 启动入口:文件存在则解析并应用;解析/应用失败只打日志,保留文件、库不变。
+  /// 启动入口:文件存在则解析并应用。解析失败只打日志并保留原文件;
+  /// 应用中途失败同样只打日志,已写入的节不回滚(按节顺序提交)。
   Future<AppConfigApplyResult?> applyIfPresent(AppDatabase db) async {
     final file = File(path);
     if (!await file.exists()) return null;
@@ -90,6 +97,9 @@ class AppConfigFile {
     return _apply(db, snapshot);
   }
 
+  // 应用顺序:用户名 → provider 目录 → 后台模型引用。provider 行按逻辑 id
+  // 匹配更新、缺失的删除,因此 `background_model_id` 需要最后按
+  // (providerId, modelId) 找回新行 id。
   static Future<AppConfigApplyResult> _apply(AppDatabase db, AppConfigSnapshot snapshot) async {
     final users = UserRepository(db);
     var userChanged = false;
@@ -193,6 +203,7 @@ class AppConfigFile {
   }
 }
 
+/// 配置文件的应用结果:哪些节发生了变化、文件里提供了几个 provider。
 class AppConfigApplyResult {
   final bool userChanged;
   final bool llmChanged;
@@ -214,6 +225,8 @@ class AppConfigSnapshot {
 
   const AppConfigSnapshot({this.userName, this.providers});
 
+  /// 严格解析:结构不合法抛 [FormatException]。启动路径会自行吞掉并保留
+  /// 原文件,手动导入则向用户报错。
   static AppConfigSnapshot fromJson(Object? raw) {
     if (raw is! Map<String, dynamic>) {
       throw const FormatException('不是有效的配置文件(缺少顶层对象)');
@@ -280,6 +293,10 @@ class AppConfigSnapshot {
   }
 }
 
+/// 文件中的一个 LLM provider(含模型目录),是落库配置的可编辑镜像。
+///
+/// 逻辑身份是 [providerId];应用时按它匹配既有行,避免重插导致模型 id
+/// 漂移、`background_model_id` 等引用悬空。
 class AppConfigProvider {
   final String providerId;
   final String displayName;
@@ -332,6 +349,8 @@ class AppConfigProvider {
     ]..sort((a, b) => a.position.compareTo(b.position)),
   );
 
+  /// 严格解析单个 provider:`providerId`/`displayName`/`baseUrl` 必须为
+  /// 非空字符串,`apiKey` 缺省按空串;不合法时抛 [FormatException]。
   static AppConfigProvider fromJson(Object? raw, int index) {
     if (raw is! Map<String, dynamic>) throw FormatException('llm.providers[$index] 必须是对象');
     String text(String key, {bool required = true}) {
@@ -416,6 +435,7 @@ class AppConfigProvider {
   };
 }
 
+/// 文件中的一个模型条目;`modelId` 是逻辑身份,`position` 决定下拉顺序。
 class AppConfigModel {
   final String modelId;
   final String displayName;
@@ -435,6 +455,8 @@ class AppConfigModel {
     required this.position,
   });
 
+  /// 严格解析单个模型;`modelId` 缺失即抛 [FormatException],displayName
+  /// 缺省回退到 `modelId`。
   static AppConfigModel fromJson(Object? raw, int index) {
     if (raw is! Map<String, dynamic>) throw FormatException('models[$index] 必须是对象');
     final modelId = raw['modelId'];

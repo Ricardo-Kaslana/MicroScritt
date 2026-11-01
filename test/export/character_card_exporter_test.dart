@@ -1,3 +1,4 @@
+// 角色卡导出测试:头像回填、character_book 以本端条目重写与透传字段合并。
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/export/character_card_exporter.dart';
@@ -86,8 +87,8 @@ void main() {
   });
 
   test('merges captured extra ST fields; modeled fields win on conflict (EJ)', () {
-    // EJ 批:导入时捕获的未建模字段(存 WorldbookEntry.extra)导出时铺回
-    // character_book,建模字段覆盖 —— ST 拿回的专有字段不再凭空丢失。
+    // 导入时捕获的未建模字段(存 WorldbookEntry.extra)导出时铺回
+    // character_book,建模字段优先 —— ST 拿回的专有字段不再凭空丢失。
     final card = CharacterCard.fromJson({'spec': 'chara_card_v2', 'data': {'name': 'Alice'}});
     const entry = WorldbookEntry(
       characterId: 0,

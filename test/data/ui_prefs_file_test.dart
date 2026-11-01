@@ -1,3 +1,4 @@
+// UI 偏好文件:布局往返与坏文件/未知值回落默认(fail-safe)。
 import 'dart:convert';
 import 'dart:io';
 

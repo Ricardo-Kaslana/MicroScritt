@@ -1,3 +1,5 @@
+// 状态面板 widget 测试:后台 agent 开关与参数、变量(权限/回收站)、
+// 记忆与生图指导的人工维护,以及后台摘要的展示形态。
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -27,6 +29,8 @@ import 'package:microscritt/ui/status_screen.dart';
 import '../support/test_database.dart';
 import '../support/wait_until.dart';
 
+/// 可暂停的后台后端替身:generate 挂在 release 上,用来制造"后台结果仍在途
+/// 时用户已改完变量"的竞态,验证旧结果不会覆盖人工修改。
 class _DeferredVariableBackend implements LlmBackend {
   final started = Completer<void>();
   final release = Completer<void>();
@@ -87,10 +91,9 @@ void main() {
       );
       await tester.pump();
 
-      // CW 批起"记忆"不再出现在后台"维护功能"选择区(用户主动维护),
-      // 小节标题各一次;数据文本按实际出现次数断言。
       // 技能自 v37 起是全局目录(设置页管理),状态面板不再有技能小节;
-      // 记忆自 CW 批起退出后台"维护功能"选择区(用户主动维护),只剩小节标题一次。
+      // 记忆改为用户主动维护后退出后台"维护功能"选择区,只剩小节标题一次;
+      // 「变量」出现两次(小节标题 + 维护功能开关名),数据文本按实际次数断言。
       expect(find.text('技能'), findsNothing);
       expect(find.text('剑术'), findsNothing);
       expect(find.text('变量'), findsNWidgets(2));
@@ -359,7 +362,7 @@ void main() {
       );
       await tester.pump();
 
-      // 记忆为空:初始化按钮出现(CW 批起不依赖后台 memory 功能开关)。
+      // 记忆为空:初始化按钮出现(记忆由用户主动维护,不依赖后台功能开关)。
       expect(find.textContaining('尚无记忆'), findsOneWidget);
       expect(find.text('生成初始记忆'), findsOneWidget);
 
@@ -398,7 +401,7 @@ void main() {
         ).insert(const CharacterCard(name: 'Alice'));
         sessionId = await SessionRepository(db).create(charId, 's');
       });
-      // CW 批起记忆是用户主动维护(不再是后台功能):即使后台agent 全关,空记忆的
+      // 记忆是用户主动维护(不是后台功能):即使后台 agent 全关,空记忆的
       // 「生成初始记忆」按钮照常出现。
       const settings = AppSettings(
         backgroundEnabled: false,
@@ -587,7 +590,7 @@ void main() {
     );
     await tester.pump();
 
-    // 状态卡标题 + 默认启用个开关(后台卡的第一个 Switch)。
+    // 状态卡标题与默认启用的开关(后台卡的第一个 Switch)。
     expect(find.text('后台agent'), findsOneWidget);
     final switchWidget = tester.widget<Switch>(find.byType(Switch).first);
     expect(switchWidget.value, isTrue);
@@ -611,8 +614,8 @@ void main() {
     );
     await tester.pump();
 
-    // 后台agent 默认启用 → 出现"维护功能"选择区,两项快状态开关
-    // (技能 v37 迁出;记忆 CW 批起改为用户主动维护,同样迁出;
+    // 后台 agent 默认启用 → 出现"维护功能"选择区,两项快状态开关
+    // (技能 v37 迁出;记忆改为用户主动维护,同样迁出;
     // 桌面面板 2.2 起整体移除)。
     expect(find.text('维护功能'), findsOneWidget);
     // 用 SwitchListTile 内的文本定位,避免与上方"变量/记忆"小节标题撞名。
@@ -622,8 +625,8 @@ void main() {
     expect(find.widgetWithText(SwitchListTile, '变量'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '生图'), findsOneWidget);
 
-    // 2 项维护功能 + 1 项删除前确认 + 2 项上下文锚定。前两者与锚定默认开,
-    // 删除前确认默认关(自动删除 + 回收站可恢复)。
+    // 2 项维护功能 + 1 项删除前确认 + 2 项上下文锚定:除删除前确认外默认全开
+    // (删除前确认默认关,删除直接执行并进回收站,可恢复)。
     final switches = tester.widgetList<SwitchListTile>(
       find.byType(SwitchListTile),
     );
@@ -637,7 +640,7 @@ void main() {
     );
     expect(switches.where((s) => s.value).length, 4);
 
-    // EV 批:上下文锚定小节 —— 角色卡/记忆进入后台上下文开关,默认开。
+    // 上下文锚定小节:角色卡/记忆进入后台上下文开关,默认开。
     expect(find.text('上下文锚定'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '角色卡进入上下文'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '记忆进入上下文'), findsOneWidget);
@@ -939,7 +942,7 @@ void main() {
     );
     await tester.pump();
     expect(find.textContaining('后台调用出错,状态维护已跳过'), findsOneWidget);
-    // 全文(含引擎诊断摘要结尾)可见 —— 灵岛闪示两行省略后的全文回看处。
+    // 失败摘要不折叠,含引擎诊断结尾的全文直接可见(只有成功摘要才折叠成 3 行)。
     expect(find.textContaining(tail), findsOneWidget);
     await tester.runAsync(() => db.db.close());
   });
@@ -1645,7 +1648,7 @@ void main() {
 }
 
 /// 固定后台失败状态的 ChatController 替身:只供状态面板读取 backgroundStatus
-/// 与 backgroundSummary,不触碰任何 repository(EO 批)。
+/// 与 backgroundSummary,不触碰任何 repository。
 class _FailedBgState extends ChatController {
   final ChatState _state;
   _FailedBgState(String summary)
@@ -1669,8 +1672,7 @@ class _SucceededBgState extends ChatController {
   ChatState build() => _state;
 }
 
-/// 只带当前角色 id 的 ChatController 替身:供状态面板按角色取世界书条目
-/// (后台世界书条目多选,EU 批)。
+/// 只带当前角色 id 的 ChatController 替身:供状态面板按角色取后台世界书条目。
 class _CharState extends ChatController {
   final ChatState _state;
   _CharState(int characterId) : _state = ChatState(characterId: characterId);

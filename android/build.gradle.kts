@@ -1,3 +1,4 @@
+// 根工程构建配置:统一仓库、把构建产物集中到仓库根目录的 build/。
 allprojects {
     repositories {
         google()

@@ -1,3 +1,5 @@
+// 聊天页装配与生命周期:消息渲染、背景层与模糊、图片气泡跨重建保帧、
+// 后台生图即时出现、输入行布局与头像状态卡。
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
@@ -50,7 +52,7 @@ Future<void> _pumpUntil(WidgetTester tester, bool Function() condition) async {
   expect(condition(), isTrue);
 }
 
-/// A runtime that evaluates nothing: exercises the hook wiring without any JS.
+/// 空 Hook 运行时:只验证接线,不求值任何 JS。
 class _NoopHookRuntime implements HookRuntime {
   @override
   Future<String?> evaluate(String js) async => null;
@@ -76,6 +78,7 @@ class _WidgetBackgroundImageBackend implements LlmBackend {
   }
 }
 
+/// 记录描述并按固定 PNG 返回的假生图后端(用于图片重新生成断言)。
 class _WidgetRegenImageBackend implements ImageBackend {
   _WidgetRegenImageBackend(this.base64);
   final String base64;
@@ -91,6 +94,8 @@ class _WidgetRegenImageBackend implements ImageBackend {
   }
 }
 
+/// 主写立即回 'reply N',首个后台调用挂起直到 [unblock]:用来断言后台维护
+/// 未收敛时发送键仍可用、第二轮发送不与后台轮串行。
 class _QueuedWidgetBackend implements LlmBackend {
   final release = Completer<void>();
   int mainCalls = 0;
@@ -118,7 +123,7 @@ class _QueuedWidgetBackend implements LlmBackend {
 }
 
 /// 生图挂起直到 [release] 放行:模拟真实云端慢生图(后台轮早已 succeeded,
-/// 图片才姗姗落库)—— A3 解耦后图片就绪得最晚的那条路径。
+/// 图片才姗姗落库)—— 生图与轮次解耦后图片就绪得最晚的那条路径。
 class _WidgetGatedImageBackend implements ImageBackend {
   final String base64;
   final Completer<void> release = Completer<void>();
@@ -205,8 +210,8 @@ void main() {
   testWidgets('chat screen renders messages and streams assistant reply', (
     tester,
   ) async {
-    // openTestDb() uses sqflite_ffi (real isolate I/O), which cannot progress
-    // inside the fake-async test zone; runAsync provides a real-async window.
+    // openTestDb() 走 sqflite_ffi(真实 isolate I/O),在假异步测试区里不会推进;
+    // runAsync 提供真实异步窗口。
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -230,7 +235,7 @@ void main() {
     // 而撞上已 dispose 的 Ref(UnmountedRefException)。
     await _settleChat(tester);
 
-    // NOTE: full streaming assertion requires a mocked repository flow; smoke render only.
+    // 注:完整流式断言需要 mock 仓库流,这里只做冒烟渲染。
     expect(find.byType(ChatScreen), findsOneWidget);
   });
 
@@ -502,10 +507,10 @@ void main() {
   testWidgets(
     'image bubble keeps its decoded frame when the token bar appears on a new turn',
     (tester) async {
-      // 回归防护「发送新消息产生新对话时,已生成的图片重新加载」:发送新消息会触发
-      // token 用量条/后台状态条等条件 sibling 插入到 MessageList 上方。若无稳定 key,
-      // 消息区元素被挤到新下标 → 整个子树重建 → 所有图片气泡 State 丢失 → 重新解码。
-      // 这里直接驱动真实 ChatScreen,验证跨 sibling 插入图片帧不变。
+      // 回归防护「发送新消息产生新对话时,已生成的图片重新加载」:旧实现里 token
+      // 用量条/后台状态条按条件插到消息列表之前,消息区元素被挤到新下标 → 整个子树
+      // 重建 → 图片气泡 State 丢失 → 重新解码。现在这些状态都收进恒驻的灵岛(Stack
+      // 末位、隐藏时零高),位置稳定;本用例直接驱动真实 ChatScreen 守这条不变量。
       late final AppDatabase db;
       late final int sid;
       await tester.runAsync(() async {
@@ -749,9 +754,8 @@ void main() {
       ),
     );
     await _settleChat(tester);
-    // 宽行(EN 批):chip 不再定宽 280,而是按模型名自适应收窄,与使用率圆环
-    // 一起靠右;推理徽标(if any)紧贴 chip 右侧。输入区整体封顶 760 居中,
-    // 不再拉满聊天区。
+    // 宽行:chip 不再定宽 280,而是按模型名自适应收窄,与使用率圆环一起靠右;
+    // 推理徽标(if any)紧贴 chip 右侧。输入区整体封顶 760 居中,不再拉满聊天区。
     expect(chipWidth(), lessThan(280.0), reason: '宽行 chip 应按模型名自适应,不再定宽 280');
     final ringLeft = tester.getTopLeft(find.byType(ContextUsageRing)).dx;
     final chipRight = tester

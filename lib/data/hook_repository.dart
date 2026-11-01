@@ -1,12 +1,20 @@
+/// Hook 脚本(`hooks` 表)的持久化。
+///
+/// 行解析失败(如手改库写入未知 `trigger_point`)只跳过该行并打日志,
+/// 不拖垮管理页或发送管线。
+library;
+
 import 'package:flutter/foundation.dart';
 
 import '../models/hook.dart';
 import 'database.dart';
 
+/// Hook 仓储:管理页 CRUD 与执行管线按触发点取用共用。
 class HookRepository {
   final AppDatabase db;
   HookRepository(this.db);
 
+  /// 某触发点下启用中的 hook,按 id 升序。
   Future<List<Hook>> byTriggerPoint(HookTriggerPoint point) async {
     final rows = await db.db.query('hooks',
         where: 'trigger_point = ? AND enabled = 1', whereArgs: [point.name], orderBy: 'id');

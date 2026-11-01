@@ -1,3 +1,8 @@
+/// 会话内聊天记录搜索页:输入即查(防抖)的只读检索。
+///
+/// 点选命中只回传 messageId,窗口扩展与定位由聊天页完成;本页不写库。
+library;
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -9,10 +14,17 @@ import 'common/app_search_field.dart';
 import 'common/empty_state.dart';
 import 'widgets/rich_message_text.dart';
 
-/// 会话内聊天记录搜索:输入即查(防抖),命中按时间倒序展示。
-/// 点击结果时把 messageId 回传给聊天页,由它完成窗口扩展、定位与高亮。
+/// 会话内聊天记录搜索页:输入即查(220ms 防抖),命中按时间倒序展示。
+///
+/// 检索范围是当前会话的可见聊天行,最多取最新 200 条(取满即显示
+/// 「仅显示最新 200 条」)。点选结果时把 messageId 回传给聊天页,由聊天页
+/// 完成显示窗口扩展、定位与短暂高亮 —— 本页只读,不改动消息、上下文与
+/// 显示窗口。
 class ChatSearchScreen extends ConsumerStatefulWidget {
+  /// 被检索的会话 id。
   final int sessionId;
+
+  /// 助手消息一栏显示的角色名。
   final String characterName;
   const ChatSearchScreen({
     super.key,
@@ -69,6 +81,9 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
     _debounceTimer = Timer(_debounce, () => _search(query));
   }
 
+  /// 执行一次检索:结果落进列表前用请求代次与 mounted 双重校验,丢弃过期
+  /// 响应;SQL 在原始正文上匹配,展示口径剥离标记后仍须包含关键词才算命中
+  /// (用户看不见的文本不作结果,也不做空高亮)。
   Future<void> _search(String query) async {
     final request = ++_request;
     setState(() {
@@ -114,13 +129,14 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
     }
   }
 
-  /// 显示层纯文本:剥内部注入与样式标记、折叠空白 —— 搜索结果片段不应露出
-  /// `<system-reminder>` 或 `<i>` 之类的标记。
+  /// 气泡样式标记与 `<chip>` 的剥离规则(与消息气泡的标记集一致)。
   static final _markupPattern = RegExp(
     r'</?(?:i|b|u|s|mark|c)(?:=#?[0-9a-fA-F]{6})?>|</?chip>',
   );
   static final _whitespace = RegExp(r'\s+');
 
+  /// 显示层纯文本:剥内部注入与样式标记、折叠空白 —— 搜索结果片段不应露出
+  /// `<system-reminder>` 或 `<i>` 之类的标记。
   static String _displayText(String content) => stripSystemReminders(
     content,
   ).replaceAll(_markupPattern, '').replaceAll(_whitespace, ' ').trim();
@@ -251,6 +267,10 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
     );
   }
 
+  /// 命中片段(命中点前后各 36 字符,越界补省略号)与关键词高亮。
+  ///
+  /// 高亮下标按展示文本计算,关键词长度在小写折叠后可能变化,末尾再按
+  /// 片段长度夹一次,避免 substring 越界。
   TextSpan _snippetSpan(_DisplayHit hit, ColorScheme scheme) {
     const radius = 36;
     final display = hit.display;
@@ -287,6 +307,7 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
   }
 }
 
+/// 展示用命中:原始命中、剥离标记后的片段与本次关键词快照。
 class _DisplayHit {
   final MessageSearchHit hit;
   final String display;

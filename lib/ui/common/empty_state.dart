@@ -1,3 +1,9 @@
+/// 列表/面板的空态占位组件。
+///
+/// 只做展示,不判断何时为空;是否给引导按钮由页面传入的 [EmptyState.action]
+/// 决定。
+library;
+
 import 'package:flutter/material.dart';
 
 /// 列表为空时的占位展示:图标(置于柔和圆形底内)+ 标题 + 说明 + 可选操作按钮。

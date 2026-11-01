@@ -1,10 +1,13 @@
-/// 显示层正则脚本(仿 SillyTavern regex 扩展 / RP-Hub 的气泡定制正则):
-/// 对**气泡显示文本**做查找替换,替换串里可写轻量样式标记(如 `<i>…</i>`、
-/// `<c=ff8800>…</c>`)交给 [RichMessageText] 渲染成富文本。
+/// 显示层正则脚本模型(`regex_scripts` 表)。
 ///
-/// 仅作用于显示层:落库与发给 LLM 的内容保持原样(与 `{{user}}` 的
-/// schema v17 决策一致)。作用于上下文(prompt 层)的脚本留待后续批次。
+/// 对**气泡显示文本**做查找替换,替换串里可写轻量样式标记(如 `<i>…</i>`、
+/// `<c=ff8800>…</c>`)交给 `RichMessageText` 渲染成富文本。仅作用于显示层:
+/// 落库与发给 LLM 的内容保持原样。脚本不作用于上下文/提示词层。
+library;
+
+/// 一条用户可编辑的显示层正则脚本。
 class RegexScript {
+  /// 库内自增 id;null 表示尚未落库。
   final int? id;
 
   /// 显示名(管理列表用)。
@@ -17,6 +20,7 @@ class RegexScript {
   /// 以及样式标记。
   final String replace;
 
+  /// 是否启用;停用后不参与显示层替换。
   final bool enabled;
 
   /// 应用顺序(小者先);同序按 id。

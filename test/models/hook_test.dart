@@ -1,3 +1,4 @@
+// Hook 模型测试:map 往返、触发点 wire 名与 enabled 默认值。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/hook.dart';
 

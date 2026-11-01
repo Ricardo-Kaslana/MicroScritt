@@ -1,3 +1,4 @@
+// 名词词典测试:词条收集、长词优先、大小写不敏感与 ASCII 整词匹配。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/glossary.dart';
 import 'package:microscritt/models/worldbook_entry.dart';

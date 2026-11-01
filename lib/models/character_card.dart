@@ -1,15 +1,47 @@
+/// 角色卡领域模型:ST V1/V2/V3 兼容字段、角色卡 extension 与落库序列化。
+///
+/// 序列化分三种口径,不可混用:
+/// - [CharacterCard.toJson]:内存/导入后的完整卡(可能内嵌头像);
+/// - [CharacterCard.toStorageJson]:落库用,剥掉内嵌头像,避免单行超过
+///   Android SQLite 的 CursorWindow 上限;
+/// - [CharacterCard.toExportJson]:导出用,把列里的头像补回卡 JSON。
+///
+/// 头像与背景图始终以 `avatar_base64` / `background_base64` 列为主存储,
+/// 卡 JSON 内的同名字段只作为导入来源与导出还原。
+library;
+
 import 'bubble_style.dart';
 
+/// 角色卡(不可变);未知字段保存在 [raw] 中,导出时原样透传。
 class CharacterCard {
+  /// 角色名。V2/V3 从 `data.name` 读取,V1 兼容 `char_name` 回退。
   final String name;
+
+  /// 角色描述,进入主写 system 的角色段。
   final String description;
+
+  /// 性格设定,进入主写 system 的角色段。
   final String personality;
+
+  /// 场景设定,进入主写 system 的角色段。
   final String scenario;
+
+  /// 首条开场白,新建会话时作为助手首条消息落库。
   final String firstMessage;
+
+  /// 对话示例(`mes_example`),进入主写 system 的示例段。
   final String mesExample;
+
+  /// 角色卡自带 system 提示词,与全局预设按组装规则合并。
   final String systemPrompt;
+
+  /// 剧情后注,置于历史之后、生成之前。
   final String postHistoryInstructions;
+
+  /// 作者备注;V1 兼容 `creatorcomment`。
   final String creatorNotes;
+
+  /// 内嵌头像(base64);落库时剥离,读取时由 `avatar_base64` 列回填。
   final String? avatarBase64;
 
   /// 角色卡专属聊天背景图(base64)。未设置时为 null,开启背景后回退头像。
@@ -42,6 +74,8 @@ class CharacterCard {
   /// 仅定制助手气泡外观,不进上下文)。null/默认 = 应用统一样式。
   final BubbleStyle? bubbleStyle;
 
+  /// 导入时的原始 JSON(含第三方 extensions 与 `character_book` 等未知字段)。
+  /// 导出/落库时以副本合并当前可编辑字段,保证不丢失外部数据。
   final Map<String, dynamic> raw;
 
   const CharacterCard({
@@ -111,8 +145,8 @@ class CharacterCard {
     }
   }
 
-  /// 字段源对象:V2/V3/RP-Hub 用 `data` 信封;扁平 V1 用顶层。规则(对齐参考实现):
-  /// 顶层有 `spec`(V2/V3),或顶层无 name 而 `data` 对象存在(RP-Hub/未标记信封)
+  /// 字段源对象:V2/V3 与部分第三方工具用 `data` 信封;扁平 V1 用顶层。
+  /// 顶层有 `spec`(V2/V3),或顶层无 name 而 `data` 对象存在(未标记信封)
   /// → 用 `data`;否则用顶层(V1 扁平,含 V1 升级残留 `data` 的老卡)。
   static Map<String, dynamic> fieldData(Map<String, dynamic> json) {
     final hasSpec = json['spec'] != null;
@@ -179,8 +213,8 @@ class CharacterCard {
     return const [];
   }
 
-  /// Returns [card] with [avatar] filled in when the card itself carries no
-  /// avatar. Used to fall back to the characters.avatar_base64 column.
+  /// 卡内没有头像时用 [avatar] 回填,已有头像则保持原样。
+  /// 用于读取 `characters.avatar_base64` 列后把头像补回内存卡。
   CharacterCard withAvatar(String? avatar) => avatar == null || avatarBase64 != null
       ? this
       : CharacterCard(
@@ -206,8 +240,8 @@ class CharacterCard {
           raw: raw,
         );
 
-  /// Returns [card] with [background] filled in. Used to fall back to the
-  /// characters.background_base64 column(该列独立于卡 JSON 存背景图)。
+  /// 卡内没有背景图时用 [background] 回填,已有背景图则保持原样。
+  /// 用于读取 `characters.background_base64` 列后把背景补回内存卡。
   CharacterCard withBackground(String? background) => background == null || backgroundBase64 != null
       ? this
       : CharacterCard(

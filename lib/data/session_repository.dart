@@ -1,5 +1,12 @@
+/// 会话(`sessions` 表)与列表聚合查询的持久化。
+///
+/// 持久化每会话的 token 用量;删除会话时手动级联清理依赖行
+/// (sqflite 默认不启用外键级联)。
+library;
+
 import 'database.dart';
 
+/// 一个会话及其累计 token 用量。
 class Session {
   final int id;
   final int characterId;
@@ -15,7 +22,7 @@ class Session {
   final int backgroundOutputTokens;
   final int backgroundCachedInputTokens;
 
-  /// 压缩摘要(compact)调用的 token 用量(D2:主写/后台之外的第三桶)。
+  /// 压缩摘要(compact)调用的 token 用量(主写/后台之外的第三桶)。
   final int compactInputTokens;
   final int compactOutputTokens;
   final int compactCachedInputTokens;
@@ -60,6 +67,7 @@ class SessionInfo {
   });
 }
 
+/// 会话仓储:CRUD、token 用量持久化与列表聚合。
 class SessionRepository {
   final AppDatabase db;
   SessionRepository(this.db);
@@ -133,7 +141,7 @@ class SessionRepository {
   }
 
   /// sqflite 默认不启用外键级联,手动在单事务内清理依赖行(消息/变量/记忆/
-  /// 生图指导)。技能自 v37 起是全局目录,不随会话删除。
+  /// 生图指导)。技能是全局目录,不随会话删除。
   Future<void> deleteWithCascade(int id) async {
     await db.db.transaction((txn) async {
       await txn.delete('messages', where: 'session_id = ?', whereArgs: [id]);

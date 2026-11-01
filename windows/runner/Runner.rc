@@ -1,3 +1,8 @@
+// MicroScritt 的 Windows 版本资源脚本:应用图标、产品名、公司与版本号。
+//
+// 版本号在 CMake 未注入 FLUTTER_VERSION_* 时回退到下面的常量;发布前需与
+// pubspec.yaml 保持一致。
+//
 // Microsoft Visual C++ generated resource script.
 //
 #pragma code_page(65001)

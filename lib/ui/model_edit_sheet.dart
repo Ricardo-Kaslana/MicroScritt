@@ -1,14 +1,21 @@
+/// 模型目录条目的底部弹层表单:模型 ID、展示名、容量、输出上限与温度。
+///
+/// 只做输入与校验,返回 `LlmModelEntry` 由调用方合并进 provider,自身不访问
+/// 仓库。容量与最大输出支持 `128k`、`1m` 简写。
+library;
+
 import 'package:flutter/material.dart';
 import '../models/llm_provider.dart';
 import '../models/llm_units.dart';
 import 'common/form_field.dart';
 
-/// 编辑/新建一个模型目录条目(模型 id / 展示名 / 上下文容量 / 最大输出 / 采样温度)。
+/// 新建/编辑一个模型目录条目(模型 ID / 展示名 / 上下文容量 / 最大输出 /
+/// 采样温度)。
 ///
-/// 直接在当前页表单内编辑,不单独弹页 —— 作为 [ProviderEditScreen] 里的
-/// `showModalBottomSheet` 承载的独立表单。上下文容量与最大输出支持简写,
-/// 如 `128k`、`1m`(见 [parseTokenShorthand])。temperature 为 0–2 之间的浮点
-/// (v56 起),留空 = 走主写默认 0.7。
+/// 作为 `ProviderEditScreen` 的 `showModalBottomSheet` 表单,结果经
+/// `Navigator.pop` 交回调用方合并。上下文容量与最大输出支持 `128k`、`1m`
+/// 简写(见 [parseTokenShorthand]);温度须在 0–2 之间,留空 = 主写默认 0.7,
+/// 校验失败只提示、不关闭弹层。
 class ModelEditSheet extends StatefulWidget {
   final LlmModelEntry? existing;
   const ModelEditSheet({super.key, this.existing});
@@ -111,6 +118,7 @@ class _ModelEditSheetState extends State<ModelEditSheet> {
               lines: 1,
             ),
             const SizedBox(height: 16),
+            // 校验在弹层内完成:失败只提示、不关闭,已输入内容不丢。
             FilledButton(
               onPressed: () {
                 final modelId = _modelId.text.trim();

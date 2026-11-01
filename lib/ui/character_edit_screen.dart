@@ -1,3 +1,10 @@
+/// 角色卡编辑/新建屏:ST V1/V2/V3 兼容字段、头像与聊天背景、气泡样式。
+///
+/// 编辑模式加载原始卡,保存时原样带过界面没有编辑入口的元数据与 `raw`
+/// (含 `character_book` 与未知 extensions),避免编辑一次就丢字段;头像与
+/// 背景先缩放再落库(Android CursorWindow 上限)。
+library;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,7 +21,10 @@ import 'common/shrink_image.dart';
 import 'widgets/message_bubble.dart';
 import 'widgets/rich_message_text.dart';
 
-/// 角色编辑/新建屏。characterId 为 null 时是新建模式。
+/// 角色编辑/新建屏;`characterId` 为 null 时是新建模式。
+///
+/// 从角色列表的编辑动作或「新建角色」进入。加载中显示转圈,保存中禁用
+/// 保存按钮;气泡样式只作用于该角色的助手气泡,不进对话上下文。
 class CharacterEditScreen extends ConsumerStatefulWidget {
   final int? characterId;
   const CharacterEditScreen({super.key, this.characterId});
@@ -46,7 +56,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
 
   /// 编辑模式下加载的原始卡片:保存时把界面上没有编辑入口的元数据字段
   /// (creator/character_version/talkativeness/fav/depth_prompt)原样带过,
-  /// 避免编辑一次就丢字段(导入的卡这些值只在 raw 里)。
+  /// 避免编辑一次就丢字段;`raw` 也随卡回传,合并时保留未知字段。
   CharacterCard? _existing;
 
   bool get _isNew => widget.characterId == null;
@@ -136,9 +146,9 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
 
   void _clearBackground() => setState(() => _backgroundBase64 = null);
 
+  /// 用表单值重建角色卡:编辑模式带上界面没有编辑入口的元数据字段
+  /// (creator/character_version/fav 等),新建模式取默认值。
   CharacterCard _buildCard() {
-    // 编辑模式保留界面上没有编辑入口的元数据字段(导入的卡它们只存在于 raw);
-    // 新建模式取默认值。
     final preserved = _existing;
     return CharacterCard(
       name: _name.text.trim(),
@@ -174,6 +184,8 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
     );
   }
 
+  /// 保存:新建 insert,编辑 update 后失效该 id 的头像缓存;名字为空只提示,
+  /// 不落库也不关闭页面。
   Future<void> _save() async {
     final name = _name.text.trim();
     if (name.isEmpty) {
@@ -264,7 +276,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
             onClear: _clearBackground,
           ),
           const SizedBox(height: 20),
-          // ── 角色名片 ──────────────────────────────────────────
+          // ===== 角色名片 =====
           const SectionHeader('名片', icon: Icons.badge_outlined),
           GroupCard(
             children: [
@@ -278,7 +290,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
             ],
           ),
           const SizedBox(height: 20),
-          // ── 性格与场景 ────────────────────────────────────────
+          // ===== 性格与场景 =====
           const SectionHeader('性格与场景', icon: Icons.psychology_outlined),
           GroupCard(
             children: [
@@ -297,7 +309,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
             ],
           ),
           const SizedBox(height: 20),
-          // ── 对话 ──────────────────────────────────────────────
+          // ===== 对话 =====
           const SectionHeader('对话', icon: Icons.forum_outlined),
           GroupCard(
             children: [
@@ -322,7 +334,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
             ],
           ),
           const SizedBox(height: 20),
-          // ── 高级 ──────────────────────────────────────────────
+          // ===== 高级 =====
           const SectionHeader('高级', icon: Icons.tune_outlined),
           GroupCard(
             children: [
@@ -353,7 +365,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
             ],
           ),
           const SizedBox(height: 20),
-          // ── 气泡样式 ──────────────────────────────────────────
+          // ===== 气泡样式 =====
           const SectionHeader('气泡样式', icon: Icons.chat_bubble_outline),
           _BubbleStyleSection(
             style: _bubbleStyle,

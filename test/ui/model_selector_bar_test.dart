@@ -1,3 +1,5 @@
+// 模型选择条:当前模型 chip、选择弹窗(provider/模型/推理等级)与使用率
+// 圆环的真实锚点/字符估算口径。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,11 +23,13 @@ void main() {
     ),
   );
 
+  /// provider/配置的真实 DB 读取需要 runAsync 窗口,固定延时后补一帧让结果上树。
   Future<void> settle(WidgetTester tester) async {
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pump();
   }
 
+  /// 种入启用中的 provider:首个模型为激活项,第二个只有模型行(可选切换)。
   Future<void> seedProvider() async {
     await LlmProviderRepository(db).saveProvider(
       LlmProviderConfig(

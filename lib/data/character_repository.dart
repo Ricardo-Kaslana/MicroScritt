@@ -1,8 +1,18 @@
+/// 角色卡与世界书的持久化。
+///
+/// data_json 一律经 `CharacterCard.toStorageJson()` 落库(剥掉内嵌头像),
+/// 大列读取一律分块,避免 Android CursorWindow 的单行 2MB 上限。
+library;
+
 import 'dart:convert';
 import '../models/character_card.dart';
 import '../models/worldbook_entry.dart';
 import 'database.dart';
 
+/// 列表投影:角色卡 + 头像/背景是否存在的布尔标记。
+///
+/// [card] 可能被 SQL 兜底裁成只剩名字(超窗行);详情须按 [id] 重新
+/// [CharacterRepository.get]。
 class CharacterRecord {
   final int id;
   final CharacterCard card;
@@ -22,6 +32,7 @@ class CharacterRecord {
   });
 }
 
+/// 角色卡仓储:CRUD、级联删除与列表投影。
 class CharacterRepository {
   final AppDatabase db;
   CharacterRepository(this.db);
@@ -40,10 +51,11 @@ class CharacterRepository {
   /// 用字节而非字符判断,CJK/emoji 卡片不会再"字数看着不多"却撑爆窗口。
   static const int _listJsonByteLimit = 1024 * 1024;
 
+  /// 新建角色卡,返回自增 id。
+  ///
+  /// data_json 用 `toStorageJson()`:内嵌头像只落 `avatar_base64` 列,否则大卡
+  /// 单行超过 Android CursorWindow,列表/详情会整屏失效。
   Future<int> insert(CharacterCard c) async {
-    // data_json 一律用 toStorageJson:大卡原始 JSON 内嵌的整张 base64 头像
-    // 只落 avatar_base64 列,不落 data_json(否则 20MB 卡的单行 >2MB,Android
-    // CursorWindow 读不出来,列表/详情全挂)。头像读取走 [avatarBase64For]。
     return db.db.insert('characters', {
       'name': c.name,
       'avatar_base64': c.avatarBase64,
@@ -68,7 +80,7 @@ class CharacterRepository {
       for (final e in entries) {
         batch.insert('worldbook_entries', {
           'character_id': id,
-          // kind 列为历史遗留(v37 起退役,见 WorldbookRepository 注释),恒写占位。
+          // kind 列为历史遗留(已退役,见 WorldbookRepository 注释),恒写占位。
           'kind': 'rule',
           'name': e.name,
           'key': e.keysWire,
@@ -108,7 +120,7 @@ class CharacterRepository {
 
   /// sqflite 默认不启用外键级联,手动在单事务内清掉角色的一切依赖:
   /// 会话消息/会话变量/会话记忆/生图指导 → 会话 → 世界书 → 角色本身。
-  /// 技能自 v37 起是全局目录,不随角色/会话删除。
+  /// 技能是全局目录,不随角色/会话删除。
   Future<void> deleteWithCascade(int id) async {
     await db.db.transaction((txn) async {
       final sessionIds = (await txn.query(

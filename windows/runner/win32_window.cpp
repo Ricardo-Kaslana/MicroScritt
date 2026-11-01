@@ -1,3 +1,4 @@
+// 高 DPI Win32 窗口基类实现(Flutter Windows runner 模板)。
 #include "win32_window.h"
 
 #include <dwmapi.h>

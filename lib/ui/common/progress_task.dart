@@ -1,3 +1,9 @@
+/// 进度对话框与取消标记的载体。
+///
+/// 取消只置位标记,由任务在阶段边界轮询 [ProgressController.cancelled] 自行
+/// 中止;对话框不可用返回键关闭,保证 finally 的 pop 只执行一次。
+library;
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -13,8 +19,10 @@ class ProgressController {
 
   ProgressController(this.title);
 
+  /// 是否已请求取消;任务在阶段边界轮询它决定是否中止。
   bool get cancelled => _cancelled;
 
+  /// 置取消标记,不直接终止任务(任务可能正处在不可中断的写盘步骤)。
   void requestCancel() => _cancelled = true;
 
   /// [value] 为 null 表示不确定进度。每次调用都会重设进度值 —— 从"读取
@@ -32,7 +40,7 @@ class ProgressController {
   }
 }
 
-/// 显示不可取消(仅"取消"按钮置标记)的进度对话框并执行 [task]。
+/// 显示不可直接关闭的进度对话框并执行 [task](只能点「取消」置标记)。
 ///
 /// 任务结束后无论成功/抛错都会关闭对话框;调用方自行处理 SnackBar。
 Future<T> runWithProgress<T>(

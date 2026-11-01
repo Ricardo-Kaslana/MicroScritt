@@ -1,3 +1,5 @@
+// 文本配置文件 microscritt-config.json 的快照写出、外部编辑应用与 fail-safe 容错。
+// 文件是启动时权威,应用按节提交;坏文件只打日志,库与文件都保持原样。
 import 'dart:convert';
 import 'dart:io';
 
@@ -158,6 +160,7 @@ void main() {
     await UserRepository(db).save(const UserProfile(name: 'Alice'));
     File(file.path).writeAsStringSync('{ this is not json');
 
+    // 坏文件属于 fail-safe 契约:启动路径返回 null,库不被修改,原文件保留。
     expect(await file.applyIfPresent(db), isNull);
     expect(await UserRepository(db).name(), 'Alice');
     expect(File(file.path).readAsStringSync(), '{ this is not json');

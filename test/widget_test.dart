@@ -1,3 +1,4 @@
+// 应用冒烟测试:空库冷启动进入角色列表并显示空态。
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/app.dart';
@@ -8,15 +9,15 @@ import 'support/test_database.dart';
 void main() {
   testWidgets('app boots to character screen', (tester) async {
     late final AppDatabase db;
-    // openTestDb() uses sqflite_ffi (real isolate I/O), which cannot progress
-    // inside the fake-async test zone; runAsync provides a real-async window.
+    // openTestDb() 走 sqflite_ffi 的真实 isolate I/O,在假时钟测试区内不会
+    // 推进;runAsync 提供一段真实异步窗口。
     await tester.runAsync(() async {
       db = await openTestDb();
     });
     await tester.pumpWidget(
       ProviderScope(overrides: [databaseProvider.overrideWithValue(db)], child: const MicroScrittApp()),
     );
-    // Let the charactersProvider future (real isolate I/O) resolve, then settle.
+    // 等 charactersProvider 的真实 isolate I/O 完成,再收敛动画。
     await tester.runAsync(() async {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });

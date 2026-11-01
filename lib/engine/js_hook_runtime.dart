@@ -1,3 +1,9 @@
+/// flutter_js/QuickJS 的 `HookRuntime` 实现。
+///
+/// 求值在独立 isolate 中执行,UI 线程不阻塞;用户脚本受超时与内存上限约束,
+/// 超时、内存爆掉或引擎缺失一律按 hook 失败返回 null,发送管线继续。
+library;
+
 import 'dart:async';
 import 'dart:isolate';
 
@@ -17,7 +23,7 @@ import 'hook_runtime.dart';
 /// 在 [_jsMemoryLimit] 处抛错;两种情况都按"hook 求值失败"返回 null,管线继续,
 /// 绝不让一段脚本永久冻死发送管线或打穿进程内存。
 ///
-/// **平台能力降级**(EL 修):flutter_js 0.8.7 的 Windows bridge DLL 不导出
+/// **平台能力降级**:flutter_js 0.8.7 的 Windows bridge DLL 不导出
 /// `jsSetMemoryLimit` 符号 —— 带 memoryLimit 的构造在 Windows 上直接抛
 /// "Failed to lookup symbol",而求值路径把它静默吞成 null,表现为**所有 hook
 /// (main/jump 输入改写等)静默失效**。因此构造分两档:全约束档失败时回退
@@ -44,6 +50,11 @@ class JsHookRuntime implements HookRuntime {
     return ok ? const JsHookRuntime() : null;
   }
 
+  /// 求值一次 hook 脚本:优先在 isolate 中执行,并叠加 3 倍 [_jsTimeout]
+  /// 的 Dart 竞速超时兜底;isolate 不可用时回退同步求值。
+  ///
+  /// 返回 null 表示超时、脚本报错或引擎缺失;调用方一律按"本 hook 未生效"
+  /// 处理,求值失败绝不炸掉发送管线。
   @override
   Future<String?> evaluate(String js) async {
     try {
@@ -65,7 +76,7 @@ class JsHookRuntime implements HookRuntime {
   static String? _evaluateSync(String js) {
     // 全约束档优先;本平台 bridge 缺 jsSetMemoryLimit 符号时(如 Windows 的
     // flutter_js 0.8.7)回退仅 timeout 档 —— 构造失败绝不能吞成"求值失败",
-    // 那会把所有 hook 静默变 inert(EL 回归的根因)。
+    // 那会把所有 hook 静默变 inert。
     try {
       return _evaluateWith(QuickJsRuntime2(timeout: _jsTimeout, memoryLimit: _jsMemoryLimit), js);
     } catch (_) {

@@ -1,3 +1,9 @@
+/// 世界书条目导入:角色卡 `character_book` 与独立世界书文件两路入口。
+///
+/// 归一化兼容 ST V1/V2/V3 卡与 ST World Info;未建模字段进
+/// [WorldbookEntry.extra],保证导出往返不丢字段。
+library;
+
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -7,31 +13,36 @@ import '../models/worldbook_entry.dart';
 
 /// 世界书条目导入。两个入口:
 ///
-/// - [extract]:从角色卡提取世界书条目(ST/RP-Hub `character_book`);
+/// - [extract]:从角色卡提取世界书条目(ST `character_book`);
 /// - [fromBytes] / [fromJson]:导入**独立世界书文件** —— ST World Info
 ///   (`entries` 对象或数组)、纯条目数组、单个条目对象,以及角色卡 JSON
-///   (自动取其中的 `character_book`,等价于 [extract])。与 [WorldbookExporter]
-///   的 ST 形态互为逆运算,往返不丢建模字段。
+///   (自动取其中的 `character_book`,等价于 [extract])。与
+///   `WorldbookExporter` 的 ST 形态互为逆运算,往返不丢建模字段。
 ///
-/// 归一化规则对齐参考实现(Scritt `src-tauri/src/cards.rs::parse_character_book`):
-/// - entries 来源容错:`character_book.entries` 数组 / `entries` 对象(Object.values)
-///   / `character_book` 本身为数组(RP-Hub app.js 兼容读取);
-/// - keys 兼容数组 / 单字符串 / `key` 字段(ST World Info 的 `key` 也是数组),
-///   按 `,`/`，` 切分并去重,非字符串值转字符串;
-/// - `enabled=false`(ST 卡)或 `disabled=true`/`disable=true`(旧式反布尔 /
-///   ST World Info)的条目按停用状态保真导入(EF 批:旧实现直接丢弃,归档往返/
-///   重导入一次就丢一条内容);
-/// - 按格式原生排序字段(RP-Hub `order` / ST `insertion_order`,另一字段兜底)升序稳定排序;
-/// - 匹配语义提取:`secondary_keys`/`keysecondary`/`selective`/`case_sensitive`/
-///   `caseSensitive`(ST 直连字段)、`match_whole_words`(ST 存于条目 `extensions`,
-///   两级读取)、`use_regex`/`useRegex`(RP-Hub camelCase,双拼写);
-/// - 显示名:`comment`(ST 条目显示名)trim 后写入 `name`,空则不设(UI 回退首关键词),
-///   对齐参考实现 Scritt src-core/lorebook.ts 的 LoreEntry.name。
-/// - 未建模字段(EJ 批):ST 专有字段与 extensions 自定义键原样存入
-///   `WorldbookEntry.extra`,导出时合并回 `character_book`,第三方消费端不丢字段。
-/// 世界书自 v37 起不再有「规则/技能」类型之分:全部条目统一按关键词/常驻触发。
+/// 归一化规则:
+/// - entries 来源容错:`character_book.entries` 数组 / `entries` 对象
+///   (Object.values) / `character_book` 本身为数组(部分第三方工具形态);
+/// - keys 兼容数组 / 单字符串 / `key` 字段(ST World Info 的 `key` 也是
+///   数组),按中英文逗号切分并去重,非字符串值转字符串;
+/// - `enabled=false`(ST 卡)或 `disabled=true` / `disable=true`(旧式反
+///   布尔 / ST World Info)的条目按停用状态保真导入 —— 若直接丢弃,归档
+///   往返或重导入一次就丢一条内容;
+/// - 按来源格式的排序字段(`order` / `insertion_order`,另一字段兜底)
+///   升序稳定排序;导入时该顺序折算为 `position` 序号;
+/// - 匹配语义提取:`secondary_keys`/`keysecondary`/`selective`/
+///   `case_sensitive`/`caseSensitive`(ST 直连字段)、`match_whole_words`
+///   (ST 存于条目 `extensions`,两级读取)、`use_regex`/`useRegex`
+///   (camelCase 双拼写);
+/// - 显示名:`comment`(ST 条目显示名)trim 后写入 `name`,空则不设
+///   (UI 回退首关键词);
+/// - 未建模字段:ST 专有字段与 extensions 自定义键原样存入
+///   [WorldbookEntry.extra],导出时合并回 `character_book`,第三方消费端
+///   不丢字段。
+///
+/// 世界书自 v37 起不再有「规则/技能」类型之分:全部条目统一按关键词/常驻
+/// 触发。
 class WorldbookImporter {
-  /// 从角色卡提取世界书条目(ST/RP-Hub `character_book` → 我们的世界书条目)。
+  /// 从角色卡提取世界书条目(ST `character_book` → 本端世界书条目)。
   static List<WorldbookEntry> extract(CharacterCard card) {
     final raw = card.raw;
     if (raw.isEmpty) return const [];
@@ -127,7 +138,7 @@ class WorldbookImporter {
   static List<WorldbookEntry> _parseBook(Object? book, {required bool isRpHub}) {
     final Object? rawEntries;
     if (book is List) {
-      // `character_book` 本身为数组(RP-Hub 容错形态)。
+      // `character_book` 本身为数组(部分第三方工具的容错形态)。
       rawEntries = book;
     } else if (book is Map<String, dynamic>) {
       rawEntries = book['entries'];
@@ -146,8 +157,8 @@ class WorldbookImporter {
     return _parseItems(items, isRpHub: isRpHub);
   }
 
-  /// 条目列表归一化 + 稳定排序。排序键按来源格式选择:RP-Hub 条目用 `order`
-  /// (无 insertion_order),ST(V1/V2/V3 卡)用 `insertion_order`;另一字段兜底。
+  /// 条目列表归一化 + 稳定排序。排序键按来源格式选择:无 ST 标记的第三方
+  /// 条目用 `order`,ST(V1/V2/V3 卡)用 `insertion_order`;另一字段兜底。
   static List<WorldbookEntry> _parseItems(List<Map<String, dynamic>> items, {required bool isRpHub}) {
     if (items.isEmpty) return const [];
     final primaryOrder = isRpHub ? 'order' : 'insertion_order';
@@ -157,10 +168,10 @@ class WorldbookImporter {
     for (final (i, item) in items.indexed) {
       final content = (item['content'] ?? '').toString();
       if (content.trim().isEmpty) continue;
-      // 停用条目不再丢弃(EF 批):照原 enabled 状态导入 —— 引擎本就不注入
-      // 停用条目,行为等价,而内容不再在"导出→导入"或重导入一次后凭空丢失。
+      // 停用条目照原 enabled 状态导入 —— 引擎本就不注入停用条目,行为等价,
+      // 而内容不会在「导出→导入」或重导入一次后凭空丢失。
       // 无关键词且非常驻的条目同样保留(引擎永不触发,纯惰性数据),避免
-      // 第三方卡里"占位草稿条目"被静默裁剪。
+      // 第三方卡里「占位草稿条目」被静默裁剪。
       indexed.add((i, item));
     }
     // 稳定排序:同 order 保持原始条目序。
@@ -174,7 +185,7 @@ class WorldbookImporter {
     return [for (final (i, (_, item)) in indexed.indexed) _entry(item, i)];
   }
 
-  /// 提取条目里我们**未建模**的字段(EJ 批,存 WorldbookEntry.extra):
+  /// 提取条目里**未建模**的字段(存 [WorldbookEntry.extra]):
   /// ST 专有的 position/probability/selectiveLogic/role/depth/递归标志等与
   /// `extensions` 里的自定义键。建模字段剥离 —— 导出时由建模状态重新生成、
   /// 必须以库中现值为准;sort 用的 order/insertion_order 也剥离(导入时已
@@ -298,7 +309,9 @@ class WorldbookImporter {
     return 0;
   }
 
-  /// RP-Hub 来源识别(水印或专属扩展键;另:无 spec 且顶层无 name 的 data 信封)。
+  /// 无 ST 标记的第三方来源识别(水印或专属扩展键;另:无 spec 且顶层无
+  /// name 的 data 信封)。该来源的排序字段是 `order`、匹配字段用 camelCase
+  /// 拼写。
   static bool _isRpHub(Map<String, dynamic> data, Map<String, dynamic> raw) {
     final ext = data['extensions'];
     if (ext is Map<String, dynamic>) {

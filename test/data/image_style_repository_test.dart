@@ -1,3 +1,4 @@
+// 生图风格预设仓储:字段往返、空值语义与名称唯一约束。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/image_style_repository.dart';

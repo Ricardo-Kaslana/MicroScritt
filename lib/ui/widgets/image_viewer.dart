@@ -1,3 +1,9 @@
+/// 全屏图片查看页:缩放平移、下载保存与可选的删除入口。
+///
+/// 展示用 provider 与保存用原始字节解耦:字节来源直接可用,URL 来源先读
+/// 磁盘缓存、再联网;删除由调用方落库,成功后关闭本页。
+library;
+
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -7,17 +13,18 @@ import '../../backend/image_downloader.dart';
 import '../common/confirm_dialog.dart';
 import '../common/export_helper.dart';
 
-/// 全屏查看一张聊天图片:黑底铺满、双指缩放/平移、点击任意处或右上角关闭按钮退出;
-/// 右上角附**下载**按钮,可把当前图片原始字节存到用户选择的位置。
+/// 全屏查看一张聊天图片:黑底铺满、双指缩放/平移、点击任意处或右上角关闭
+/// 按钮退出;右上角附**下载**按钮,可把原始字节存到用户选择的位置。
 ///
 /// [bytes] 与 [url] 二选一(同时给时优先字节):
-/// - 本地字节(气泡里 base64 解码的结果):直接以内存图解码,不重复读库。
-/// - 远程 URL:与气泡内网络图同一策略 —— 先读 [DiskImageCache],命中则本地解码;
-///   未命中走网络即时展示,并把字节后台写盘,供下一次全屏查看直接读盘。
+/// - 本地字节(气泡里 base64 解码的结果):直接以内存图解码,不重复读库;
+/// - 远程 URL:与气泡内网络图同一策略 —— 先读 [DiskImageCache],命中则本地
+///   解码;未命中走网络即时展示,并把字节后台写盘,供下次查看直接读盘。
 ///
-/// [onDelete] 非空时右上角额外出现**删除**按钮:确认后执行回调并把图片从
-/// 消息里移除;聊天气泡调用方传入"清空该消息图片字段"的落库动作,其他
-/// 入口(角色头像预览等)不传则不显示。
+/// [onDelete] 非空时右上角额外出现**删除**按钮:确认后执行回调,成功后关闭
+/// 本页;聊天气泡传入「清空该消息图片字段」的落库动作,不传则不显示入口。
+///
+/// 返回的 Future 在全屏页关闭时完成。
 Future<void> showImageFullscreen(
   BuildContext context, {
   Uint8List? bytes,
@@ -52,6 +59,7 @@ class _ImageViewerPage extends StatefulWidget {
 }
 
 class _ImageViewerPageState extends State<_ImageViewerPage> {
+  /// 当前展示用的 provider;null = URL 的磁盘缓存仍在读取(显示转圈)。
   ImageProvider? _provider;
 
   /// 图片的**原始字节**(下载用,与展示用的 provider 解耦):字节来源立即可用;
@@ -101,6 +109,8 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
     }
   }
 
+  /// 网络字节后台落盘;下载失败静默放弃(本页已用 [NetworkImage] 展示),
+  /// 下次查看再重试。
   Future<void> _cacheToDisk(String url) async {
     final bytes = await downloadImageBytes(url);
     if (bytes == null || !mounted) return;

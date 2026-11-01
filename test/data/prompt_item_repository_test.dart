@@ -1,3 +1,4 @@
+// 提示词条目仓储:启停过滤、原地更新与旧 kind 值的回退。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/prompt_item_repository.dart';
 import 'package:microscritt/models/prompt_item.dart';
@@ -42,7 +43,7 @@ void main() {
   });
 
   test("legacy kind='memory' rows fall back to rule (kindFrom graceful fallback)", () async {
-    // 历史库可能存有 prompt_items.kind='memory' 的旧行(本批起该枚举值已退役),
+    // 历史库可能存有 prompt_items.kind='memory' 的旧行(该枚举值已退役),
     // 读取时回退为 rule,内容按规则身份继续生效,不抛错、也不让该行凭空消失。
     final db = await openTestDb();
     await db.db.insert('prompt_items', {

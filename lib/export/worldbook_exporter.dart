@@ -1,24 +1,32 @@
+/// 世界书条目的两种序列化形态:独立世界书文件(ST World Info)与角色卡
+/// `character_book` 条目。
+///
+/// 两种形态都先铺 [WorldbookEntry.extra](导入时捕获的未建模字段),建模
+/// 字段再覆盖 —— 用户改过的以库中现值为准,第三方字段原样透传。
+library;
+
 import 'dart:convert';
 
 import '../models/worldbook_entry.dart';
 
 /// 世界书条目序列化。两种输出形态共用一个实现,避免「导入认识、导出不写」的
-/// 字段漂移(历史上 extra 透传字段就吃过这个亏):
+/// 字段漂移(extra 透传字段尤其容易漏):
 ///
 /// - **独立世界书文件**(ST World Info 形态):[export] / [exportJson] / [toStEntry]。
 ///   `entries` 为以序号为键的对象,条目字段用 ST 原生名(`key` / `keysecondary` /
-///   `disable` / `order` / `caseSensitive` / `matchWholeWords`),可被 SillyTavern
-///   的「导入世界书」直接读入,也能被本端 [WorldbookImporter] 无损读回。
-/// - **角色卡 `character_book` 条目**(ST V2 条目形态):[toCardEntry] / [cardBookJson],
-///   字段名 `keys` / `secondary_keys` / `enabled` / `insertion_order` —— 由
-///   `CharacterCardExporter` 与会话导出复用。
+///   `disable` / `order` / `caseSensitive` / `matchWholeWords`),可被 ST 的
+///   「导入世界书」直接读入,也能被本端 `WorldbookImporter` 无损读回。
+/// - **角色卡 `character_book` 条目**(ST V2 条目形态):[toCardEntry] /
+///   [cardBookJson],字段名 `keys` / `secondary_keys` / `enabled` /
+///   `insertion_order` —— 由 `CharacterCardExporter` 与会话导出复用。
 ///
-/// 两种形态都先铺 [WorldbookEntry.extra](导入时捕获的未建模字段),建模字段再覆盖
-/// —— 用户改过的字段以库中现值为准,未建模的原样透传,第三方消费端不丢字段。
+/// 两种形态都先铺 [WorldbookEntry.extra],建模字段再覆盖 —— 用户改过的字段
+/// 以库中现值为准,未建模的原样透传,第三方消费端不丢字段。
 class WorldbookExporter {
   /// 导出为独立世界书文件的 JSON 字符串(ST World Info 形态)。
   static String export(List<WorldbookEntry> entries) => jsonEncode(exportJson(entries));
 
+  /// [export] 的对象形态;会话导出等需要嵌套时复用,避免二次编解码。
   static Map<String, dynamic> exportJson(List<WorldbookEntry> entries) => {
     'entries': {for (final (i, e) in entries.indexed) '$i': toStEntry(e, i)},
   };
@@ -30,7 +38,7 @@ class WorldbookExporter {
   /// ST 的 `order`;ST 原生的 `position` 由 extra 透传,这里不覆写。
   static Map<String, dynamic> toStEntry(WorldbookEntry e, int index) => {
     ...e.extra,
-    // uid 是 ST 条目自身标识,导出按数组序号重写(导入端不读,仅入 extra)。
+    // uid 是 ST 条目自身标识,导出按数组序号重写;导入端不消费该字段。
     'uid': index,
     'key': e.keys,
     if (e.secondaryKeys.isNotEmpty) 'keysecondary': e.secondaryKeys,
@@ -48,7 +56,7 @@ class WorldbookExporter {
     'extensions': {..._extraExtensions(e), 'match_whole_words': e.matchWholeWords},
   };
 
-  /// 角色卡 `character_book` 条目形态(与 [WorldbookImporter] 的读取字段一一对应)。
+  /// 角色卡 `character_book` 条目形态(与导入端读取字段一一对应)。
   static Map<String, dynamic> toCardEntry(WorldbookEntry e, int index) => {
     ...e.extra,
     'comment': e.name,
@@ -63,7 +71,8 @@ class WorldbookExporter {
     if (e.useRegex) 'use_regex': true,
     // 本端扩展:后台锚定选择随卡往返(否则卡导出→导入一次就退回按常驻推断)。
     'background': e.background,
-    // ST 把整词匹配放条目 extensions;另带 camelCase 拼写兜底(RP-Hub 形态)。
+    // ST 把整词匹配放条目 extensions;另带 camelCase 拼写兜底(部分第三方
+    // 工具用该形态)。
     'extensions': {
       ..._extraExtensions(e),
       'match_whole_words': e.matchWholeWords,
@@ -71,6 +80,7 @@ class WorldbookExporter {
     },
   };
 
+  /// 角色卡 `character_book` 容器(`entries` 数组形态)。
   static Map<String, dynamic> cardBookJson(List<WorldbookEntry> entries) => {
     'entries': [for (final (i, e) in entries.indexed) toCardEntry(e, i)],
   };

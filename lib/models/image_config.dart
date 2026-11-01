@@ -1,8 +1,9 @@
-/// 生图配置模型(跨层中立)。Data 持久化它、UI 构造它、`providers.dart` 按
-/// [ImageBackendKind] 路由到具体后端、后端消费它。
+/// 生图配置模型(跨层中立)。
 ///
-/// 抽到 `lib/models/` 是为了守住分层不变量(「持久化层与 LLM/生图层不互相
-/// import」):Data 层不 import 任何后端实现,只认识这份中立模型。
+/// Data 层持久化它、UI 构造它、`providers.dart` 按 [ImageBackendKind]
+/// 路由到插件后端、后端消费它。抽到 `lib/models/` 是为了守住分层不变量
+/// (「持久化层与 LLM/生图层不互相 import」):Data 层不 import 任何后端
+/// 实现,只认识这份中立模型与插件 id。
 library;
 
 /// 内置默认负面提示词(quality/anatomy 防护 tag 集,NovelAI 风格,花括号为
@@ -24,9 +25,12 @@ enum ImageBackendKind {
   static ImageBackendKind fromWire(String? s) => ImageBackendKind.plugin;
 }
 
+/// [ImageBackendKind] 的持久化字面值与界面标签。
 extension ImageBackendKindX on ImageBackendKind {
+  /// 落库/传输用字面值,恒为 `plugin`。
   String get wire => 'plugin';
 
+  /// 设置页展示名。
   String get label => '生图插件';
 }
 
@@ -41,37 +45,62 @@ List<String> imageModelCandidates(ImageBackendKind kind) => const [];
 
 /// 生图服务配置(`image_providers` 一行的内存表示)。
 ///
-/// 字段是两种协议的**并集**:同名参数(size/scale/cfg/sampler/negative/steps/…)
-/// 两侧语义一致,协议差异集中在 [ImageBackendKind] 与各后端自己的请求组装
-/// 上。两个内置协议共用同一套标准参数,`steps` 留空时沿用各自默认(均 28);
-/// `token`/`nocache` 是对话式网关侧未持久化的遗留覆盖项(见仓库自带插件)。
+/// 字段是各协议参数的**并集**:同名参数(size/scale/cfg/sampler/negative/
+/// steps/…)语义一致,协议差异集中在插件 JS 的请求组装上。内置协议共用同一
+/// 套标准参数,`steps` 留空时沿用协议默认值;`token`/`nocache` 是对话式网关
+/// 侧未持久化的遗留覆盖项(见仓库自带插件)。
 class ImageConfig {
+  /// 后端类型;2.3 起只有 [ImageBackendKind.plugin]。
   final ImageBackendKind kind;
+
+  /// 服务根地址;不内置任何第三方端点,由用户填写。
   final String baseUrl;
 
-  /// 唯一的凭据字段。对话式网关走 `Authorization: Bearer sk-…`,Nai2API 把它
-  /// 同时作为 POST body 的 `token` 与轮询的 `x-user-token` 头。两类凭据互不
-  /// 通用,故同一行只承载当前服务的那一把。
+  /// 唯一的凭据字段。各插件把它放进自己的鉴权头/请求体;不同服务的凭据互不
+  /// 通用,故同一份配置只承载当前服务的那一把。
   final String apiKey;
-  final String model;
-  final String? artist;
-  final String? size; // 竖图 | 横图 | 方图
-  final int? scale; // 提示词引导值
-  final double? cfg; // 缩放引导值(可小数,如 0.5)
-  final String? negative;
-  final String? sampler;
-  final int? steps; // 生图步数:1-50(>28 更高扣费档),NULL → 协议默认 28
-  final int? nocache; // 0 命中缓存,1 强制重画
-  final String? noiseSchedule; // 噪声调度,如 karras
-  final String? token; // 对话式网关可选账号密钥覆盖(未持久化)
 
-  /// 每次生图数量(1-6):多张 = 同场景的 N 个**不同画面描述**(由后台引擎
-  /// 展开产出 N 个描述,再逐描述调用 `generateImage`)。
-  /// 两个后端都是每次请求画一张。
+  /// 模型名;留空时由插件 manifest 或 listModels 决定。
+  final String model;
+
+  /// 画师串(可选);空表示不指定。
+  final String? artist;
+
+  /// 画面比例:竖图 / 横图 / 方图。
+  final String? size;
+
+  /// 提示词引导值。
+  final int? scale;
+
+  /// 缩放引导值,可为小数(如 0.5)。
+  final double? cfg;
+
+  /// 负面提示词(用户原始值);空时由上层兜底为 [kDefaultNegativePrompt]。
+  final String? negative;
+
+  /// 采样器名。
+  final String? sampler;
+
+  /// 生图步数(1–50);NULL 表示沿用协议默认值。
+  final int? steps;
+
+  /// 缓存控制:0 命中缓存,1 强制重画。
+  final int? nocache;
+
+  /// 噪声调度,如 karras。
+  final String? noiseSchedule;
+
+  /// 对话式网关的可选账号密钥覆盖(未持久化)。
+  final String? token;
+
+  /// 每次生图数量(1–6):多张 = 同场景的 N 个**不同画面描述**(由后台引擎
+  /// 展开产出 N 个描述,再逐描述调用 `generateImage`)。插件每次请求画一张。
   final int count;
 
-  /// kind=plugin 时使用的插件身份与独立设置;内置协议始终为空。
+  /// 使用的插件 id;内置协议也是插件,因此运行时始终有值。
   final String? pluginId;
+
+  /// 插件 manifest 声明的动态设置表单值(键 → 值)。
   final Map<String, dynamic> pluginSettings;
 
   const ImageConfig({
@@ -109,9 +138,17 @@ class ImageConfig {
 class ImageProviderRecord {
   /// 库内自增 id;0 表示尚未落库(新建)。
   final int id;
+
+  /// 设置页显示名,可被用户修改。
   final String displayName;
+
+  /// 是否为当前使用的配置;同一时刻至多一行为 true。
   final bool isActive;
+
+  /// 列表排序位(升序)。
   final int position;
+
+  /// 实际生图参数。
   final ImageConfig config;
 
   const ImageProviderRecord({

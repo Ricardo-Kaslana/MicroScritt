@@ -1,3 +1,10 @@
+/// 聊天消息气泡:正文、可折叠指令块与图片三态渲染。
+///
+/// 图片按 `messages.image_base64` → 按 id 惰性读库 → 远程 URL 的顺序择一,
+/// 任何网络/解码失败都落静态失败占位,不留无限转圈;所有显示层改写(宏
+/// 替换、显示层正则、折叠)都不回写落库正文。
+library;
+
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
@@ -61,6 +68,7 @@ const double kChatTailRadius = 6;
 /// 消息气泡的共享外壳:统一的外边距 / 内容内边距 / 圆角 / 底纹 / 选中描边。
 /// [MessageBubble] 与流式草稿气泡共用,保证两种气泡长相完全一致。
 class ChatBubbleFrame extends StatelessWidget {
+  /// 用户侧气泡(实心主色 + 白字);false = 助手侧(表面白卡)。
   final bool isUser;
 
   /// 是否组内首条:控制顶部间距(组间拉开、组内收紧)。
@@ -192,7 +200,14 @@ Color resolveAssistantTextColor(ColorScheme scheme, BubbleStyle? style) {
   return scheme.onSurface;
 }
 
+/// 单条消息气泡:正文、图片、分组外观与选中/搜索定位态。
+///
+/// 纯显示组件:正文经 [RichMessageText] 管线渲染,用户侧额外支持可折叠的
+/// `<tag>` 指令块;不修改 [message],复制/编辑/删除/重生成等动作都由上层
+/// 回调触发。图片在 base64、惰性读库与远程 URL 三种来源间择一,详见
+/// [_CachedMemoryImage] / [_LazyMemoryImage] / [_CachedNetworkImage]。
 class MessageBubble extends StatelessWidget {
+  /// 要渲染的消息行(只读,渲染过程不改写)。
   final Message message;
 
   /// 长按回调(复制/编辑/删除/重新生成菜单);null 时不响应长按。
@@ -299,10 +314,7 @@ class MessageBubble extends StatelessWidget {
     final deleteImage = onImageDelete == null || messageId == null
         ? null
         : () => onImageDelete!(messageId);
-    // 气泡内的图片按「显示宽度 × 屏幕像素比」与「图片框高度上限 × 像素比」
-    // 双向封顶解码:移动端不再按桌面 1520 宽整幅解码,竖图也不会解出远超
-    // 520 逻辑高的帧,ImageCache 能多留几张图,长会话滚动回看更少重解码。
-    // 全屏查看器仍使用原始字节。
+    // 缩略解码尺寸上限(见 [_bubbleDecodeSize]);全屏查看器仍用原始字节。
     final decodeSize = _bubbleDecodeSize(context, isUser: isUser);
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -321,7 +333,7 @@ class MessageBubble extends StatelessWidget {
           style: style,
           // 用户与助手气泡都按内容宽度自适应(短消息是小气泡),各自有最大宽度
           // 上限:用户 520/移动满宽,助手 760/移动满宽。约束放在外壳上,
-          // 作用域是**可见气泡**(边距之外),与旧实现的可见上限完全一致。
+          // 作用域是**可见气泡**(边距之外),不把外边距算进上限。
           constraints: BoxConstraints(
             maxWidth: isUser
                 ? userBubbleMaxWidth(context)
@@ -374,8 +386,9 @@ class MessageBubble extends StatelessWidget {
               // 正文渲染走 RichMessageText 显示管线(宏替换 + 正则脚本 +
               // 富文本解析);仅显示层改写,存储/发给 LLM 的内容保持原样。
               // 可见文本为空时组件自身返回零尺寸占位。字体随角色级样式。
-              // 用户气泡额外支持 <tag>…</tag> 折叠段(hook 改写指令的落库
-              // 形态,CZ 批):默认收起为一枚 chip,点击展开/收起 —— 纯显示层。
+              // 用户气泡额外支持 <tag>…</tag> 折叠段(hook 输入改写的落库
+              // 形态,见 [kUserFoldableTagPattern]):默认收起为一枚 chip,
+              // 点击展开/收起,纯显示层。
               if (isUser)
                 _UserMessageBody(
                   content: message.content,
@@ -410,6 +423,7 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
+  /// 重新生图期间在图片上叠半透明遮罩与转圈;其余时刻原样返回。
   Widget _withImageProgress(Widget child) {
     if (!regenerating) return child;
     return Stack(
@@ -703,18 +717,16 @@ const double _maxImageHeight = 520;
 
 /// 按图片固有宽高比自适应形状的图片控件。
 ///
-/// 旧实现把图片固定在 `width: double.infinity, height: 200, fit: BoxFit.cover`:
-/// cover 会把超出框的部分裁掉 —— 竖图截上/下、横图截左/右,这就是"气泡无法根据
-/// 图片形状调节、图片显示不全"。这里通过 ImageStream 解析出图片真实宽高比,让
-/// 气泡按"宽度 + 固有比例"决定高度,完整展示图片;仅当自然高度超过
-/// [_maxImageHeight] 时**按比例收窄宽度**而非压扁高度 —— 框比例始终与图片
-/// 一致,气泡形状贴合图片(生图的方图/竖图不再被撑成"宽框 + 中间一小张图")。
+/// 不能把框固定成 `height: 200 + BoxFit.cover`:cover 会裁掉超出框的边,
+/// 竖图截上下、横图截左右。这里从 ImageStream 取真实尺寸,按「满气泡宽 +
+/// 固有比例」算高;仅当自然高度超过 [_maxImageHeight] 时**按比例收窄宽度**
+/// 而不是压扁高度,框与图片始终同比例,不裁切也不留边。
 ///
-/// 同时用 ImageStreamListener 拿到 [ImageInfo] 后才会按真实比例定高 —— 解码期间
-/// 先用默认方形占位,解码完成 setState 后一次到位,不再闪屏。
+/// 解码完成前用方形占位,拿到 [ImageInfo] 后一次到位;流报错落静态失败
+/// 占位,不自动重试。
 ///
-/// [onTap] 非空时**点击图片**打开全屏查看(气泡单击的"选中消息"手势只作用于
-/// 图片之外的区域,两者不冲突)。
+/// [onTap] 非空时点击图片打开全屏查看;气泡单击的"选中消息"手势只作用于
+/// 图片之外的区域,两者不冲突。
 class _AdaptiveImage extends StatefulWidget {
   final ImageProvider provider;
   final VoidCallback? onTap;
@@ -797,8 +809,8 @@ class _AdaptiveImageState extends State<_AdaptiveImage> {
         }
       },
       onError: (_, __) {
-        // 捕获流错误:网络图拉取失败/本地字节解码异常都落到失败占位,
-        // 不再永远转圈(旧实现 onError 空操作,失败的网络图转圈到天荒地老)。
+        // 捕获流错误:网络拉取失败/本地解码异常都落到失败占位;若省略
+        // onError,失败的网络图会一直转圈,用户永远等不到结果。
         if (mounted) setState(() => _failed = true);
         widget.onLoadFailed?.call();
       },
@@ -830,8 +842,8 @@ class _AdaptiveImageState extends State<_AdaptiveImage> {
         : (widget.initialAspect ?? 1.0);
     return LayoutBuilder(
       builder: (context, constraints) {
-        // 先按"满气泡宽 + 固有比例"算自然高;若超过 [_maxImageHeight],旧实现
-        // 只压高度不压宽度 → 框比例与图比例不再一致,contain 只能左右留边,
+        // 先按"满气泡宽 + 固有比例"算自然高;若超过 [_maxImageHeight],
+        // 只压高度不压宽度会让框比例与图比例不一致,contain 只能左右留边,
         // 气泡变成"宽框 + 中间一小张图"。这里把宽度按同一比例同步收窄:
         // 宽 = 高上限 × 固有比例,框始终与图片同比例,且两维都在上限内。
         var width = constraints.maxWidth;
@@ -863,27 +875,19 @@ class _AdaptiveImageState extends State<_AdaptiveImage> {
   }
 }
 
-/// 气泡里的远程图片(云端 provider 的 image_url;仅历史/无本地字节时用)。
-/// 必须是 StatefulWidget:流式生成期间每次 setState / ChatState.messages 更新
-/// 都会重建整个气泡,若每次都用新的 Image.network,同一 URL 会被反复重新加载
-/// /解码,frameBuilder 会重新走“占位 → 图片”闪一次 —— 表现为“聊天气泡的图片
-/// 每次都要重新加载”。
+/// 气泡里的远程图片(消息只带 `image_url`、无本地字节时的回退)。
 ///
-/// 加载顺序:磁盘缓存命中 → 直接以缓存文件为 `FileImage`(不读进 Dart 堆);
-/// 未命中 → 经 [downloadImageBytes] 一次性下载(30s 超时 + 连接停滞重试一次,杜绝
-/// 裸 `NetworkImage` 无上限的悬挂转圈)—— **拿到字节立即用内存图渲染、后台写盘**,
-/// 之后的渲染都走磁盘文件(FileImage),不依赖网络、也不再读盘重解码。
+/// 必须是 StatefulWidget:流式期间气泡会被高频重建,若每次重建都新建
+/// provider,同一 URL 会反复加载/解码并闪一次「占位 → 图片」。加载顺序:
+/// 1. 磁盘缓存命中 → 以缓存文件建 [FileImage](路径为缓存键、不把字节读进
+///    Dart 堆),只预读文件头取宽高比,让占位框一开始就是正确形状;
+/// 2. 未命中 → 经 [downloadImageBytes] 下载(超时与连接停滞重试都有上限,
+///    见该函数),**拿到字节立即渲染、后台写盘**,后续重建改走磁盘文件;
+/// 3. 下载失败/空 body → 静态失败占位,不留无限转圈。
 ///
-/// 旧实现磁盘命中时把字节读成 `MemoryImage`,每次 State 重建(MemoryImage 按
-/// bytes 身份做缓存键)都会产生新实例 → ImageCache 必然不命中、重新解码。
-/// `FileImage` 以路径为键,滚动重建/重启后都是同一次缓存命中,且
-/// `ImmutableBuffer.fromFilePath` 不占用 Dart 堆。
-///
-/// 旧实现磁盘未命中时直接挂 `NetworkImage` 并后台写盘,**写盘成功也不换 provider**:
-/// 慢速/停滞的原始网络请求会一直占着气泡转圈,而全屏查看器(下载完就换本地 provider)
-/// 早已能显示同一张图 —— 表现为"气泡一直转圈、点开大图却是好的"。这里修复为
-/// 下载完成即换本地 provider,气泡与全屏查看器收敛到同一状态;下载失败(非 200 /
-/// 空 body / 确定拒绝)落失败占位,不再无限转圈。
+/// 下载完成即把 provider 换成本地图,与全屏查看器收敛到同一状态 —— 否则
+/// 慢速或停滞的网络请求会一直占着气泡转圈,点开大图却是好的。缓存文件
+/// 被清理/损坏时最多回退重载一次,避免网络持续失败时循环。
 class _CachedNetworkImage extends StatefulWidget {
   final String imageUrl;
 
@@ -904,6 +908,8 @@ class _CachedNetworkImage extends StatefulWidget {
 
 class _CachedNetworkImageState extends State<_CachedNetworkImage> {
   bool _failed = false;
+
+  /// 当前展示用的 provider;null 表示仍在读盘/下载(显示占位框)。
   ImageProvider? _provider;
 
   /// 从文件头预读的宽高比(解码完成前也能按真实比例占位)。
@@ -918,6 +924,8 @@ class _CachedNetworkImageState extends State<_CachedNetworkImage> {
     _load();
   }
 
+  /// 磁盘优先、网络兜底;每次 await 后都校验 mounted 与 URL 未变,
+  /// 防止旧请求的回调覆盖新图片的状态。
   Future<void> _load() async {
     final url = widget.imageUrl;
     try {
@@ -1012,10 +1020,11 @@ class _CachedNetworkImageState extends State<_CachedNetworkImage> {
   }
 }
 
-/// 气泡里的本地图片(消息库的 image_base64;生成时已下载落库,永不重新加载)。
-/// 与网络图同理:每次重建若重新 safeBase64Decode + Image.memory,整幅图会
-/// 被反复解码。这里把解码结果与 MemoryImage provider 缓存在 State,仅当
-/// base64 真正变化时才重解码,交给 [_AdaptiveImage] 按真实宽高比定高。
+/// 气泡里的本地图片(消息库的 image_base64;生成时已下载落库,不走网络)。
+///
+/// 每次重建若重新 safeBase64Decode + Image.memory,整幅图会被反复解码;
+/// 这里把字节与 MemoryImage provider 缓存在 State,仅当 base64 或解码尺寸
+/// 真正变化时才重算,再交给 [_AdaptiveImage] 按真实宽高比定高。
 class _CachedMemoryImage extends StatefulWidget {
   final String base64;
 
@@ -1127,6 +1136,8 @@ class _LazyMemoryImageState extends State<_LazyMemoryImage> {
     }
   }
 
+  /// LRU 优先,未命中回库;base64 解码放后台 isolate(3MB 级字符串在主线程
+  /// 解码会掉帧)。任何异常都必须落到失败态,否则占位转圈永远不停。
   Future<void> _load() async {
     try {
       final cached = _LazyImageCache.get(widget.messageId, widget.revision);
@@ -1211,11 +1222,9 @@ class _LazyMemoryImageState extends State<_LazyMemoryImage> {
   }
 }
 
-/// 惰性图片字节的静态 LRU:气泡 State 在滚动中会被销毁重建,没有这层缓存
-/// 每次重建都要回库重读 + 重解码。上限按**字节总量**而非张数 —— 生图单张
-/// 1.5~3MB,按张数(旧上限 24 张)可常驻 40~70MB Dart 堆;32MB 封顶后长会话
-/// 滚动回看也不会把图片字节推到失控,逐出仍是最旧优先。
+/// LRU 中的一条图片记录:字节、修订号与已解码的宽高比。
 class _LazyImageEntry {
+  /// 写入时的消息图片修订号;与读取方不一致即视为失效。
   final int revision;
   final Uint8List bytes;
 
@@ -1225,6 +1234,12 @@ class _LazyImageEntry {
   _LazyImageEntry(this.revision, this.bytes, this.aspect);
 }
 
+/// 惰性图片字节的静态 LRU:气泡 State 在滚动中会被销毁重建,没有这层缓存
+/// 每次重建都要回库重读 + 重解码。
+///
+/// 上限按**字节总量**而非张数 —— 生图单张 1.5~3MB,按张数计可轻易常驻
+/// 数十 MB Dart 堆;32MB 封顶后长会话滚动回看也不会把字节推到失控,逐出
+/// 仍是最旧优先。
 class _LazyImageCache {
   static final LinkedHashMap<int, _LazyImageEntry> _map = LinkedHashMap();
   static const _maxBytes = 32 * 1024 * 1024;
@@ -1239,7 +1254,8 @@ class _LazyImageCache {
     return v;
   }
 
-  /// 解码出宽高比后写回(不改变 LRU 顺序以外的任何内容);条目已被逐出则忽略。
+  /// 解码出宽高比后写回并把条目置为最近使用;条目已被逐出或修订号不符
+  /// 时忽略。
   static void putAspect(int id, int revision, double aspect) {
     final v = _map.remove(id);
     if (v == null) return;
@@ -1257,6 +1273,8 @@ class _LazyImageCache {
     if (v != null) _bytes -= v.bytes.length;
   }
 
+  /// 写入(同 id 旧条目先逐出),随后按字节总量裁到上限;单张超上限的
+  /// 极端大图会被自身逐出,不做特判 —— 下次未命中再回库。
   static void put(
     int id,
     int revision,
@@ -1268,8 +1286,6 @@ class _LazyImageCache {
     _bytes += bytes.length;
     while (_bytes > _maxBytes && _map.isNotEmpty) {
       final oldest = _map.keys.first;
-      // 单张超上限的极端大图会被自身逐出:put 之后本次 get 已能命中,
-      // 下次未命中再回库,不做特判。
       _bytes -= _map[oldest]!.bytes.length;
       _map.remove(oldest);
     }

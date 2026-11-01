@@ -1,3 +1,4 @@
+// Windows runner 的控制台与 UTF-8 参数工具声明(Flutter 模板)。
 #ifndef RUNNER_UTILS_H_
 #define RUNNER_UTILS_H_
 

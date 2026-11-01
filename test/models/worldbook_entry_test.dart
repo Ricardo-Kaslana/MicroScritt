@@ -1,3 +1,4 @@
+// 世界书条目模型测试:ST 字段往返、显示标签与 v37 去 kind 兼容。
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';

@@ -1,3 +1,5 @@
+// 生图配置编辑页的通用表单(生图插件是唯一后端):插件预选与保存、
+// 画面风格回填、插件动态字段,以及空插件目录拒绝保存。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,7 +11,6 @@ import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/image_provider_edit_screen.dart';
 import '../support/test_database.dart';
 
-/// 生图配置编辑页(2.3 起统一插件路径的通用表单)。
 void main() {
   late AppDatabase db;
 
@@ -113,7 +114,7 @@ void main() {
     expect(find.text('刷新模型列表'), findsOneWidget);
     expect(find.text('测试连接'), findsOneWidget);
     expect(find.text('画面风格'), findsOneWidget);
-    // 尺寸 / 步数与模型、每次生图数量同级平铺,不再有折叠的「高级参数」。
+    // 尺寸/步数与模型、每次生图数量同级平铺,不存在「高级参数」折叠组。
     expect(find.text('高级参数'), findsNothing);
     expect(field('尺寸'), findsOneWidget);
     expect(field('步数 (steps)'), findsOneWidget);

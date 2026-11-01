@@ -1,3 +1,4 @@
+// 会话导出测试:归档 v4 字段(元数据/用量/消息/会话状态)与未知会话的空信封。
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -40,7 +41,6 @@ void main() {
       access: VariableAccess.readonly,
     );
     await MemoryRepository(db).set(sessionId, '用户喜欢简洁文风');
-    // 全局技能(v37)不再属于任何会话:归档不携带 skills 节。
     await SessionRepository(db).updateTokenUsage(
       sessionId: sessionId,
       inputTokens: 100,
@@ -93,6 +93,7 @@ void main() {
     expect(decoded['variables'], {'hp': '10', 'constant': 'gold'});
     expect(decoded['variableAccess'], {'hp': 'full', 'constant': 'readonly'});
     expect(decoded['memory'], '用户喜欢简洁文风');
+    // 全局技能(v37 起)不属于任何会话,归档不携带 skills 节。
     expect(decoded.containsKey('skills'), isFalse);
   });
 

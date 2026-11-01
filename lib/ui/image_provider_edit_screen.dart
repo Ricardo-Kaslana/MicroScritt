@@ -1,3 +1,9 @@
+/// 生图配置编辑屏:插件选择、连接参数、插件动态字段与画面风格。
+///
+/// 插件字段按 manifest 渲染;保存前校验必填/类型/URL,失败只提示不落库。
+/// 测试连接与刷新模型使用当前表单值,不写库。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'common/form_field.dart';
@@ -10,14 +16,14 @@ import '../state/providers.dart';
 import 'image_plugins_screen.dart';
 import 'image_styles_screen.dart';
 
-/// 生图「尺寸」的全局默认:竖图。缺省按竖图,除非用户在高级参数里显式另选。
+/// 生图「尺寸」的默认值:竖图。下拉里显式改选后以配置值为准。
 const _kDefaultImageSize = '竖图';
 
-/// 新建/编辑一套生图 provider 配置。2.3 起统一走插件路径:选一个已启用插件
-/// (内置协议亦是仓库自带插件),填核心地址/密钥/模型 + 该插件 manifest 声明的
-/// 动态字段;`usesStandardParams` 的插件额外渲染尺寸、步数与画面风格 —— 前三者
-/// 与模型/每次生图数量同级平铺。画师串/采样器/噪声调度/scale/cfg/负面词统一由
-/// 「画面风格」管理,此处不再单独展开,选择风格即回填这六项并随配置落库。
+/// 新建/编辑一套生图配置,从设置页「生图」区进入。2.3 起统一走插件路径:选一个
+/// 已启用插件(内置协议亦是仓库自带插件),填核心地址/密钥/模型 + 该插件
+/// manifest 声明的动态字段;`usesStandardParams` 的插件额外渲染尺寸、步数与
+/// 画面风格。画师串/采样器/噪声调度/scale/cfg/负面词统一由「画面风格」管理,
+/// 此处不单独展开,选择风格即回填这六项并随配置落库。
 class ImageProviderEditScreen extends ConsumerStatefulWidget {
   final ImageProviderRecord? existing;
   const ImageProviderEditScreen({super.key, this.existing});
@@ -110,6 +116,9 @@ class _ImageProviderEditScreenState
     super.dispose();
   }
 
+  /// 按插件 manifest 重建动态字段:布尔/枚举存值,其余用文本控制器;已存值
+  /// 缺失或不合法时回落默认值/空选择。重建前必须释放旧控制器,否则切换插件
+  /// 会泄漏。
   void _initializePluginFields(
     ImagePlugin? plugin, {
     Map<String, dynamic>? existing,
@@ -168,6 +177,9 @@ class _ImageProviderEditScreenState
     });
   }
 
+  /// 把插件字段收成 `pluginSettings`:整数/数值无法解析、必填为空、URL 字段
+  /// 不是有效 HTTP(S) 地址时抛 `FormatException`,由调用方转成 SnackBar 并
+  /// 阻止落库。表单把 required 当硬性校验,宿主运行时不代插件做业务校验。
   Map<String, dynamic> _pluginSettingsForSave(ImagePlugin plugin) {
     final settings = <String, dynamic>{};
     for (final field in plugin.fields) {
@@ -231,6 +243,8 @@ class _ImageProviderEditScreenState
     );
   }
 
+  /// 用当前表单值构造一次性插件后端;JS runtime 不可用(如 iOS)返回 null,
+  /// 由调用方提示「当前平台无法运行 JS 生图插件」。
   PluginImageBackend? _transientBackend(ImagePlugin plugin) {
     final runtime = ref.read(hookRuntimeProvider);
     if (runtime == null) return null;
@@ -336,6 +350,8 @@ class _ImageProviderEditScreenState
     return text.endsWith('/') ? text.substring(0, text.length - 1) : text;
   }
 
+  /// 用当前表单值拉取模型列表(不落库);成功后若当前模型不在列表内则改选
+  /// 第一个,空列表与异常都只是 SnackBar 提示,不阻塞编辑。
   Future<void> _refreshImageModels() async {
     final plugin = _pluginById(ref.read(imagePluginsProvider), _pluginId);
     if (plugin == null) return _showSnack('请先选择生图插件');
@@ -364,6 +380,8 @@ class _ImageProviderEditScreenState
     }
   }
 
+  /// 用当前表单值调用插件的 test 操作(不落库);插件未提供测试时给出说明,
+  /// 失败只提示不断言配置可用。
   Future<void> _testImageConnection() async {
     final plugin = _pluginById(ref.read(imagePluginsProvider), _pluginId);
     if (plugin == null) return _showSnack('请先选择生图插件');
@@ -395,6 +413,8 @@ class _ImageProviderEditScreenState
     }
   }
 
+  /// 保存配置:校验名称/插件/地址与插件字段;字段校验失败只提示,不落库也
+  /// 不关闭页面。成功后重新水合活跃配置并刷新列表。
   Future<void> _save() async {
     final name = _displayName.text.trim();
     if (name.isEmpty) return _showSnack('请填写配置名称');
@@ -452,6 +472,8 @@ class _ImageProviderEditScreenState
       ...customStyles,
       ...kImageStylePresets,
     ];
+    // 自定义风格异步加载,首帧后再补一次匹配;只回填已保存配置,新建配置
+    // 不擅自选中风格(`_customStyleMatched` 保证只跑一次)。
     if (selected?.usesStandardParams == true &&
         !_customStyleMatched &&
         customStyles.isNotEmpty) {

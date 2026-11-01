@@ -1,3 +1,4 @@
+// 角色列表页 widget 测试:空态、卡片/网格布局、头像惰性加载与刷新、PNG 导入预览。
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;

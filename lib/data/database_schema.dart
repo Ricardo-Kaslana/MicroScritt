@@ -1,8 +1,13 @@
 part of 'database.dart';
 
+// 基线建表 DDL:全新安装(及旧版本库归档重建)的唯一 schema 来源。
+//
+// 表结构就是当前 `schemaVersion` 的完整形态,不存在增量迁移链;建表后调用
+// database_seeds.dart 的种子函数预填默认数据。改 schema = 改这里的 DDL +
+// 递增 `AppDatabase.schemaVersion`,并补 test/data/database_open_test.dart 断言。
+
 /// 全新安装的建表 DDL(`AppDatabase._onCreate` 委托至此)。
-/// 表结构以「v2 起的增量迁移叠加到当前版本」的最终形态为准;建表后调用
-/// database_seeds.dart 的幂等种子函数预填默认数据(与升级路径共用同一族)。
+/// 建表后调用 database_seeds.dart 的幂等种子函数预填默认数据。
 Future<void> _createSchema(Database db) async {
   await db.execute('''
       CREATE TABLE characters (
@@ -56,7 +61,7 @@ Future<void> _createSchema(Database db) async {
         enabled INTEGER NOT NULL DEFAULT 1
       )
     ''');
-  // v60 起生图配置多行化:一行一套完整配置(自带 api_key 与 is_active),
+  // 生图配置多行:一行一套完整配置(自带 api_key 与 is_active),
   // 运行链路只消费"活跃那一套"。
   await db.execute('''
       CREATE TABLE image_providers (

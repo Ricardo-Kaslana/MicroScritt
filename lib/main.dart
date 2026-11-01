@@ -1,3 +1,7 @@
+/// 应用入口:初始化数据库、文本配置、LLM/生图配置与 JS Hook 运行时,
+/// 再通过 Riverpod overrides 启动界面。
+library;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,7 +21,7 @@ import 'state/providers.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Desktop (and any non-mobile) uses FFI; mobile uses the native sqflite plugin.
+  // 桌面端(以及所有非移动平台)使用 FFI;移动端使用原生 sqflite 插件。
   if (!(await _isMobile())) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
@@ -44,9 +48,8 @@ Future<void> main() async {
   // UI 偏好(角色列表布局):坏文件一律回落默认,启动不因它失败。
   final uiPrefsFile = await UiPrefsFile.openDefault();
   final uiPrefs = await uiPrefsFile.read();
-  // Wire a real JS hook runtime. Non-fatal: if the native QuickJS bridge can't
-  // load on this platform, leave hookRuntimeProvider null and the app still
-  // boots (hooks are simply inert).
+  // 接线真实 JS Hook 运行时。非致命:原生 QuickJS 桥接库加载失败时保持
+  // hookRuntimeProvider 为 null,应用仍可启动(hooks 只是不生效)。
   final hookRuntime = await _createHookRuntime();
   final app = ProviderScope(
     overrides: [
@@ -74,11 +77,12 @@ Future<void> main() async {
   runApp(app);
 }
 
-/// Instantiates the desktop QuickJS runtime; returns null if it can't be built
-/// (e.g. missing native bridge), so app boot never depends on the JS engine.
-/// 探测走 [JsHookRuntime.probe] —— 与求值同一条构造降级路径(EL 修):旧的
-/// "无参构造探活"检测不出 bridge 缺 jsSetMemoryLimit 符号的平台(求值档构造
-/// 失败被吞成 null,hook 全部静默失效),probe 则用与生产一致的构造档。
+/// 构造桌面 QuickJS 运行时;不可用时返回 null,启动不依赖 JS 引擎。
+///
+/// 探测走 [JsHookRuntime.probe]:与求值使用同一条构造降级路径。旧的
+/// 「无参构造探活」检测不出 bridge 缺 `jsSetMemoryLimit` 符号的平台
+/// (求值档构造失败被吞成 null,hook 全部静默失效),probe 则用与生产
+/// 一致的构造档。
 Future<HookRuntime?> _createHookRuntime() async {
   final runtime = await JsHookRuntime.probe();
   if (runtime == null) {

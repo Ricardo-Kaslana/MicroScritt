@@ -1,3 +1,10 @@
+/// 显示层正则脚本管理页与编辑屏(含「试一试」实时预览)。
+///
+/// 脚本只对气泡显示文本做查找替换,替换串可带样式标记(``<i>``、
+/// ``<c=ff8800>`` 等)渲染成富文本;落库正文与发给 LLM 的内容永不改写。
+/// 导入按 name 去重、同名跳过,position 按文件保留。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../engine/display_regex.dart';
@@ -14,11 +21,15 @@ import 'common/resource_io.dart';
 import 'common/searchable_list.dart';
 import 'common/section_header.dart';
 
-/// 正则脚本管理:对气泡显示文本做查找替换,替换串可带样式标记(``<i>``、
-/// ``<c=ff8800>`` 等)渲染成富文本。仅影响显示,不改写落库与发给 LLM 的内容。
+/// 正则脚本列表页(设置页「内容与扩展 · 正则脚本」入口)。
+///
+/// 对气泡显示文本做查找替换,替换串可带样式标记(``<i>``、``<c=ff8800>``
+/// 等)渲染成富文本。仅影响显示,不改写落库与发给 LLM 的内容。页首另有
+/// 内置对话高亮总开关 —— 那是渲染管线内建行为,不是正则脚本。
 class RegexScriptsScreen extends ConsumerWidget {
   const RegexScriptsScreen({super.key});
 
+  /// 切换脚本启用状态:整条更新后失效列表(停用脚本不再参与替换)。
   Future<void> _toggle(WidgetRef ref, RegexScript s) async {
     final id = s.id;
     if (id == null) return;
@@ -28,6 +39,7 @@ class RegexScriptsScreen extends ConsumerWidget {
     ref.invalidate(regexScriptsProvider);
   }
 
+  /// 删除脚本:确认后直接删行,不再参与任何气泡的显示层替换。
   Future<void> _delete(
     BuildContext context,
     WidgetRef ref,
@@ -53,6 +65,7 @@ class RegexScriptsScreen extends ConsumerWidget {
     await ref.read(appSettingsRepositoryProvider).save(updated);
   }
 
+  /// 导出全部脚本:信封保留 position(应用顺序),不含库内 id。
   Future<void> _exportJson(BuildContext context, WidgetRef ref) async {
     final items = await ref.read(regexScriptRepositoryProvider).all();
     if (!context.mounted) return;
@@ -63,6 +76,8 @@ class RegexScriptsScreen extends ConsumerWidget {
     );
   }
 
+  /// 导入脚本:结构错误整份拒绝;按 name 去重、同名跳过,position 按文件
+  /// 保留(直写表,绕过仓库「新脚本排到末尾」的语义)。
   Future<void> _importJson(BuildContext context, WidgetRef ref) async {
     await importResourceFile(
       context,
@@ -190,8 +205,13 @@ class RegexScriptsScreen extends ConsumerWidget {
   }
 }
 
-/// 脚本新建/编辑屏:查找正则 + 替换串 + 试一试预览(实时应用当前表单值)。
+/// 脚本新建/编辑屏:查找正则 + 替换串 + 样式标记提示 + 试一试预览。
+///
+/// 预览用当前表单值实时编译,正则非法时显示错误而不渲染;保存前再次校验
+/// 正则可编译,非法则拒绝落库(运行期同样会静默跳过坏脚本,不让一条脚本
+/// 拖垮整个气泡渲染)。直接返回即丢弃未保存内容。
 class RegexScriptEditScreen extends ConsumerStatefulWidget {
+  /// null 表示新建;非 null 时以该行为初值编辑。
   final RegexScript? script;
   const RegexScriptEditScreen({super.key, this.script});
 
@@ -202,7 +222,7 @@ class RegexScriptEditScreen extends ConsumerStatefulWidget {
 
 class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
   // 新建脚本的默认预填与模板 chip 全部直接引用默认种子常量,种子再改版时
-  // 页面自动跟随,不再出现"手写副本与种子脱节"的漂移。
+  // 页面自动跟随,不会出现「手写副本与种子脱节」的漂移。
   static RegexScript get _templateSeed =>
       kDefaultRegexScriptSeeds.firstWhere((s) => s.name == '斜体动作');
   static String get _templateFind => _templateSeed.findRegex;
@@ -272,6 +292,8 @@ class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
     });
   }
 
+  /// 保存前校验名字非空与正则可编译;position 沿用既有行(新脚本由仓库
+  /// 排到列表末尾),保存后失效列表并返回。
   Future<void> _save() async {
     if (_name.text.trim().isEmpty) {
       ScaffoldMessenger.of(

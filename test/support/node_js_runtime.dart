@@ -1,3 +1,4 @@
+// Node.js 求值器:在 flutter test 中真实执行生图插件的同步 JS。
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';

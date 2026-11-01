@@ -1,3 +1,9 @@
+/// 长列表的「回到顶部」浮动按钮。
+///
+/// 只监听外部 [ScrollController] 做显示切换与滚回顶部,列表内容与滚动行为
+/// 仍由页面控制。
+library;
+
 import 'package:flutter/material.dart';
 
 /// 长列表的「回到顶部」小按钮:滚动超过 [showAfter] 后出现,隐藏时零高度。

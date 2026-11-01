@@ -1,3 +1,5 @@
+// 会话导入测试(整串入口):export → import 全环往返、旧版本归档兼容与
+// 变量权限回落。
 import 'dart:convert';
 import 'dart:io';
 
@@ -30,7 +32,7 @@ void main() {
     final charId = await CharacterRepository(source).insert(
       const CharacterCard(name: 'Alice', description: 'knight')
           .withAvatar('aGVsbG8=')
-          // 背景图(EF 批):随档导出/导入往返(卡 JSON 不携带背景,归档单列带)。
+          // 背景图随档往返:卡 JSON 不携带背景,归档以独立顶层键携带。
           .withBackground('YmFjaw=='),
     );
     // 角色配两条世界书:验证随卡导出/导入还原(以本端当前条目为准)。
@@ -44,7 +46,7 @@ void main() {
       'content': '王都的描述。',
       'position': 0,
       'enabled': 1,
-      // 未建模字段透传(EJ):随档导出/导入往返。
+      // 未建模字段透传:随档导出/导入往返。
       'extra': '{"probability":75}',
     });
     final sessionId = await SessionRepository(source).create(charId, '王都之旅');
@@ -78,7 +80,7 @@ void main() {
     );
     await MemoryRepository(source).set(sessionId, '用户喜欢简洁文风');
     final archive = await SessionExporter(source).export(sessionId: sessionId);
-    // 背景图随档(EF 批):可选顶层键。
+    // 背景图随档:可选顶层键,旧档缺失即无背景。
     final sourceArchive = jsonDecode(archive) as Map<String, dynamic>;
     expect(sourceArchive['characterBackgroundBase64'], 'YmFjaw==');
 
@@ -133,10 +135,10 @@ void main() {
         .query('worldbook_entries', where: 'character_id = ?', whereArgs: [result.characterId]);
     expect(worldbook, isNotEmpty);
 
-    // 世界书透传字段往返(EJ):导出合并进 character_book、导入重新捕获落列。
+    // 世界书透传字段往返:导出合并进 character_book、导入重新捕获落列。
     expect(worldbook.single['extra'], '{"probability":75}');
 
-    // 背景图还原(EF 批):无缩图器时原样落列。
+    // 背景图还原:无缩图器时原样落列。
     final restoredCharRow = await target.db
         .query('characters', columns: ['background_base64'], where: 'id = ?', whereArgs: [result.characterId]);
     expect(restoredCharRow.single['background_base64'], 'YmFjaw==');

@@ -1,3 +1,4 @@
+// Flutter 窗口宿主声明(Flutter Windows runner 模板)。
 #ifndef RUNNER_FLUTTER_WINDOW_H_
 #define RUNNER_FLUTTER_WINDOW_H_
 

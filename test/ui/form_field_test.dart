@@ -1,3 +1,5 @@
+// 表单字段的复制按钮:多行默认显示、单行需显式 copyable、空内容禁用,
+// 以及剪贴板写入后的图标回弹(平台通道打桩)。
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';

@@ -1,3 +1,4 @@
+// 角色编辑屏 widget 测试:新建/编辑模式的保存回退、空名校验与字段预填。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

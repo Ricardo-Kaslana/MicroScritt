@@ -1,11 +1,12 @@
+// 上下文组装与通知:快照组装、Hook 运行、记忆冻结副本与差异通知、
+// 待发通知落库为附件行、记忆应用到上下文。
 part of 'chat_controller.dart';
 
 /// 上下文组装与通知:组装快照/Hook 运行/记忆冻结副本与差异通知/附件通知落库/记忆应用。
 abstract class ChatControllerContext extends ChatControllerBase {
-  /// Runs enabled hooks for [point] against [ctx], if a runtime is configured.
-  /// Returns the (possibly hook-modified) context unchanged when no runtime or
-  /// no hooks are available. Always injects the current username as `userName`
-  /// so hooks (e.g. the default `{{user}}` replacement) can reference it.
+  /// 对 [ctx] 运行 [point] 触发点上已启用的 Hook,返回可能被改写后的上下文。
+  /// 未配置运行时或没有 Hook 时原样返回;始终注入当前用户名 `userName`,
+  /// 供默认 `{{user}}` 替换等 Hook 引用。Hook 内部失败绝不让整轮发送失败。
   Future<Map<String, dynamic>> _runHooks(
     HookTriggerPoint point,
     Map<String, dynamic> ctx,
@@ -23,7 +24,7 @@ abstract class ChatControllerContext extends ChatControllerBase {
         context: {...ctx, 'userName': ref.read(userProfileProvider).name},
       );
     } catch (_) {
-      return ctx; // a hook failure must never drop the turn
+      return ctx; // Hook 失败绝不能拖垮本轮发送
     }
   }
 
@@ -31,11 +32,11 @@ abstract class ChatControllerContext extends ChatControllerBase {
   /// [load] 以外的全部组装点([_generateReply]/[_reassembleContext]/预算检测/
   /// 软挡自动压缩)共用同一把组装尺子,保证估算与真实请求一致。
   /// 会话未加载(sessionId/character 缺失)时返回 null。
-  /// 变量不参与主写组装(CL 批起变量只进后台 agent 上下文);技能不进组装
-  /// (CW 批起仅有 @技能名 主动触发的附件行,已落库在 history 里);记忆经
-  /// [_frozenMemory] 冻结副本以"第 0 条消息"进数组。通知(压缩/记忆差异)
-  /// 自 DG 批起也落库为附件行随历史进数组(合成插入路径退役)。历史对话行
-  /// 里的 @技能名 记号在此剥离(DA 批:转录保留原话,LLM 边界出口剥),
+  ///
+  /// 变量不参与主写组装(只进后台 agent 上下文);技能不进组装,只有 @技能名
+  /// 主动触发的附件行(已落库在 history 里);记忆经 [_frozenMemory] 冻结副本
+  /// 以"第 0 条消息"进数组。通知(压缩/记忆差异)同样落库为附件行随历史进数组。
+  /// 历史对话行里的 @技能名 记号在此剥离:转录保留原话,只在 LLM 边界出口剥,
   /// 面板分段不受影响。
   Future<ContextSnapshot?> _assembleSnapshot(List<Message> history) async {
     final sessionId = state.sessionId;
@@ -69,10 +70,10 @@ abstract class ChatControllerContext extends ChatControllerBase {
   /// 当前在用模型的上下文容量(token)。与上下文圆环同源(active provider 的
   /// activeModel)。
   ///
-  /// 容量未配置(或内置 provider 种子的 0)时**不再整体跳过**占用率逻辑,而是
-  /// 退回 [ContextBudgetPolicy.fallbackCapacity] —— 组装自 2026-09-28 批起不做
-  /// 条数裁剪,跳过就等于没有任何保护,长会话会一路涨到上游报错。用户补填
-  /// 真实容量后自动改用真值。只有读取本身失败(异常)才返回 null。
+  /// 容量未配置(≤0,如历史空值)时**不再整体跳过**占用率逻辑,而是
+  /// 退回 [ContextBudgetPolicy.fallbackCapacity] —— 组装不做条数裁剪,跳过就等于
+  /// 没有任何保护,长会话会一路涨到上游报错。用户补填真实容量后自动改用真值。
+  /// 只有读取本身失败(异常)才返回 null。
   ///
   /// 直接读仓库而非 `llmProvidersProvider.future`:后者是首个被命令式读取的
   /// 场景,在 widget 测试的 FakeAsync 区会悬挂(其创建 future 不受 runAsync
@@ -104,7 +105,7 @@ abstract class ChatControllerContext extends ChatControllerBase {
   /// 旧字节不动**,差异只经通知送达 —— 直到压缩触发或用户主动刷新
   /// ([applyMemoryToContext])才整体换新。
   ///
-  /// DG 批起通知落库为附件行:去重账本 [_memoryDiffNotifiedHash] 由调用方
+  /// 通知落库为附件行:去重账本 [_memoryDiffNotifiedHash] 由调用方
   /// ([_persistPendingNotices])在**落库成功后**置位,DB 写入失败时不吞通知;
   /// 库内容再次变化则下次输入再通知。
   Future<({int hash, String content})?> _memoryDiffNotice(int sessionId) async {
@@ -145,7 +146,7 @@ abstract class ChatControllerContext extends ChatControllerBase {
     );
   }
 
-  /// 消费待发通知并落库为附件行(DG 批:替代原合成插入的统一收口)。
+  /// 消费待发通知并落库为附件行(替代原合成插入的统一收口)。
   ///
   /// 压缩通知消费 [_compactNoticePending] 标志(ref 含发生时刻,每次压缩唯一);
   /// 记忆差异经 [_memoryDiffNotice] 判定(ref 含版本哈希),去重账本在落库
@@ -194,9 +195,9 @@ abstract class ChatControllerContext extends ChatControllerBase {
   /// 用当前会话状态重新组装一次上下文快照并写入 `lastContext`。
   /// [load]/[send]/[/compact] 之后让上下文面板与真实请求保持一致。
   ///
-  /// 组装输入取 [MessageRepository.activeWindow](全部未折叠活跃行),而**不是**
+  /// 组装输入取 `MessageRepository.activeWindow`(全部未折叠活跃行),而**不是**
   /// `state.messages` —— 后者是 UI 显示窗口,会被分页游标下移;共用它会让
-  /// "用户翻阅历史"改变发给 LLM 的上下文(2026-09-28 批拆分显示/组装窗口)。
+  /// "用户翻阅历史"改变发给 LLM 的上下文(显示/组装窗口刻意分离)。
   Future<void> _reassembleContext() async {
     final sessionId = state.sessionId;
     if (sessionId == null) return;

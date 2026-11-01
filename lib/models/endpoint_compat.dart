@@ -1,3 +1,9 @@
+/// Provider 级端点兼容选项模型与落库 JSON 的容错解析。
+///
+/// 兼容选项只改变请求的形状/字节,不改变落库内容或界面语义;所有解析
+/// 路径必须 fail-safe,坏数据不得阻断 provider 启动水合。
+library;
+
 import 'dart:convert';
 
 /// Provider 级「端点兼容选项」。
@@ -51,6 +57,7 @@ class EndpointCompat {
     return flags.isEmpty ? '' : jsonEncode(flags);
   }
 
+  /// 从落库文本解析;空串/坏 JSON/非对象/未知键一律回落 [standard]。
   static EndpointCompat fromWire(String? wire) {
     if (wire == null || wire.isEmpty) return standard;
     try {

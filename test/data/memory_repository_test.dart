@@ -1,3 +1,4 @@
+// 会话记忆仓储:单行替换语义、按会话隔离与行级更新/删除。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';

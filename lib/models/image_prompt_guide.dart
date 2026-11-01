@@ -4,9 +4,9 @@
 /// 同一套 `{}`/`[]` 加权语法),而不是自由自然语言描述。本规范把「生成什么
 /// 样的提示词」直接写进提示工程:
 ///
-/// - **后台自动生图**([BackgroundEngine]):`image` 指令后附 [kImageTagGuideEn],
-///   让 `imagePrompt`/`imagePrompts` 从「自然语言画面描述」稳定输出为逗号
-///   分隔的英文 tag 串。
+/// - **后台自动生图**(`BackgroundEngine`):`image` 指令后附
+///   [kImageTagGuideEn],让 `imagePrompt`/`imagePrompts` 从「自然语言画面
+///   描述」稳定输出为逗号分隔的英文 tag 串。
 library;
 
 /// 英文版 tag 规范:嵌入后台引擎(英文)指令。

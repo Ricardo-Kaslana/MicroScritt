@@ -1,3 +1,9 @@
+/// 标题旁的小号说明入口按钮。
+///
+/// 固定 30×30 的紧凑热区,放进标题 Row 内不会抢占旁边 SwitchListTile
+/// 开关的点击区域。
+library;
+
 import 'package:flutter/material.dart';
 
 /// 标题旁的小号「查看说明」入口:低饱和灰,不抢行内文案的视觉焦点,点击弹

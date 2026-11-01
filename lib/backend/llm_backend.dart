@@ -1,8 +1,15 @@
+/// LLM 后端抽象:请求、流式事件与故障分类。
+///
+/// 所有 LLM 请求统一走 `LlmBackend.generate(LlmRequest) → Stream<LlmEvent>`;
+/// 上层只消费事件流,不感知 HTTP/SSE 细节。
+library;
+
 import '../models/app_settings.dart';
 import '../models/chat_message.dart';
 import '../models/token_usage.dart';
 import 'upstream_error.dart';
 
+/// 一次 LLM 请求的纯文本载荷。
 class LlmRequest {
   final String model;
   final String systemPrompt;
@@ -51,12 +58,16 @@ class LlmRequest {
   });
 }
 
+/// 流式响应事件;消费方按密封类穷举处理。
 sealed class LlmEvent {
   const LlmEvent();
 }
 
+/// 一段正文增量;同一请求内按到达顺序拼接即为完整回复。
 class TextDelta extends LlmEvent {
+  /// 本次新增的正文文本。
   final String text;
+
   const TextDelta(this.text);
 }
 
@@ -68,25 +79,32 @@ class UsageEvent extends LlmEvent {
   const UsageEvent(this.usage);
 }
 
+/// 上游正常收尾信号(OpenAI 的 `[DONE]` / Anthropic 的 `message_stop`)。
 class DoneEvent extends LlmEvent {
   const DoneEvent();
 }
 
+/// 请求失败事件;消息面向用户展示,不保证包含原始响应全文。
 class ErrorEvent extends LlmEvent {
+  /// 面向用户的错误摘要。
   final String message;
 
-  /// 上游故障的稳定分类(2026-09-28 批):由后端按状态码/错误类型/正文特征
-  /// 归类;null 表示无从归类(如传输层异常,消费方可视作 transient 处理)。
+  /// 上游故障的稳定分类:由后端按状态码/错误类型/正文特征归类。
+  /// null 表示无从归类(如传输层异常,消费方可视作 transient 处理)。
   /// 重试策略、测试连接与错误横幅读这个字段,不猜报错文本。
   final UpstreamErrorKind? kind;
 
-  /// HTTP 状态码(非 200 响应时);流中途错误负载为 null。
+  /// HTTP 状态码(非 2xx 响应时);流中途错误负载为 null。
   final int? statusCode;
 
   const ErrorEvent(this.message, {this.kind, this.statusCode});
 }
 
+/// LLM 后端接口。
 abstract class LlmBackend {
+  /// 后端标识,用于日志与排障。
   String get id;
+
+  /// 发起一次流式请求;取消订阅即中止底层连接。
   Stream<LlmEvent> generate(LlmRequest request);
 }

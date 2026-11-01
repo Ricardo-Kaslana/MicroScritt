@@ -1,3 +1,4 @@
+// Hook 运行时测试:真实 QuickJS 的正常求值、缺库平台跳过与死循环/内存炸弹约束。
 import 'package:flutter_js/flutter_js.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/js_hook_runtime.dart';
@@ -9,7 +10,7 @@ import 'package:microscritt/engine/js_hook_runtime.dart';
 /// quickjs_c_bridge.dll)—— 先探测,库不可用时整体跳过而不是空转假绿。
 /// 库可用时,死循环用例有真实墙钟耗时(interrupt handler 约 5s 触发)。
 ///
-/// **跳过判据必须与生产求值同路径**(EL 修):flutter_js 0.8.7 的 Windows
+/// **跳过判据必须与生产求值同路径**:flutter_js 0.8.7 的 Windows
 /// bridge DLL 缺 `jsSetMemoryLimit` 符号,带 memoryLimit 的构造抛错 —— 若只用
 /// 无参构造探活,三个用例全跑、正常求值却因构造失败静默返回 null,内存炸弹
 /// 用例"恰好期望 null"而假绿, hook 全灭的回归就这样漏网。现在每个用例先经

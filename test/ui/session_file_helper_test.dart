@@ -1,3 +1,5 @@
+// 会话归档保存通道:移动端「保存到本地 / 分享」分支、临时暂存文件的清理与
+// 取消语义(平台通道打桩,不弹真实系统对话框)。
 import 'dart:io';
 
 import 'package:flutter/material.dart';

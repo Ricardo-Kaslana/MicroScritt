@@ -1,5 +1,7 @@
-/// 快捷命令系统定义:斜杠命令 + 输入栏按钮共用的元数据。
-/// 目前五个:/test /continue /clear /compact /rerun。
+/// 斜杠命令与输入栏按钮共用的元数据,以及斜杠文本解析。
+///
+/// 当前五个命令:/test /continue /clear /compact /rerun。命令名大小写不敏感,
+/// 参数只做首尾 trim;`/xx` 前缀补全在输入空格后停止。
 library;
 
 /// 命令枚举,便于在 UI 与 controller 间传递。

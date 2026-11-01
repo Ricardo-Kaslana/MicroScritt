@@ -1,3 +1,4 @@
+// 角色气泡样式模型测试:默认值判定、JSON 往返与 copyWith 选择覆写。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/bubble_style.dart';
 

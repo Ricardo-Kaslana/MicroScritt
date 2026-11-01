@@ -1,9 +1,16 @@
+/// 角色卡导出:输出 ST 兼容 JSON,并按当前世界书重建 `character_book`。
+///
+/// 头像由 [CharacterCard.toExportJson] 从列补回;世界书以独立表为准覆盖
+/// 导入时 raw 里的旧快照。
+library;
+
 import 'dart:convert';
 
 import '../models/character_card.dart';
 import '../models/worldbook_entry.dart';
 import 'worldbook_exporter.dart';
 
+/// 角色卡 JSON 导出入口;会话导出等需要嵌套时用 [exportJson]。
 class CharacterCardExporter {
   /// data_json 落库时已把内嵌头像剥掉([CharacterCard.toStorageJson])、头像只存
   /// 列里;导出前经 toExportJson 把列里的头像补回 JSON,保证导出的卡在其它

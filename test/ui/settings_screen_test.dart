@@ -1,3 +1,5 @@
+// 设置页 widget 测试:外观与「对话与后台」开关、LLM provider 列表与编辑入口、
+// 生图配置区的空态、列表与当前使用切换。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

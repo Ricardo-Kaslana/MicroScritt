@@ -1,3 +1,4 @@
+// 磁盘图片缓存测试:读写往返、定长文件名、旧名迁移与容量淘汰。
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';

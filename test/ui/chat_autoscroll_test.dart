@@ -1,3 +1,5 @@
+// 聊天页滚动回归:流式自动跟随让位给用户手势(拖动/惯性/滚轮),进入会话
+// 贴底不闪旧内容,分页/回顶/导航显隐与视口变化均须落位准确。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -78,7 +80,8 @@ void main() {
       ),
     );
     await _settleLoaded(tester, 12);
-    await tester.pumpAndSettle(); // 初始贴底动画完成
+    // 等初始贴底与首帧渲染落定。
+    await tester.pumpAndSettle();
 
     final scrollable = find.descendant(
       of: find.byKey(const ValueKey('messages-area')),
@@ -91,7 +94,7 @@ void main() {
         ProviderScope.containerOf(tester.element(find.byType(ChatScreen)));
     final notifier = container.read(chatControllerProvider.notifier);
     void pushDraft(String text) {
-      // 草稿在独立 provider(EF 批),streaming 仍在 ChatState:分两处写,
+      // 草稿在独立 provider,streaming 仍在 ChatState:分两处写,
       // 与生产侧 ChatController 的写入路径同构。
       container.read(chatDraftProvider.notifier).set(text);
       notifier.state = container.read(chatControllerProvider).copyWith(streaming: true);
@@ -198,7 +201,7 @@ void main() {
         ProviderScope.containerOf(tester.element(find.byType(ChatScreen)));
     final notifier = container.read(chatControllerProvider.notifier);
     void pushDraft(String text) {
-      // 草稿在独立 provider(EF 批),streaming 仍在 ChatState:分两处写,
+      // 草稿在独立 provider,streaming 仍在 ChatState:分两处写,
       // 与生产侧 ChatController 的写入路径同构。
       container.read(chatDraftProvider.notifier).set(text);
       notifier.state = container.read(chatControllerProvider).copyWith(streaming: true);
@@ -284,7 +287,7 @@ void main() {
         ProviderScope.containerOf(tester.element(find.byType(ChatScreen)));
     final notifier = container.read(chatControllerProvider.notifier);
     void pushDraft(String text) {
-      // 草稿在独立 provider(EF 批),streaming 仍在 ChatState:分两处写,
+      // 草稿在独立 provider,streaming 仍在 ChatState:分两处写,
       // 与生产侧 ChatController 的写入路径同构。
       container.read(chatDraftProvider.notifier).set(text);
       notifier.state = container.read(chatControllerProvider).copyWith(streaming: true);
@@ -761,6 +764,8 @@ void main() {
     );
     final position = tester.state<ScrollableState>(scrollable).position;
 
+    /// 读导航列里的 FAB 数与 6px 间距数:用来断言贴顶/贴底只剩单侧方向组时,
+    /// 收起钮仍与最近的方向钮保持间距。
     (int fabs, int gaps) navLayout() {
       final column = tester.widget<Column>(
         find
@@ -799,13 +804,11 @@ void main() {
   });
 
   testWidgets('entering a session with oversized leading messages lands at true bottom without dead zone', (tester) async {
-    // 回归:进入会话偶发整屏空白、需手动滑动气泡才出现。根因 —— 开头几条消息
-    // 远高于平均时(长开场白/卡面介绍),首帧对 maxScrollExtent 的估算数倍于真实
-    // 高度;贴底定位落点被 clamp 在估算处、随后布局把 max 下修到真实末尾,视口
-    // 停在内容之外的空白死区。旧收敛只看 pixels < max(死区内恰好不成立)、且同帧
-    // 读到的 max 还是旧的大值(把死区误判为已贴底),永不纠偏;贴底判定
-    // (px ≥ max−80)在死区内反而成立、连「回到底部」按钮都不出现。修复后按
-    // 「下一帧 + 双向偏差」收敛:落点先被单帧步长压进真实内容内,再精确贴底。
+    // 回归:进入会话偶发整屏空白、需手动滑动气泡才出现。旧正序实现里,开头几条
+    // 消息远高于平均时(长开场白/卡面介绍),首帧对 maxScrollExtent 的估算数倍于
+    // 真实高度;贴底定位落在估算处后布局把 max 下修到真实末尾,视口停在内容之外
+    // 的空白死区且不再纠偏。reverse 列表把贴底变成恒为 0 的精确位置,本用例继续
+    // 守「无论首屏条目多高,进入都直接落底且空白只出现在隐藏期」。
     late final AppDatabase db;
     late final int sid;
     await tester.runAsync(() async {
@@ -831,9 +834,9 @@ void main() {
     );
     await _waitForMessages(tester, 50);
     // 数据帧 + 少量稀疏帧(33ms ≈ 真机帧间隔):不允许出现"用户可见的无消息
-    // 帧"。初始定位隐藏期(Opacity 0)的收敛帧允许视口短暂无消息(直跳估算
-    // 的过冲死区发生在不可见阶段),但只要列表处于显示态,视口内必须有消息
-    // —— 死区回归若发生在可见阶段,或隐藏态未随贴底解除,都会在这里挂掉。
+    // 帧"。初始定位隐藏期(Opacity 0)允许视口短暂无消息,但只要列表处于显示
+    // 态,视口内必须有消息 —— 空白若发生在可见阶段,或隐藏态未随贴底解除,
+    // 都会在这里挂掉。
     await tester.pump();
     final scrollable = find.descendant(
       of: find.byKey(const ValueKey('messages-area')),
@@ -856,8 +859,8 @@ void main() {
     }
     await tester.pumpAndSettle();
 
-    // 收敛终点:列表必须已显示,与 maxScrollExtent 双向精确对齐(jump 落点
-    // 精确,无缓动残差),且末条消息在视口内可见。
+    // 落点断言:列表必须已显示、offset 0(reverse 下即精确贴底),且末条消息
+    // 在视口内可见。
     expect(tester.widget<Opacity>(visibility).opacity, 1, reason: '贴底后列表应已显示');
     expect(position.pixels, 0, reason: '贴底 = offset 0');
     expect(find.textContaining('短消息 49'), findsOneWidget);
@@ -866,8 +869,9 @@ void main() {
   });
 
   testWidgets('entering a session whose trailing messages are oversized still chases down to the true bottom', (tester) async {
-    // 反向异构(开头短、结尾长 → 初始估算**欠估**)也要能多帧追到真实末尾:
-    // 每帧最多前进约 6 个视口高,落地即 refine max,下一帧复核继续逼近。
+    // 另一种异高分布(开头短、结尾长):旧正序实现的初始估算会欠估、需要多帧
+    // 追赶;reverse 化后 offset 0 与内容高度无关,本用例守「首尾如何异高都直接
+    // 落底」。
     late final AppDatabase db;
     late final int sid;
     await tester.runAsync(() async {
@@ -922,21 +926,20 @@ void main() {
   });
 
   testWidgets('entering a very long session via route push still lands at the true bottom', (tester) async {
-    // 回归:贴底收敛的预算曾是固定 32 帧、每帧最多 6 个视口高 —— 总共只够
-    // 走约 192 个视口。几百条消息的长会话根本走不完,收敛链在 maxHops 用尽
-    // 后静默停在中途历史里(_nearBottom 已为 false,尺寸跟随也不会接管),
-    // 表现为"进入会话总是不最新"。真实路径还带 MaterialPageRoute 转场,
-    // 一并覆盖(其余进入用例都是 home 直挂)。
+    // 回归:旧正序实现的贴底收敛预算固定 32 帧、每帧最多 6 个视口高 —— 几百条
+    // 消息的长会话走不完,收敛链耗尽后静默停在中途历史里,表现为"进入会话总是
+    // 不最新"。reverse 化后贴底恒为 offset 0,本用例继续守超长会话;真实路径
+    // 还带 MaterialPageRoute 转场,一并覆盖(其余进入用例都是 home 直挂)。
     late final AppDatabase db;
     late final int sid;
     await tester.runAsync(() async {
       db = await openTestDb();
       final charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
       sid = await SessionRepository(db).create(charId, 's');
-      // 160 条高气泡消息 ≈ 13.7 万像素,远超旧预算能走的 ~11.5 万像素(实测
-      // 旧代码停在 ~7.5 万像素处)。条数与重复段压着选,总高不变的前提下把
-      // DB 追加与逐帧布局的负载降到最低 —— 全量并行时过重的用例会挤爆邻组
-      // 时序敏感用例(如 message_edit_sheet)的 4s 真实异步窗口。
+      // 160 条高气泡消息 ≈ 13.7 万像素,远超旧正序实现的收敛预算。条数与重复
+      // 段压着选,总高不变的前提下把 DB 追加与逐帧布局的负载降到最低 —— 全量
+      // 并行时过重的用例会挤爆邻组时序敏感用例(如 message_edit_sheet)的 4s
+      // 真实异步窗口。
       for (var i = 0; i < 160; i++) {
         await MessageRepository(db).append(
           sessionId: sid,
@@ -969,8 +972,8 @@ void main() {
       ),
     );
     await tester.tap(find.text('open'));
-    // 转场先走完(ChatScreen 已挂载),再等真实异步把全部消息载入,
-    // 最后逐帧推进让收敛链跑完(高气泡下链路更长,帧数上限给足)。
+    // 转场先走完(ChatScreen 已挂载),再等真实异步把全部消息载入,最后逐帧
+    // 推进让贴底定位与首帧渲染落定(高气泡下列表布局更重,帧数给足)。
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await _waitForMessages(tester, 160);
@@ -1056,7 +1059,7 @@ void main() {
   });
 
   testWidgets('switching sessions keeps the previous transcript until the new session data lands', (tester) async {
-    // DR 批回归:load 曾先整包清空 state,复用同屏切换会话的瞬间会闪出
+    // 回归:load 曾先整包清空 state,复用同屏切换会话的瞬间会闪出
     // 『发一条消息开始对话』空态。现在元数据立即清空(send 门控/上下文面板
     // 不残留)但消息转录保留;切换窗口内旧转录按初始定位隐藏(不闪空态也
     // 不暴露旧内容),新数据就绪后走初始定位、贴底后一次性显示。
@@ -1127,7 +1130,7 @@ void main() {
   });
 
   testWidgets('windowed session lands at bottom and pages in history when scrolled to top', (tester) async {
-    // DV 批回归:超长会话(400 条 > 300 条显示窗口)进入只载尾部窗口,贴底
+    // 回归:超长会话(400 条 > 300 条显示窗口)进入只载尾部窗口,贴底
     // 定位照旧;贴顶触发向上分页,老消息补入、视口锚定在原内容上,取尽后
     // 收口。400 条使首窗后只剩一页(100 < 每页 120),一次贴顶即取尽。
     late final AppDatabase db;

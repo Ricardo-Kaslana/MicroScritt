@@ -1,3 +1,9 @@
+/// 应用级 Riverpod Provider 目录:数据库/仓库、设置与界面偏好、LLM 与生图后端。
+///
+/// [databaseProvider] 由 main() 覆盖,未覆盖时读取即抛错;仓库 Provider 只做
+/// 轻量构造,后端类 Provider 从当前配置派生,配置为空返回 null 由调用方提示。
+library;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
@@ -44,64 +50,99 @@ import '../models/user.dart';
 import '../models/variable.dart';
 import '../models/worldbook_entry.dart';
 
+/// 数据库句柄:main() 以真实 `AppDatabase` 覆盖;未覆盖时读取即抛错,
+/// 保证测试漏注入时立即失败而不是静默用错库。
 final databaseProvider = Provider<AppDatabase>(
   (ref) => throw UnimplementedError('override in main()'),
 );
 
+/// 角色卡仓库。
 final characterRepositoryProvider = Provider(
   (ref) => CharacterRepository(ref.watch(databaseProvider)),
 );
+
+/// 会话仓库(会话行、token 用量与列表预览)。
 final sessionRepositoryProvider = Provider(
   (ref) => SessionRepository(ref.watch(databaseProvider)),
 );
+
+/// 消息仓库(流式追加、窗口化读取与图片列更新)。
 final messageRepositoryProvider = Provider(
   (ref) => MessageRepository(ref.watch(databaseProvider)),
 );
+
+/// 提示词项仓库(preset/rule 两类)。
 final promptItemRepositoryProvider = Provider(
   (ref) => PromptItemRepository(ref.watch(databaseProvider)),
 );
+
+/// LLM provider 与模型目录仓库。
 final llmProviderRepositoryProvider = Provider(
   (ref) => LlmProviderRepository(ref.watch(databaseProvider)),
 );
+
+/// 生图配置仓库(多行配置,每行一套凭据)。
 final imageConfigRepositoryProvider = Provider(
   (ref) => ImageConfigRepository(ref.watch(databaseProvider)),
 );
+
+/// 生图插件仓库(内置协议与用户导入插件)。
 final imagePluginRepositoryProvider = Provider(
   (ref) => ImagePluginRepository(ref.watch(databaseProvider)),
 );
+
+/// 自定义生图风格仓库。
 final imageStyleRepositoryProvider = Provider(
   (ref) => ImageStyleRepository(ref.watch(databaseProvider)),
 );
+
+/// 应用设置仓库(app_settings 单行偏好)。
 final appSettingsRepositoryProvider = Provider(
   (ref) => AppSettingsRepository(ref.watch(databaseProvider)),
 );
+
+/// 世界书条目仓库。
 final worldbookRepositoryProvider = Provider(
   (ref) => WorldbookRepository(ref.watch(databaseProvider)),
 );
+
+/// 全局技能仓库。
 final skillRepositoryProvider = Provider(
   (ref) => SkillRepository(ref.watch(databaseProvider)),
 );
+
+/// 变量仓库(含回收站与严格模式待确认删除)。
 final variableRepositoryProvider = Provider(
   (ref) => VariableRepository(ref.watch(databaseProvider)),
 );
+
+/// 会话记忆仓库。
 final memoryRepositoryProvider = Provider(
   (ref) => MemoryRepository(ref.watch(databaseProvider)),
 );
+
+/// 会话生图指导仓库。
 final imageGuideRepositoryProvider = Provider(
   (ref) => ImageGuideRepository(ref.watch(databaseProvider)),
 );
+
+/// Hook 仓库。
 final hookRepositoryProvider = Provider(
   (ref) => HookRepository(ref.watch(databaseProvider)),
 );
+
+/// 显示层正则脚本仓库。
 final regexScriptRepositoryProvider = Provider(
   (ref) => RegexScriptRepository(ref.watch(databaseProvider)),
 );
+
+/// 用户档案仓库(用户名与头像)。
 final userRepositoryProvider = Provider(
   (ref) => UserRepository(ref.watch(databaseProvider)),
 );
 
 /// 文本配置文件(用户名 + LLM provider)。main() 注入真实文件;测试默认 null,
-/// 所有写点经 [syncAppConfigFile] 调用时自动跳过,不产生文件 IO。
+/// 所有写点经 syncAppConfigFile 调用时自动跳过,不产生文件 IO。
 final appConfigFileProvider = Provider<AppConfigFile?>((ref) => null);
 
 /// 轻量 UI 偏好文件(角色列表布局等)。main() 注入真实文件;测试默认 null,
@@ -113,12 +154,12 @@ final characterLayoutProvider = StateProvider<CharacterLayout>(
   (ref) => CharacterLayout.list,
 );
 
-/// The JS hook runtime. Null in tests unless overridden with a fake; wired to a
-/// real runtime in main().
+/// Hook 的 JS 运行时。main() 注入真实实现;测试默认 null,
+/// 此时 Hook 求值被跳过(不执行任何 JS)。
 final hookRuntimeProvider = Provider<HookRuntime?>((ref) => null);
 
+/// 角色卡列表(含描述预览)。超大行由仓库按 id 补读整列,读不动才降级成只剩名字。
 final charactersProvider = FutureProvider<List<CharacterRecord>>(
-  // 列表要展示描述:超大行由仓库按 id 补读整列(读不动才降级成只剩名字)。
   (ref) => ref.watch(characterRepositoryProvider).all(hydrateOversized: true),
 );
 
@@ -150,7 +191,7 @@ final userProfileProvider = StateProvider<UserProfile>(
   (ref) => const UserProfile(),
 );
 
-/// 后台agent(每轮状态维护)启用开关,随 AppSettings 持久化。
+/// 后台 agent(每轮状态维护)启用开关,随 AppSettings 持久化。
 /// 读取 appSettingsProvider 派生;UI 切换时经 [persistBackgroundEnabled] 写回设置并落库。
 final backgroundEnabledProvider = StateProvider<bool>(
   (ref) => ref.watch(appSettingsProvider).backgroundEnabled,
@@ -196,7 +237,7 @@ Future<void> persistChatBackgroundBlur({
   await repo.save(current.copyWith(chatBackgroundBlur: blur));
 }
 
-/// 切换后台agent 开关并落库。stateSetter 用于写入 backgroundEnabledProvider
+/// 切换后台 agent 开关并落库。stateSetter 用于写入 backgroundEnabledProvider
 /// (UI 传入 (v) => ref.read(provider.notifier).state = v),repo 持久化。
 /// 同时用 appSettingsSetter 更新 appSettingsProvider,保证内存里两个派生源一致,
 /// 否则 appSettings(backgroundEnabled 单一真相)落后于后台开关 provider,重启前
@@ -224,7 +265,7 @@ Future<void> persistReasoningLevel({
   await repo.save(current.copyWith(reasoningLevel: level));
 }
 
-/// 后台agent 启用的子功能选择,随 appSettingsProvider 派生。
+/// 后台 agent 启用的子功能选择,随 appSettingsProvider 派生。
 final backgroundFeaturesProvider = StateProvider<BackgroundFeatures>(
   (ref) => ref.watch(appSettingsProvider).features,
 );
@@ -244,7 +285,7 @@ Future<void> persistBackgroundFeature({
   await repo.save(current.copyWith(features: next));
 }
 
-/// 更新后台agent 专用模型并落库。modelId 为 llm_models 表中的整型 id;
+/// 更新后台 agent 专用模型并落库。modelId 为 llm_models 表中的整型 id;
 /// null 表示后台跟随主写引擎当前模型。同步 appSettingsProvider(app_settings
 /// 单一真相)与库。
 Future<void> persistBackgroundModel({
@@ -258,7 +299,7 @@ Future<void> persistBackgroundModel({
   await repo.save(next);
 }
 
-/// 更新后台agent 请求的推理强度并落库(schema v48)。与专用模型一样是后台
+/// 更新后台 agent 请求的推理强度并落库(schema v48)。与专用模型一样是后台
 /// 独立参数:仅影响后台维护/主动轮的 LLM 请求,不动主对话的 reasoningLevel。
 Future<void> persistBackgroundReasoningLevel({
   required ReasoningLevel level,
@@ -271,7 +312,7 @@ Future<void> persistBackgroundReasoningLevel({
   await repo.save(next);
 }
 
-/// 更新后台agent 输出上限档位并落库(schema v54)。与推理强度一样是后台
+/// 更新后台 agent 输出上限档位并落库(schema v54)。与推理强度一样是后台
 /// 独立参数:仅影响后台维护/主动轮首试请求的 max_tokens,重试恒放开。
 Future<void> persistBackgroundOutputTier({
   required BackgroundOutputTier tier,
@@ -296,7 +337,7 @@ Future<void> persistBackgroundDeletionConfirm({
   await repo.save(next);
 }
 
-/// 切换后台agent 上下文锚定段开关(角色卡/记忆)并落库(EV 批)。
+/// 切换后台 agent 上下文锚定段开关(角色卡/记忆)并落库。
 /// [key]:'character' 或 'memory'。
 Future<void> persistBackgroundAnchor({
   required String key,
@@ -360,10 +401,12 @@ final skillsProvider = FutureProvider<List<Skill>>(
   (ref) => ref.watch(skillRepositoryProvider).all(),
 );
 
-/// 角色状态查看:记忆 / 变量 为会话级(技能已迁移为上面的全局技能目录)。
+/// 会话级记忆列表(状态面板与后台读取)。
 final memoriesProvider = FutureProvider.family<List<Memory>, int>(
   (ref, sessionId) => ref.watch(memoryRepositoryProvider).bySession(sessionId),
 );
+
+/// 会话级变量键值(后台与状态面板使用,主写不消费)。
 final variablesProvider = FutureProvider.family<Map<String, String>, int>(
   (ref, sessionId) =>
       ref.watch(variableRepositoryProvider).bySession(sessionId),
@@ -389,13 +432,14 @@ final pendingVariableDeletionsProvider =
           ref.watch(variableRepositoryProvider).pendingDeletions(sessionId),
     );
 
-/// 会话级生图指导(CW 批):后台agent 生图维护每轮携带的最新文本;用户在
+/// 会话级生图指导:后台 agent 生图维护每轮携带的最新文本;用户在
 /// 状态面板编辑/初始化后失效刷新。
 final imageGuideProvider = FutureProvider.family<List<ImageGuide>, int>(
   (ref, sessionId) =>
       ref.watch(imageGuideRepositoryProvider).bySession(sessionId),
 );
 
+/// 当前主写后端的运行时配置(设置页/启动水合写入);null 表示未配置。
 final backendConfigProvider = StateProvider<BackendConfig?>((ref) => null);
 
 /// 按 provider 分组的 LLM 后端配置列表(设置页展示)。
@@ -404,6 +448,8 @@ final llmProvidersProvider = FutureProvider<List<LlmProviderConfig>>(
   (ref) => ref.watch(llmProviderRepositoryProvider).all(),
 );
 
+/// 由 [backendConfigProvider] 派生主写后端;配置为 null 时返回 null,
+/// 调用方据此给出"后端未配置"提示。
 final backendProvider = Provider<LlmBackend?>((ref) {
   final config = ref.watch(backendConfigProvider);
   return config == null ? null : createBackend(config);
@@ -413,7 +459,7 @@ final backendProvider = Provider<LlmBackend?>((ref) {
 /// 哪家的凭据与参数。
 ///
 /// 多套配置由 [imageProvidersProvider] 管理;这里只镜像"当前在用那一套",
-/// 语义与多行化之前完全一致 —— 运行链路(编排器 / 后台引擎)零改动。
+/// 运行链路(编排器/后台引擎)只读这个 Provider。
 final imageConfigProvider = StateProvider<ImageConfig?>((ref) => null);
 
 /// 启动时同步水合的插件目录;后端路由不能等待异步列表,否则首次生图会瞬时空配置。

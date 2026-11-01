@@ -1,3 +1,9 @@
+/// 气泡内名词词典:把启用中的世界书条目编译为高亮正则与释义查找表。
+///
+/// 纯显示层:只服务气泡高亮与点击释义,不参与上下文组装,也不改写消息正文。
+/// 编译结果按输入列表实例记忆化,流式期间不重复编译。
+library;
+
 import '../models/worldbook_entry.dart';
 
 /// 词典词条:一个触发词对应的世界书条目(点击气泡内高亮词弹出释义)。
@@ -34,6 +40,7 @@ class CompiledGlossary {
 
   const CompiledGlossary._(this.terms, this.pattern, this._byLowerTerm);
 
+  /// 空词典:无启用词条时复用,渲染层直接跳过。
   static const empty = CompiledGlossary._([], null, {});
 
   bool get isEmpty => terms.isEmpty;
@@ -42,16 +49,16 @@ class CompiledGlossary {
   GlossaryTerm? termFor(String matched) => _byLowerTerm[matched.toLowerCase()];
 }
 
-/// 从世界书条目编译词典:
-/// - 只取**启用中**的条目(世界书自 v37 起不再有类型之分;禁用条目不参与);
-/// - 跳过 `use_regex` 条目(键是模式不是词,按字面高亮会错);
-/// - 跳过空键与空释义;
-/// - 同一触发词多个条目时**首个**条目胜出(与世界书触发语义无冲突,纯显示层)。
-/// 按输入列表**实例**记忆化(流式期间聊天页每帧重取 Provider 值,实例不变
-/// 直接复用,不重编交替正则)。
+// 按输入列表**实例**记忆化的缓存:流式期间聊天页每帧重取 Provider 值,
+// 实例不变直接复用,不重编交替正则。
 List<WorldbookEntry>? _lastInput;
 CompiledGlossary? _lastCompiled;
 
+/// 从世界书条目编译词典:
+/// - 只取**启用中**的条目(世界书条目没有类型之分;禁用条目不参与);
+/// - 跳过 `use_regex` 条目(键是模式不是词,按字面高亮会错);
+/// - 跳过空键与空释义;
+/// - 同一触发词多个条目时**首个**条目胜出(与世界书触发语义无冲突,纯显示层)。
 CompiledGlossary compileGlossary(List<WorldbookEntry> entries) {
   if (identical(entries, _lastInput)) return _lastCompiled!;
   final byLowerTerm = <String, GlossaryTerm>{};

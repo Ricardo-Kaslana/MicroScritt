@@ -1,3 +1,5 @@
+// 技能页与生图风格页的资源 JSON 导出/导入:信封格式、同名跳过,
+// 以及内置风格预设不落表、导入时被拒。
 import 'dart:convert';
 import 'dart:io';
 
@@ -53,6 +55,7 @@ void main() {
       () => SkillRepository(db).insert(const Skill(name: '导出技能', description: 'd', content: 'c')),
     );
     final savePath = '${tmp.path}/skills.json';
+    // 桌面分支把 bytes 交给 file_picker;替身只记录不落盘,导出内容从它取。
     final fake = FakeFilePicker.install(savePath: savePath);
     await tester.pumpWidget(skillsHarness());
     await pumpUntil(tester, () => find.text('导出技能').evaluate().isNotEmpty);

@@ -1,3 +1,5 @@
+// 聊天消息列表:操作排、选中语义与上报时序、连续气泡分组、草稿打字指示与
+// 超长草稿降级、头像占位、爬楼动画时长与长历史定位。
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -100,7 +102,7 @@ void main() {
   testWidgets(
     'selecting a different message moves the action row (single selection)',
     (tester) async {
-      // DS 批:选中态走逐条目监听的共享 notifier,点选一条只重建该条 ——
+      // 选中态走逐条目监听的共享 notifier,点选一条只重建该条;
       // 但单选语义不变:点另一条时操作行整体移过去,旧条目不再持有选中态。
       const a = Message(
         sessionId: 1,
@@ -675,7 +677,7 @@ void main() {
   testWidgets(
     'streaming draft beyond the plain-text threshold skips rich parsing',
     (tester) async {
-      // DT 批:超长流式草稿每 40ms 节流块都会全文重跑富文本解析(主正则/
+      // 超长流式草稿每 40ms 节流块都会全文重跑富文本解析(主正则/
       // 词典/span 树),几万字级回复尾段吃满帧预算 —— 超过阈值后草稿降级为
       // 纯文本(仅剥 system-reminder + 宏替换),常规长度不受影响。
       final long = '甲' * (kStreamingDraftPlainThreshold + 16);
@@ -701,7 +703,7 @@ void main() {
   );
 
   test('crawl animation duration scales with distance within bounds', () {
-    // DT 批:爬楼动画时长按距离缩放(旧实现固定 200ms —— 跨超长消息一闪
+    // 爬楼动画时长按距离缩放(旧实现固定 200ms —— 跨超长消息一闪
     // 而过、短跳拖沓)。4 视口内线性放大,下限 120ms、上限 400ms,零距离
     // 零时长。600 视口下:600px(1 视口)→ 1/4 档位 190ms,2400px 封顶 400ms。
     expect(crawlAnimationDuration(0, 600), Duration.zero);
@@ -720,7 +722,7 @@ void main() {
   testWidgets(
     'selected message vanishing on rebuild reports closed post-frame, not during build (EL)',
     (tester) async {
-      // 回归防护「build 期同步上报炸导航组」(EH 引入,EL 修):选中一条消息后,
+      // 回归防护「build 期同步上报炸导航组」:选中一条消息后,
       // 消息被删除/重发改写(列表整体替换、选中 id 消失)时,旧实现在 build 期间
       // 同步调用 onActionsVisibleChanged(false)。监听方(聊天页导航组的
       // AnimatedBuilder)不是本列表的后代而是兄弟子树 —— build 期 markNeedsBuild

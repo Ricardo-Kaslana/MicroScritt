@@ -1,3 +1,9 @@
+/// 资源(角色卡/世界书等)导入导出的 UI 入口:选文件 → 解析 → 落库 → 提示。
+///
+/// 导入的结构错误统一转成 SnackBar 文案,不向外抛;导出沿用
+/// [saveJsonFile] 的保存语义。
+library;
+
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';

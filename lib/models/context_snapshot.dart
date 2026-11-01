@@ -1,3 +1,9 @@
+/// 主写请求的上下文快照:发给 LLM 的纯文本载荷与可视化分段。
+///
+/// 本层只承载文本;图片与富媒体不进入快照。`systemPrompt` 与
+/// `messages` 是实际发送内容,`segments` 仅供上下文面板展示。
+library;
+
 import 'chat_message.dart';
 
 /// 上下文组成里的一条细分条目。用于把一段上下文拆成可逐条查看的子项,
@@ -27,22 +33,30 @@ class ContextSegment {
   bool get hasSubEntries => subEntries.isNotEmpty;
 }
 
+/// 一次主写请求的完整上下文快照(不可变)。
 class ContextSnapshot {
+  /// 实际发送的 system 提示词(已含全部稳定段与当轮通知)。
   final String systemPrompt;
+
+  /// 实际发送的消息数组(含记忆第 0 条、摘要与全部历史/附件行)。
   final List<ChatMessage> messages;
+
+  /// 段键 → 来源说明,供上下文面板标注内容出处。
   final Map<String, String> segmentSources;
+
+  /// 按真实组装顺序保存的展示分段;不影响发送内容。
   final List<ContextSegment> segments;
 
   /// 缓存优化:system 提示词的稳定前缀(preset + rules + character +
-  /// post-history + 常驻世界书)。CW 批起技能不再进 system(改为 @ 触发附件),
+  /// post-history + 常驻世界书)。技能不再进 system(改为 @ 触发附件),
   /// 触发世界书/记忆全部移出 system(分别改为附件行与第 0 条消息)——
   /// system 只剩几乎不随轮次变化的稳定段。Anthropic 后端据此在 system 字段内
   /// 放置 cache_control 断点,使稳定前缀跨轮命中缓存。
   final String stableSystemPrompt;
 
-  /// 会话记忆的"第 0 条消息"形态(CW 批):生效中的记忆冻结副本以
+  /// 会话记忆的「第 0 条消息」形态:生效中的记忆冻结副本以
   /// `<system-reminder>` 包裹,作为 messages 数组**首条**合成 user 消息发出,
-  /// 排在压缩摘要与全部真实历史之前(对齐 Claude Code 项目记忆的常驻位置)。
+  /// 排在压缩摘要与全部真实历史之前。
   ///
   /// 冻结语义:会话进行中即使记忆被修改,这里也保持字节不变(改动的差异经
   /// 落库的记忆差异通知附件行送达);只在压缩触发后或用户主动刷新时更新

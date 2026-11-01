@@ -1,11 +1,13 @@
+// ModelEditSheet:经 showModalBottomSheet 承载并 pop 出 LlmModelEntry,
+// 覆盖 temperature 的回填、清空与范围校验。
+//
+// FormTextField 的 label 不在 TextField 内部,只能靠 `ValueKey('field_$label')`
+// 定位温度字段(form_field.dart 里的既有惯例)。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/llm_provider.dart';
 import 'package:microscritt/ui/model_edit_sheet.dart';
 
-/// ModelEditSheet 经 showModalBottomSheet 承载并 pop 出 [LlmModelEntry]。
-/// FormTextField 的 label 不在 TextField 内部,靠 `ValueKey('field_$label')`
-/// 定位温度字段(form_field.dart 里的既有惯例)。
 void main() {
   const tempKey = ValueKey('field_Temperature(留空 = 0.7 默认)');
 

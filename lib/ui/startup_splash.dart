@@ -1,3 +1,10 @@
+/// 冷启动品牌动画:三球依次落入图标三点、胶囊展开、应用名淡入,随后整体
+/// 淡出露出首屏;全程约 2 秒、纯代码绘制,亮暗自适应。
+///
+/// 由 `MaterialApp.builder` 挂在 Navigator 之上:child 常驻 Stack 第 0 项,
+/// 动画结束只移除 overlay;播放中点击任意处跳过,Reduce Motion 直接显示首屏。
+library;
+
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -5,17 +12,17 @@ import 'package:flutter/services.dart';
 
 import 'theme/brand.dart';
 
-/// 冷启动品牌动画:三球依次落入图标三点的位置,黑色胶囊自中间点背后展开,
-/// 应用名淡入,随后整体淡出露出首屏。全程约 2 秒、纯代码绘制,亮暗自适应。
+/// 冷启动品牌动画的挂载点与状态机:负责开始、跳过与结束调度;绘制在 overlay
+/// 子组件内完成。
 ///
-/// 挂在 [MaterialApp.builder] 上(Theme/MediaQuery 之下、Navigator 之上):
+/// 必须挂在 `MaterialApp.builder` 上(Theme/MediaQuery 之下、Navigator 之上):
 /// child 始终是 Stack 第 0 项,动画结束只移除 overlay,不重建首屏。
-/// 播放中点击任意处跳过;系统「减少动态效果」时直接显示首屏。
 class StartupSplash extends StatefulWidget {
   const StartupSplash({super.key, required this.child});
 
   final Widget child;
 
+  /// overlay 的稳定 key,供测试定位;移除后 Widget 树不再含此节点。
   static const Key overlayKey = ValueKey('startup-splash-overlay');
 
   @override
@@ -86,6 +93,7 @@ class _StartupSplashState extends State<StartupSplash>
     setState(() => _finished = true);
   }
 
+  /// 点击跳过:停表并标记结束,只移除 overlay,不重建首屏。
   void _skip() {
     if (_finished) return;
     _controller.stop();

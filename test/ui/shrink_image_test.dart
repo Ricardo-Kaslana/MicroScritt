@@ -1,3 +1,5 @@
+// 图片瘦身:超尺寸按长边缩到 1024、小图逐字节保留、data URI 归一,
+// 以及坏输入的 null/原值回退。
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';

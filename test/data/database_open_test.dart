@@ -1,3 +1,4 @@
+// 基线数据库(v66):全新建库的表结构与种子;旧版本库的归档重建。
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -7,7 +8,6 @@ import 'package:microscritt/data/database.dart';
 import 'package:microscritt/models/data_root.dart';
 import 'package:microscritt/models/prompt_seeds.dart';
 
-/// 基线数据库(v66):全新建库的表结构与种子;旧版本库的归档重建。
 void main() {
   sqfliteFfiInit();
 

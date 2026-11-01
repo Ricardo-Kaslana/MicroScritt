@@ -1,3 +1,4 @@
+// 会话仓储:创建/改名、级联删除、消息统计与按活跃度排序。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';

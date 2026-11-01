@@ -1,13 +1,12 @@
+/// iOS 分组表单的字段积木:外置灰色小标题 + 实底圆角输入框。
+///
+/// 三款字段共用同一套层级(节标题 → 字段名 → 输入框 → hint),各编辑页都从
+/// 这里取字段,避免各页自绘导致留白与字号不一致。
+library;
+
 import 'package:flutter/material.dart';
 
 import 'copy_button.dart';
-
-/// 统一的 iOS 分组表单字段积木:字段名作为输入框上方的灰色小标题,下方是
-/// 干净的实底圆角输入框(只留极淡 hint,不用 Material 浮起 label)。
-///
-/// 三款字段共用同一套「外置标题」惯例,视觉层级为:
-///   节标题(icon + 标题) → 字段名(灰色小标题) → 输入框(实底方框) → hint
-/// 这是编辑角色卡页确立的风格,这里提炼成可复用的组件,供所有编辑页复用。
 
 /// 字段标题:小号、低饱和灰、常规字重、微字距。
 class FieldLabel extends StatelessWidget {
@@ -42,6 +41,8 @@ class FieldLabel extends StatelessWidget {
 ///
 /// [copyable] 控制字段标题右侧的一键复制按钮:默认多行字段显示、
 /// 单行字段隐藏;单行但内容较长的字段可显式开启。
+///
+/// 字段本身不做校验:必填/长度等规则由表单页在保存时判断,这里只负责版式。
 class FormTextField extends StatelessWidget {
   final TextEditingController controller;
   final String label;
@@ -127,8 +128,8 @@ class FormDropdownField<T> extends StatelessWidget {
   final ValueChanged<T?> onChanged;
   final Key? fieldKey;
 
-  /// 弹出菜单限高:超过即内部滚动。注意限高后菜单变惰性滚动列表,
-  /// 视口外条目不构建 —— 只在候选很长的下拉(模型列表等)显式传入。
+  /// 弹出菜单限高:超过即内部滚动。菜单条目仍会全部构建(不是惰性列表),
+  /// 限高只解决超高菜单遮挡,不降低长候选的构建成本。
   final double? menuMaxHeight;
 
   const FormDropdownField({

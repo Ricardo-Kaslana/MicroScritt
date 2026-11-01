@@ -1,3 +1,5 @@
+// revealMessage 显示窗口定位:搜索命中窗口外的旧行时窗口下界随目标前移;
+// 已加载行保持不变,系统/附件/跨会话/不存在的行返回 false。
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/character_repository.dart';
@@ -127,6 +129,8 @@ void main() {
         character: const CharacterCard(name: 'Alice'),
       );
 
+      // 只接受本会话聊天流可见行:system 摘要与附件行不在显示口径,跨会话/
+      // 已删行更不能把窗口换成半截数据;统一返回 false 而非抛错。
       expect(await controller.revealMessage(system.id!), isFalse);
       expect(await controller.revealMessage(attachment.id!), isFalse);
       expect(await controller.revealMessage(foreign.id!), isFalse);

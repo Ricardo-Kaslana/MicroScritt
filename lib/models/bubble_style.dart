@@ -1,3 +1,9 @@
+/// 角色级气泡样式模型与角色卡 extension 的序列化。
+///
+/// 只影响助手气泡的显示,不进入上下文;样式随角色卡导入/导出,
+/// 存储键为 `extensions.microscritt_bubble_style`。
+library;
+
 /// 角色级气泡容器样式(仅助手气泡;存角色卡 `extensions.microscritt_bubble_style`,
 /// 导入/导出随卡携带,ST 端忽略未知 extension 字段、互不干扰)。
 ///

@@ -1,3 +1,4 @@
+// PNG 卡导出测试:图片原样复用、chara/ccv3 载荷剥离 avatar 与占位图回退。
 import 'dart:convert';
 import 'dart:ui' as ui;
 
@@ -85,6 +86,8 @@ void main() {
   testWidgets('cards without a usable avatar export a placeholder PNG', (
     tester,
   ) async {
+    // 占位图要经真实图片编解码(Picture.toImage / instantiateImageCodec),
+    // 假时钟下这些 Future 不会完成,必须放进 runAsync。
     await tester.runAsync(() async {
       for (final avatar in [
         null,

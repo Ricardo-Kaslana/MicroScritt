@@ -1,3 +1,4 @@
+// 独立世界书文件导入测试:ST World Info、条目数组、角色卡多形态探测与合并口径。
 import 'dart:convert';
 import 'dart:typed_data';
 

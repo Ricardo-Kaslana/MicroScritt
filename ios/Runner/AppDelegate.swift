@@ -1,3 +1,7 @@
+// iOS 应用代理。
+//
+// 注册 Flutter 插件后交回 FlutterAppDelegate 的默认生命周期;
+// 业务逻辑全部在 Dart 层,这里不承载额外原生代码。
 import Flutter
 import UIKit
 

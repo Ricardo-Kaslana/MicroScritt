@@ -1,3 +1,10 @@
+/// 主写上下文组装:把预设、规则、角色卡、世界书、记忆与历史渲染为
+/// `ContextSnapshot`(纯文本 system + 消息数组)。
+///
+/// 图片与富媒体绝不进入组装结果;线上布局、附件行位置校正与缓存不变量
+/// 见 [ContextAssembler] 的类型级文档。
+library;
+
 import 'dart:collection';
 
 import '../models/character_card.dart';
@@ -7,7 +14,7 @@ import '../models/message.dart';
 import '../models/prompt_item.dart';
 import '../models/worldbook_entry.dart';
 
-/// 上下文组装器(CW 批起引入 attachments 机制,参考 Claude Code)。
+/// 上下文组装器:产出主写请求的纯文本 system 与消息数组。
 ///
 /// 线上布局(一次请求的完整字节序):
 ///
@@ -30,15 +37,14 @@ import '../models/worldbook_entry.dart';
 class ContextAssembler {
   /// 缓存优化:世界书键级匹配用的已编译 RegExp 缓存。
   ///
-  /// 每次匹配都会遍历全部世界书条目并对 recent 文本做键匹配;
-  /// 此前每个键每次都会重新 `RegExp(...)` 构造一次对象(`useRegex` / `matchWholeWords`
-  /// 分支)。会话内条目与开关基本不变,重复编译同一 pattern 是无谓开销。
+  /// 每次匹配都会遍历全部世界书条目并对最近文本做键匹配;不缓存的话每个
+  /// 键每次都要重新构造 `RegExp`(`useRegex` / `matchWholeWords` 分支)。
+  /// 会话内条目与开关基本不变,重复编译同一 pattern 是无谓开销。
   ///
-  /// 调用方常以 `ContextAssembler()` 重建实例(chat_controller 每轮 new 一次),
-  /// 所以这里用**静态**缓存以跨调用复用编译结果;条目的 `(pattern, caseSensitive,
-  /// wholeWord)` 三元组与每条文本匹配语义一一对应,条目编辑后键变化自然生成新
-  /// key。用有序 Map 实现简单的容量上限(FIFO 淘汰),防止长期运行的进程/多次
-  /// 会话把缓存撑到无限大。
+  /// 调用方通常每次组装新建 `ContextAssembler()`,所以这里用**静态**缓存
+  /// 跨调用复用编译结果;条目的 `(pattern, caseSensitive, wholeWord)`
+  /// 三元组与匹配语义一一对应,条目编辑后键变化自然生成新 key。用有序
+  /// Map 实现简单的容量上限(FIFO 淘汰),防止长期运行的进程把缓存撑大。
   static const int _regexCacheCap = 2048;
   static final LinkedHashMap<String, RegExp> _regexCache =
       LinkedHashMap<String, RegExp>();
@@ -55,7 +61,7 @@ class ContextAssembler {
   String _regexCacheKey(String pattern, bool caseSensitive, bool wholeWord) =>
       '${caseSensitive ? '+' : '-'}${wholeWord ? 'w' : 's'}\u0001$pattern';
 
-  /// 段落标签包裹(CV 批):每个语义段落在线上文本中以
+  /// 段落标签包裹:每个语义段落在线上文本中以
   /// `<标签>说明行\n正文</标签>` 整体包裹,开标签后紧跟一行中文说明点明该段
   /// 是做什么的,再换行接原文。这让模型能明确分辨「设定资料」与「对话内容」
   /// 的边界 —— 降低设定被当成对话复述、或对话被误当设定的概率;旁路段与摘要
@@ -63,7 +69,7 @@ class ContextAssembler {
   ///
   /// 标签全小写下划线、跨轮稳定(不参与任何变化),因此包裹不破坏缓存分段:
   /// 稳定段仍字节稳定,可变段的标签块也只在正文变化时变化。上下文面板
-  /// ([ContextSegment]) 展示的仍是未包裹的段落原文,面板可读性与线上格式解耦。
+  /// (ContextSegment)展示的仍是未包裹的段落原文,面板可读性与线上格式解耦。
   static String _wrap(String tag, String description, String content) =>
       '<$tag>$description\n$content</$tag>';
 
@@ -77,12 +83,14 @@ class ContextAssembler {
   static const _descSummary =
       '这是会话早期剧情的压缩摘要,非对话内容:其后是最近的真实对话,仅供衔接参考,回复时请勿提及或复述';
 
-  // ── attachments 线上文本形态 ─────────────────────────────────────────
-  // 附件/通知一律以 <system-reminder> 包裹(对齐 Claude Code):模型对这种
-  // 形态已有"系统注入、非用户发言"的先验,不会当成对话内容复述。
+  // ===== attachments 线上文本形态 =====
+  // 附件/通知一律以 <system-reminder> 包裹:模型对这种形态已有「系统注入、
+  // 非用户发言」的先验,不会当成对话内容复述。
 
-  /// 记忆"第 0 条消息":冻结副本的线上形态。语义对齐 Claude Code 的项目记忆 —— 会话级
-  /// 常驻资料,跨轮字节不变(修改经 diff 通知送达,副本只在压缩/主动刷新时更新)。
+  /// 记忆「第 0 条消息」:冻结副本的线上形态。
+  ///
+  /// 会话级常驻资料,跨轮字节不变(修改经 diff 通知送达,副本只在压缩或
+  /// 主动刷新时更新)。
   static String memoryReminder(String memory) =>
       '<system-reminder>这是本会话的长期记忆,由用户维护的常驻资料(类似项目级'
       ' 常驻记忆):角色的固定外貌与身份、既定关系、世界观事实、用户偏好与长期'
@@ -123,19 +131,19 @@ class ContextAssembler {
 
   /// 组装主写引擎的上下文快照(纯文本 system + messages)。
   ///
-  /// CW 批起:
-  /// - 技能**不再**进 system(有且仅有用户 @技能名 主动触发时,经附件行注入);
-  /// - 触发世界书**不再**逐轮重算进尾部旁路 —— 命中时作为附件行落库(append-only,
+  /// - 技能不进 system:仅在用户以 @技能名 主动触发时经附件行注入;
+  /// - 触发的世界书条目不逐轮重算,命中时作为附件行落库(append-only,
   ///   去重记账由发送管线负责),组装时按 seq 原样进数组;
-  /// - 记忆改为 [frozenMemory] 的"第 0 条消息"(冻结副本,见 [memoryReminder])。
+  /// - 记忆以 [frozenMemory] 的「第 0 条消息」发出(冻结副本,见
+  ///   [memoryReminder])。
   ///
-  /// DG 批起:压缩通知与记忆差异通知也落库为附件行(原合成插入路径退役);
-  /// 晚于所属用户消息落库的通知行经 [_correctNoticePositions] 校正到最新
-  /// 用户行之前,线上字节与原合成位置一致。
+  /// 压缩通知与记忆差异通知同样落库为附件行;晚于所属用户消息落库的通知
+  /// 经 [_correctNoticePositions] 校正到最新用户行之前,线上字节与通知
+  /// 应处的位置一致。
   ///
-  /// 注意:变量(variables)自 CL 批起**有意不参与**主写组装 —— 只存在于
-  /// 后台 agent 的上下文(`BackgroundEngine._buildPrompt` 按功能块注入),
-  /// 本方法不接受也不产出任何变量内容。
+  /// 注意:变量(variables)**有意不参与**主写组装 —— 只存在于后台 agent
+  /// 的上下文(`BackgroundEngine._buildPrompt` 按功能块注入),本方法不
+  /// 接受也不产出任何变量内容。
   ContextSnapshot assemble({
     required CharacterCard character,
     required List<PromptItem> items,
@@ -161,13 +169,12 @@ class ContextAssembler {
       if (character.mesExample.isNotEmpty) 'Example dialogue:\n${character.mesExample}',
     ].join('\n\n');
 
-    // Summaries are system-role rows persisted by CompactService. They render as
-    // the first synthetic user message of the array (after the memory slot),
-    // immediately before the recent real history —— 摘要前置:模型先读"此前发生
-    // 了什么",再读最近几条真实对话衔接剧情。
-    // 合并式单一摘要(2026-09 批):每次压缩把既有摘要吸收进新版并折叠旧行
-    // (is_compacted=1),这里只渲染未折叠 system 行 —— 线上摘要段永远只有一
-    // 份最新摘要,不随压缩次数堆叠膨胀、无新旧状态互相矛盾。
+    // 摘要行是 CompactService 落库的 system 行,渲染为数组首条合成 user
+    // 消息(记忆之后、最近真实历史之前):模型先读此前发生了什么,再读最近
+    // 几条真实对话衔接剧情。
+    // 合并式单一摘要:每次压缩把既有摘要吸收进新版并折叠旧行
+    // (is_compacted=1),这里只渲染未折叠行 —— 线上摘要段永远只有一份最新
+    // 摘要,不随压缩次数堆叠膨胀、无新旧状态互相矛盾。
     final summaryText = history
         .where((m) => m.role == 'system' && !m.isCompacted)
         .map((m) => m.content)
@@ -181,19 +188,19 @@ class ContextAssembler {
 
     // 历史窗口:真实对话与附件行共同参与(seq 顺序即注入顺序)。
     //
-    // 组装**不做任何按条数的裁剪**(2026-09-28 批):窗口内全部未折叠活跃行
-    // 原样发出 —— 上下文规模由压缩按 token 占用率控制(target/soft/hard 三挡),
-    // 组装器只负责渲染调用方给的窗口。此前的 2x 滞回裁剪会每轮把数组首条
-    // 后移,使 messages 前缀每轮全变、提示缓存永久失效;而且它按条数算,
-    // 会砍掉压缩刚按 token 预算保留下来的活跃历史 —— 两处口径正交,已退役。
+    // 组装**不做任何按条数的裁剪**:窗口内全部未折叠活跃行原样发出 ——
+    // 上下文规模由压缩按 token 占用率控制(target/soft/hard 三挡),组装器
+    // 只负责渲染调用方给的窗口。按条数裁剪会把数组首条每轮后移,使
+    // messages 前缀每轮全变、提示缓存永久失效;而且它按条数算,会砍掉压缩
+    // 刚按 token 预算保留下来的活跃历史 —— 两处口径正交,不能混用。
     // 窗口由 MessageRepository.sessionWindow 按"覆盖全部未折叠活跃行"取,
     // 因此这里看到的行集必然完整;缺行只可能来自窗口下界算错。
     final rows = collapseWorldbookDuplicates(activeRows(history));
     // 通知类附件行位置校正:晚于最新用户行落库的通知(如发送中途的硬挡压缩)
-    // 挪到该用户行之前,线上字节与原合成插入位置一致(见 [_correctNoticePositions])。
+    // 挪到该用户行之前,线上字节与通知应处的位置一致(见 [_correctNoticePositions])。
     final ordered = _correctNoticePositions(rows);
-    // @技能名 记号只在 LLM 边界剥离(CY 批后继:转录保留用户原话供气泡/编辑
-    // 所见即所得,组装请求时才剥)。只作用于真实对话行;附件行与面板分段
+    // @技能名 记号只在 LLM 边界剥离:转录保留用户原话供气泡/编辑所见即
+    // 所得,组装请求时才剥。只作用于真实对话行;附件行与面板分段
     // (segmentSources)保持原样 —— 面板展示的是本地可见的原文。
     final recentMessages = [
       for (final m in ordered)
@@ -210,7 +217,7 @@ class ContextAssembler {
     ];
 
     // 常驻世界书(constant)字节稳定,进 system 稳定段参与缓存;
-    // 触发条目已改为附件行(发送管线命中时落库),组装不再逐轮匹配。
+    // 触发条目走附件行(发送管线命中时落库),组装不逐轮匹配。
     final constantEntries = worldbook.where((e) => e.enabled && e.constant).toList();
     final constantWorldbookText = constantEntries.map((e) => e.content).join('\n\n');
 
@@ -302,8 +309,10 @@ class ContextAssembler {
   }
 
   /// 通知类附件行的位置校正:晚于最新真实用户行落库的通知附件行(典型来源:
-  /// 发送中途硬挡压缩,用户消息已先落库),在当轮数组里挪到该用户行之前 ——
-  /// 字节对齐 DG 批前合成插入的位置;通知之间保持原相对顺序。
+  /// 发送中途硬挡压缩,用户消息已先落库),在当轮数组里挪到该用户行之前
+  /// —— 通知是系统对该轮输入的补充,排在用户话语之后会被模型当成新的
+  /// 用户发言或后续事件。通知之间保持原相对顺序。
+  ///
   /// 没有用户行时原样返回(通知留在末尾);技能/世界书附件行落库顺序天然
   /// 在所属用户消息之前,不受影响。
   ///
@@ -325,20 +334,20 @@ class ContextAssembler {
 
   /// 活跃历史行(单一真相,发送管线的附件去重共用同一把尺子):
   /// 排除 system 摘要行、已压缩行、空内容行。**不裁剪** —— 见 [assemble] 的
-  /// 历史窗口注释(上下文规模由压缩按占用率控制,组装不再按条数砍)。
+  /// 历史窗口注释(上下文规模由压缩按占用率控制,组装不按条数砍)。
   static List<Message> activeRows(List<Message> history) {
     return history
         .where((m) => m.role != 'system' && !m.isCompacted && m.content.isNotEmpty)
         .toList();
   }
 
-  /// 世界书附件行的**同条目收敛**(2026-09-28 批):同一世界书条目在窗口里
-  /// 只保留**最新**的一条,其余丢弃。
+  /// 世界书附件行的**同条目收敛**:同一世界书条目在窗口里只保留**最新**
+  /// 的一条,其余丢弃。
   ///
-  /// 为什么需要:去重账本以 `wb:<worldbook_entries.id>` 记账,而条目 id 曾经
-  /// 不稳定(保存世界书走「全删再全插」,`AUTOINCREMENT` 让全表 id 前移)——
-  /// 每次编辑都让同一条目多出一个 refId,账本认不出旧行,于是同一条目在
-  /// 窗口里并存多份、面板上的附件数远超条目数。
+  /// 为什么需要:去重账本以 `wb:<worldbook_entries.id>` 记账,而条目 id
+  /// 曾经不稳定(保存世界书走「全删再全插」,`AUTOINCREMENT` 让全表 id
+  /// 前移)—— 每次编辑都让同一条目多出一个 refId,账本认不出旧行,于是
+  /// 同一条目在窗口里并存多份、面板上的附件数远超条目数。
   /// 数据侧已改为按 id 增删改(不再新增重复),但**存量旧行仍在库里** ——
   /// 这里做读取侧收敛:不改数据(旧行仍可回溯/导出),只让发送内容干净。
   ///
@@ -435,8 +444,8 @@ class ContextAssembler {
     ChatRole.system => '系统',
   };
 
-  /// 条目命中判定,对齐参考实现(Scritt lorebook):selective(主键+次键双命中)
-  /// 优先于 useRegex/case_sensitive/match_whole_words 的键级匹配。
+  /// 条目命中判定:selective(主键+次键双命中)优先于 useRegex/
+  /// caseSensitive/matchWholeWords 的键级匹配。
   bool _matches(WorldbookEntry e, String text) {
     if (e.selective) {
       return _hitAny(e.keys, text, e) && _hitAny(e.secondaryKeys, text, e);
@@ -488,8 +497,8 @@ class ContextAssembler {
   ChatRole _role(String r) => switch (r) {
     'user' => ChatRole.user,
     'assistant' => ChatRole.assistant,
-    // Unknown roles land in the messages array; map to user, never system
-    // (a system message inside Anthropic's messages array is a 400).
+    // 未知角色映射为 user:system 消息出现在 Anthropic 的 messages 数组里
+    // 会直接 400;映射为 user 至少不改变请求结构。
     _ => ChatRole.user,
   };
 }

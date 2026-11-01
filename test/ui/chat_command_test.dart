@@ -1,3 +1,5 @@
+// 聊天页命令与导航 UI:斜杠命令按钮/建议、滚动导航折叠与自动隐藏、灵岛进度
+// 反馈、窄屏输入底栏不溢出、压缩后原始消息仍留在聊天流。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -59,7 +61,7 @@ Future<void> _seedMessages(AppDatabase db, int sessionId) async {
 }
 
 void main() {
-  /// 常驻命令按钮行默认折叠:先点输入框左侧的终端图标展开,再断言命令 chip。
+  /// 常驻命令按钮行默认折叠:先点输入框底栏左侧的终端图标展开,再断言命令 chip。
   Future<void> expandCommands(WidgetTester tester) async {
     await tester.tap(find.byTooltip('展开命令按钮行'));
     await tester.pumpAndSettle();
@@ -146,7 +148,7 @@ void main() {
     expect(find.text('/test 测试生成'), findsNothing);
     expect(find.byType(ActionChip), findsNothing);
 
-    // 再展开:命令恢复(折叠状态输入框前缀显示终端图标)。
+    // 再展开:命令恢复(折叠态输入框底栏左侧显示终端图标)。
     await tester.tap(find.byTooltip('展开命令按钮行'));
     await tester.pumpAndSettle();
     expect(find.text('/compact 主动压缩'), findsOneWidget);
@@ -532,7 +534,7 @@ void main() {
 
     // footer 若溢出会抛 RenderFlex overflow 异常,测试自动失败。
     expect(find.byTooltip('发送'), findsOneWidget);
-    // 窄行与宽行同一顺序:模型 chip → 推理徽标 → 圆环(EN 批统一)。
+    // 窄行与宽行同一顺序:模型 chip → 推理徽标 → 圆环。
     final chipRight = tester.getTopRight(find.byKey(const ValueKey('model_selector'))).dx;
     final badgeLeft = tester.getTopLeft(find.byTooltip('推理等级:高')).dx;
     final badgeRight = tester.getTopRight(find.byTooltip('推理等级:高')).dx;
@@ -548,7 +550,7 @@ void main() {
   testWidgets('/compact keeps all original messages visible in the chat flow', (tester) async {
     // 回归测试:用户反馈「/compact 后聊天页面消息丢失,只剩最近几条」——
     // 旧实现在 message_list.dart 用 `!m.isCompacted` 把被压缩的原文从聊天流里
-    // 隐去,只剩 keep 条最新消息。本批移除该过滤:被压缩的原文继续按聊天消息
+    // 隐去,只剩 keep 条最新消息。现在已移除该过滤:被压缩的原文继续按聊天消息
     // 渲染,用户能看到完整历史;ContextAssembler 仍按原口径过滤,被压缩的原文
     // 不会再次进 LLM 上下文(见 context_assembler.dart `!m.isCompacted`)。
     //

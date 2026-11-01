@@ -1,7 +1,10 @@
 part of 'database.dart';
 
-/// 默认数据种子(建表路径):默认提示词预设、默认 Hook、默认正则脚本、
-/// 默认 LLM provider。全部按 name/特征幂等 —— 重复执行不重复、不覆盖用户改动。
+// 默认数据种子(仅建库路径):默认提示词预设、默认 Hook、默认正则脚本、
+// 默认 LLM provider 与两个内置生图协议插件。
+//
+// 内容须为本项目原创的中性创作辅助素材;除默认预设只在建库时一次性写入外,
+// 其余均幂等(按 name/id 或空表判定),重复执行不重复、不覆盖用户改动。
 
 /// 种入默认正则脚本。按 name 幂等:已存在同名脚本(含用户改过的)则跳过。
 Future<void> _seedDefaultRegexScripts(Database db) async {
@@ -24,6 +27,7 @@ Future<void> _seedDefaultRegexScripts(Database db) async {
 }
 
 /// 把内置默认预设提示词(全部启用)写入 prompt_items。
+/// 仅建库路径调用一次:不做去重,重复执行会产生重复预设。
 Future<void> _seedDefaultPresets(Database db) async {
   final insert = await db.transaction((txn) async {
     for (final seed in kDefaultPromptSeeds) {

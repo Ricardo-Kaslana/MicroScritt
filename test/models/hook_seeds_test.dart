@@ -1,3 +1,4 @@
+// 内置 Hook 种子测试:main/jump 触发正则、标志剥离与 QuickJS 端到端改写。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/hook_runtime.dart';
 import 'package:microscritt/engine/js_hook_runtime.dart';

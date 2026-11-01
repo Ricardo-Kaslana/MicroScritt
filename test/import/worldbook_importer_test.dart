@@ -1,3 +1,4 @@
+// 角色卡世界书提取测试:字段归一化、排序口径与未建模字段的 extra 捕获。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/import/worldbook_importer.dart';
 import 'package:microscritt/models/character_card.dart';
@@ -18,7 +19,7 @@ void main() {
     expect(entries[0].keys, ['sword', 'blade']);
     expect(entries[0].content, 'The sword glows');
     expect(entries[1].constant, isTrue);
-    // EU 批:后台锚定选择随导入初始化,以常驻条目为准(与 v52 迁移同款回填)。
+    // 后台锚定选择随导入初始化:以常驻条目为准(与本端 v52 迁移同款回填)。
     expect(entries[0].background, isFalse);
     expect(entries[1].background, isTrue);
     // v37 起世界书不再有类型之分:导入条目一律按普通条目处理。
@@ -108,7 +109,7 @@ void main() {
   });
 
   test('preserves disabled state and keyless entries; drops empty content only (EF)', () {
-    // EF 批起提取语义从「过滤掉不可注入条目」改为「按原样保真导入」:
+    // 提取语义是按原样保真导入,不再过滤"不可注入条目":
     // 停用条目照原 enabled 状态落库(引擎本就不注入停用条目,行为等价),
     // 内容不再在"导出→导入"或重导入一次后凭空丢失;无关键词且非常驻的
     // 占位条目同样保留(引擎永不触发,纯惰性数据)。只有空内容仍被丢弃。

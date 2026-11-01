@@ -1,3 +1,4 @@
+// 高 DPI Win32 窗口基类声明(Flutter Windows runner 模板)。
 #ifndef RUNNER_WIN32_WINDOW_H_
 #define RUNNER_WIN32_WINDOW_H_
 

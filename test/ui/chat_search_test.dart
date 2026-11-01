@@ -1,3 +1,5 @@
+// 会话内搜索 UI:命中列表与内部注入剥离、空态、命中返 id、跳转旧消息并
+// 短暂高亮。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -40,6 +42,8 @@ Future<void> _settleChat(WidgetTester tester) async {
   });
 }
 
+/// 读气泡描边宽度:搜索定位高亮是 2px 强调色描边,计时到点后回到 1px 发丝边,
+/// 用它观测高亮的生命周期。
 double _bubbleBorderWidth(WidgetTester tester, String text) {
   final container = find
       .ancestor(of: find.text(text), matching: find.byType(Container))

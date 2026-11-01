@@ -1,11 +1,18 @@
-/// 消息行的种类(CW 批起)。
+/// 消息行模型:真实对话、附件合成行与图片元数据。
+///
+/// 每条消息在 `messages` 表中独立一行、只追加;附件行与对话行通过
+/// [MessageKind] 区分,所有面向聊天流/摘要/后台的读取都必须按
+/// `kind == chat` 过滤。
+library;
+
+/// 消息行的种类。
 ///
 /// - [chat]:真实对话消息(user/assistant),聊天流渲染、参与摘要转录;
-/// - [attachment]:attachments 机制的附件合成行(参考 Claude Code):世界书
-///   触发条目、@技能等内容以 `<system-reminder>` 包裹后落库,组装时按 seq
-///   自然排在它所属的用户消息**之前**(落库顺序:附件先于用户消息)。附件行
-///   是 append-only 的 —— 一经写入字节冻结,跨轮命中提示缓存;聊天流与摘要
-///   转录都不包含它(`kind != chat` 处处过滤)。
+/// - [attachment]:attachments 机制的附件合成行:世界书触发条目、@技能等
+///   内容以 `<system-reminder>` 包裹后落库,组装时按 seq 自然排在它所属的
+///   用户消息**之前**(落库顺序:附件先于用户消息)。附件行是 append-only
+///   的 —— 一经写入字节冻结,跨轮命中提示缓存;聊天流与摘要转录都不包含
+///   它(`kind != chat` 处处过滤)。
 enum MessageKind {
   chat,
   attachment;
@@ -25,7 +32,7 @@ extension type const AttachmentRef(String value) {
   /// @技能附件:`skill:<skills.id>`。
   static AttachmentRef skill(int skillId) => AttachmentRef('skill:$skillId');
 
-  /// 压缩通知(DG 批起落库,替代原"发出即消失"的合成行):
+  /// 压缩通知(落库,替代原「发出即消失」的合成行):
   /// `notice:compact:<发生时刻毫秒>`。每次压缩事件唯一,不参与窗口去重
   /// (一次性事件,置位标志是唯一权威)。
   static AttachmentRef noticeCompact(int stampMs) => AttachmentRef('notice:compact:$stampMs');
@@ -38,16 +45,34 @@ extension type const AttachmentRef(String value) {
   static bool isNotice(String? ref) => ref != null && ref.startsWith('notice:');
 }
 
+/// 一条消息(不可变);空 [id] 表示尚未落库。
 class Message {
+  /// 库内自增 id;null 表示尚未落库。
   final int? id;
+
+  /// 所属会话 id。
   final int sessionId;
-  final String role; // 'user' | 'assistant' | 'system'
+
+  /// 消息角色:`user` / `assistant` / `system`。
+  final String role;
+
+  /// 消息正文(纯文本;图片不进入此字段)。
   final String content;
+
+  /// 会话内单调递增序号,决定组装与显示顺序。
   final int seq;
+
+  /// 是否为已被压缩折叠的历史消息。
   final bool isCompacted;
+
+  /// 压缩摘要指向的原始消息 id(仅摘要行使用)。
   final int? compactOf;
-  final String? imageBase64; // 本地/模拟 provider 的内嵌图
-  final String? imageUrl; // 云端 provider 的远程图
+
+  /// 内嵌图片(base64);大图不在列表查询中加载,由 [hasImage] 标记。
+  final String? imageBase64;
+
+  /// 远程图片 URL;仅用于短暂渲染,最终仍会本地化落库。
+  final String? imageUrl;
 
   /// 生成该图时使用的原始描述(用户触发的重新生成按它重绘;导入/手工图片为 null)。
   final String? imagePrompt;
@@ -140,10 +165,10 @@ class Message {
     imageBase64: m['image_base64'] as String?,
     imageUrl: m['image_url'] as String?,
     imagePrompt: m['image_prompt'] as String?,
-        // 与 SQL 口径一致:image_base64 非空**串**才算有图(空串可能是历史
-        // 写入/导入残留),否则空串行走一次取图(取回空)的空调用。
-        hasImage: (m['image_base64'] != null && (m['image_base64'] as String).isNotEmpty) ||
-            (m['has_image'] as int? ?? 0) != 0,
+    // 与 SQL 口径一致:image_base64 非空**串**才算有图(空串可能是历史
+    // 写入/导入残留),否则空串行走一次取图(取回空)的空调用。
+    hasImage: (m['image_base64'] != null && (m['image_base64'] as String).isNotEmpty) ||
+        (m['has_image'] as int? ?? 0) != 0,
     kind: MessageKind.fromWire(m['kind'] as String? ?? 'chat'),
     refId: m['ref_id'] as String?,
   );

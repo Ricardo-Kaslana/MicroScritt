@@ -1,3 +1,12 @@
+/// 后台维护编排器:读取候选上下文 → 驱动 `BackgroundEngine` → 变量条件写回
+/// → 拆分后台生图任务。
+///
+/// 只维护快状态(变量/生图);记忆与生图指导仅经用户主动的初始化/重生成
+/// 路径。维护失败返回可区分的原因,不写变量、不推进游标;生图失败是
+/// best-effort,只经回调提示。写入的最终权限与上限由 `VariableRepository`
+/// 在其事务内裁定。
+library;
+
 import 'dart:async';
 import 'dart:io' show Platform;
 
@@ -17,13 +26,22 @@ import '../models/variable.dart';
 import '../models/worldbook_entry.dart';
 import 'background_engine.dart';
 
-/// 编排器一轮后台维护的结果:要么成功带出 [BackgroundResult],要么良性跳过
-/// (如无对话可维护)返回 [skipped]=true,要么失败(引擎返回失败原因)返回
-/// [failureReason]。调用方据此区分"可维护内容为空(跳过)"与"调用出错/解析
-/// 失败",以展示不同状态与文案。
+/// 编排器一轮后台维护的结果。
+///
+/// 三种形态互斥:成功带出 [result](可能附带游标/生图任务);良性跳过
+/// [skipped]=true(无对话可维护、功能未选中或无可写内容);失败时
+/// [failureReason] 非空(引擎调用出错/解析失败/被取消)。变量在写回期间被
+/// 人工修改时以 [skipped]+[variableConflict] 返回,整轮结果丢弃。调用方据此
+/// 区分"可维护内容为空"与"调用出错",并且只在成功轮次推进变量游标、记录
+/// `/rerun` 重放窗口。
 class BackgroundTurnResult {
+  /// 成功轮次的状态更新;跳过/失败时为 null。
   final BackgroundResult? result;
+
+  /// 本轮是否良性跳过(不是错误,展示跳过文案即可)。
   final bool skipped;
+
+  /// 跳过原因(面向状态的单行说明);仅 [skipped] 时有值。
   final String skippedReason;
 
   /// 失败细分原因:仅 [skipped]=false 且 [result]=null 时有值(引擎失败)。
@@ -33,7 +51,11 @@ class BackgroundTurnResult {
   /// 仅 [failureReason] 非空时可能有值。
   final String? failureDetail;
 
+  /// 变量增量游标:本批最后一条消息的 seq;仅变量真正执行时非空。
+  /// 调用方只在成功轮次写回它,失败不推进进度。
   final int? cursorSeq;
+
+  /// 是否还有未处理的变量增量(本批被 [maxVariableMessages] 截断)。
   final bool hasMoreVariables;
 
   /// 本轮实际送给后台的变量增量窗口(前一条 seq / 末条 seq)。仅变量真正执行时
@@ -46,9 +68,11 @@ class BackgroundTurnResult {
   /// 不算消费:模型漏掉图像描述或变量补批把生图推到后续轮次时保持 false,
   /// 由控制器把生图机会留给之后的轮次。
   final bool imageHandled;
+
+  /// 版本条件写回失败(期间变量被人工修改),本轮结果整体丢弃。
   final bool variableConflict;
 
-  /// 本轮拆出去的后台生图任务(与状态写回解耦,A3)。调用方可选地 await 它
+  /// 本轮拆出去的后台生图任务(与状态写回解耦)。调用方可选地 await 它
   /// 以收敛图片落库(测试用);控制器无需等待 —— 图片落库后经 [onImagePlaced]
   /// 通知刷新。
   final Future<void>? imageTask;
@@ -68,6 +92,7 @@ class BackgroundTurnResult {
     this.imageTask,
   });
 
+  /// 成功轮:带出状态更新与可选游标/生图任务。
   factory BackgroundTurnResult.applied(
     BackgroundResult r, {
     int? cursorSeq,
@@ -86,15 +111,18 @@ class BackgroundTurnResult {
     imageTask: imageTask,
   );
 
+  /// 良性跳过:无内容可维护或功能未选中,[reason] 面向状态展示。
   factory BackgroundTurnResult.skipped(String reason) =>
       BackgroundTurnResult._(skipped: true, skippedReason: reason);
 
+  /// 版本条件写回失败:变量期间被人工修改,整轮结果丢弃。
   factory BackgroundTurnResult.conflict() => BackgroundTurnResult._(
     skipped: true,
     variableConflict: true,
     skippedReason: '变量已被修改,已丢弃旧后台结果',
   );
 
+  /// 失败轮:带细分原因与可选诊断摘要,调用方不得推进游标。
   factory BackgroundTurnResult.failed([
     BackgroundFailureReason reason = BackgroundFailureReason.backendError,
     String? detail,
@@ -112,15 +140,29 @@ typedef BackgroundImagePlacement = ({
 /// 后台重跑时"原地替换"的目标:消息 id + 该行当前的生图描述(条件更新的并发保护)。
 typedef ImageReplaceTarget = ({int messageId, String expectedPrompt});
 
-/// 编排器:主写引擎产出后驱动后台引擎做一次**快状态**维护
-/// (变量/生图;CW 批起记忆不再逐轮自动维护,只经用户主动路径)。
+/// 编排器:主写引擎产出后驱动后台引擎做一次**快状态**维护(变量/生图)。
+///
 /// 读取候选(当前变量 / 最近对话增量 + 会话生图指导)→ 后台引擎 → 落库。
+/// 记忆与生图指导不逐轮改写,只经用户主动的 [initializeMemory] /
+/// [regenerateMemory] / [initializeImageGuide] 路径;快状态轮里它们只作为
+/// 生图的只读锚定输入。
 class Orchestrator {
+  /// 后台 LLM 引擎(一轮 JSON 状态维护)。
   final BackgroundEngine engine;
+
+  /// 变量仓库;条件写回、权限二次校验与删除上限都在其事务内完成。
   final VariableRepository variables;
+
+  /// 长期记忆仓库(仅主动初始化/重生成路径使用)。
   final MemoryRepository memories;
+
+  /// 消息仓库;读取增量窗口、落库后台生图。
   final MessageRepository messages;
+
+  /// 会话级生图指导仓库(生图轮的只读输入)。
   final ImageGuideRepository imageGuides;
+
+  /// 后台生图后端;null 表示不执行生图(变量维护不受影响)。
   final ImageBackend? imageBackend;
 
   /// 后台生图**每张落库后**回调(控制器据此刷新消息列表;多张时逐张触发)。
@@ -143,6 +185,30 @@ class Orchestrator {
     this.onImageFailed,
   });
 
+  /// 执行一轮快状态维护:组装候选上下文 → 后台引擎(必要时补一次仅图像
+  /// 调用)→ 变量版本条件写回 → 拆出后台生图任务。
+  ///
+  /// 约束与失败语义:
+  /// - 每批变量增量至多 [maxVariableMessages] 条;有剩余时生图推迟到后续
+  ///   轮次(控制器同一会话内最多连续两轮,剩余增量留待下次触发);
+  /// - 变量写回以快照 revision 做条件更新:期间人工改动会让整轮结果失效并
+  ///   返回 [BackgroundTurnResult.conflict],不写任何数据;
+  /// - `agent_access` 三档权限与单轮删除上限 5 个由 `VariableRepository`
+  ///   在事务内二次校验,这里传入的可删/只读列表只用于提示词;LLM 只能经
+  ///   显式 `removeVariables` 请求删除,`variableRemovals` 为空即不删;
+  /// - [confirmVariableDeletions] 为严格模式:可删键只写待确认提案,用户
+  ///   在状态面板确认后才移入回收站;非严格模式下执行的删除同样先进
+  ///   `variable_trash`(可恢复);
+  /// - 引擎错误/解析失败/取消返回 [BackgroundTurnResult.failed],此时本轮
+  ///   未写变量,调用方不得推进游标;生图任务与状态写回解耦,单张失败只
+  ///   跳过该张;
+  /// - `/rerun` 由 [rerunContext] 标识,[imageReplaceTargets] 给出上一轮
+  ///   图片落点:条件更新(id + 原描述 + 仍有图)成功则原地替换,否则追加,
+  ///   不静默删除用户可见的消息行。
+  ///
+  /// [afterSeq]/[throughSeq] 限定本轮重放窗口(变量增量游标);
+  /// [temperature]/[maxTokens]/[reasoningLevel]/[tier] 只影响后台请求,
+  /// 与主写设置解耦。
   Future<BackgroundTurnResult> runAfterTurn({
     required int sessionId,
     required String model,
@@ -157,7 +223,7 @@ class Orchestrator {
     /// reasoning_effort,anthropic 映射 thinking 预算;默认 off 不发送。
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
 
-    /// 输出上限档位(v54):透传给后台引擎,决定首试请求的 max_tokens。
+    /// 输出上限档位:透传给后台引擎,决定首试请求的 max_tokens。
     BackgroundOutputTier tier = BackgroundOutputTier.standard,
     int? afterSeq,
     int? throughSeq,
@@ -426,7 +492,7 @@ class Orchestrator {
       // 未产出有效记忆(缺字段/空串/字面 null)→ 不落库,良性跳过并给出原因。
       return BackgroundTurnResult.skipped('初始化未产出有效记忆,请重试');
     }
-    // 与 runAfterTurn 的 C3 一致:记忆写入自带事务(MemoryRepository.set),失败即回滚。
+    // 与 runAfterTurn 一致:记忆写入自带事务(MemoryRepository.set),失败即回滚。
     await memories.set(sessionId, mem);
     return BackgroundTurnResult.applied(result);
   }
@@ -681,6 +747,8 @@ class Orchestrator {
     return msgs.sublist(msgs.length - limit);
   }
 
+  /// 每批送给后台的变量增量消息条数上限;剩余部分由控制器下一轮继续处理,
+  /// 避免单次请求被整段长对话撑爆。
   static const int maxVariableMessages = 12;
 
   /// 定位用计时日志:仅 debug 直跑(flutter run)可见,测试进程与 release 静默。

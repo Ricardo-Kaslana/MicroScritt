@@ -1,3 +1,5 @@
+// 后台引擎测试:LLM 响应解析与修复兜底、重试/取消语义、提示词分段与缓存前缀、
+// 输出上限档位与截断规则。
 import 'dart:async';
 import 'dart:convert';
 
@@ -28,7 +30,7 @@ class _JsonBackend implements LlmBackend {
   }
 }
 
-/// Captures the request it was given so tests can assert on the prompt shape.
+/// 记录收到的请求,供断言提示词形状。
 class _RecordingBackend implements LlmBackend {
   final String text;
   LlmRequest? lastRequest;
@@ -64,7 +66,7 @@ void main() {
 
     // v37 起技能是全局目录:LLM 仍可能回传 activeSkills 键,直接忽略。
     expect(result.variableUpdates, {'hp': '8'});
-    // CW 批起记忆不经后台逐轮维护:快状态轮即便 LLM 回传 memory 也一律清空
+    // 记忆不经后台逐轮维护:快状态轮即便 LLM 回传 memory 也一律清空
     // (记忆只经 runMemoryInit/runMemoryRegenerate 主动路径产出)。
     expect(result.memoryUpdate, isNull);
   });
@@ -76,6 +78,7 @@ void main() {
   });
 
   group('strict variable updates', () {
+    // 任一字段类型非法即整批拒绝:半批落库会让玩家状态与模型输出各对一半。
     const invalidResponses = <String, String>{
       'missing field': '{}',
       'only image': '{"imagePrompt":"a cave"}',
@@ -593,7 +596,7 @@ void main() {
   });
 
   test('memory enters the fast-state prompt only as an explicit read-only anchor', () async {
-    // ES 批:记忆/角色卡/世界书以只读锚定段进快状态轮(仅 image 开启时),
+    // 记忆/角色卡/世界书以只读锚定段进快状态轮(仅 image 开启时),
     // 让生图贴合剧情 —— 但不传就不注入,纯 variables 轮维持低成本。
     final plain = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
     await BackgroundEngine(plain).run(
@@ -661,7 +664,7 @@ void main() {
       expect(prompt, contains('They met at the river tavern.'));
       expect(prompt, contains('<worldbook_background>'));
       expect(prompt, contains('The tavern sits by the river.'));
-      // EU 批:常驻但未选定不进;触发型与停用的也不进。
+      // 常驻但未选定不进;触发型与停用的也不进。
       expect(prompt, isNot(contains('Resident but not picked.')));
       expect(prompt, isNot(contains('Swords are forbidden.')));
       expect(prompt, isNot(contains('Hidden lore.')));
@@ -706,7 +709,7 @@ void main() {
     test('多条世界书逐条截断,position 靠后的外貌条目不被前面清零', () async {
       // 回归:此前只按总量截拼接后的整块,第一条吃光预算后靠后条目整段消失 ——
       // 用户勾选多条角色外貌设定时只有最前一条进上下文,生图丢了后面角色的定妆。
-      // 现改为逐条截断(每条夹到 maxBackgroundWorldbookEntryChars),三条都完整存活。
+      // 现改为逐条截断(每条夹到 maxBackgroundWorldbookEntryChars),两条都完整存活。
       final a = 'A' * BackgroundEngine.maxBackgroundWorldbookEntryChars; // 恰好满额,不触发标记
       final b = 'B' * BackgroundEngine.maxBackgroundWorldbookEntryChars;
       final backend = _RecordingBackend('{"imagePrompt":"a scene"}');
@@ -749,7 +752,7 @@ void main() {
   });
 
   test('carries the background reasoning level into the request; defaults to off', () async {
-    // v48:后台agent 推理强度独立设置 —— 透传进 LlmRequest(openai 端点随后映射
+    // v48:后台推理强度是独立设置 —— 透传进 LlmRequest(openai 端点随后映射
     // reasoning_effort,anthropic 映射 thinking 预算,均有各自 wire 测试)。
     final recording = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
     await BackgroundEngine(recording).run(
@@ -771,7 +774,7 @@ void main() {
   });
 
   test('image turns carry the session image guide as the authoritative direction', () async {
-    // CW 批:生图行为规范改由会话级"生图指导"承载(与记忆分离)—— 开 image 时
+    // 生图行为规范由会话级"生图指导"承载(与记忆分离)—— 开 image 时
     // 指导原文进提示,要求场景描述严格遵循其定妆与风格约束。
     final backend = _RecordingBackend(
       '{"activeSkills":[],"variables":{},"memory":null,"imagePrompt":"a scene","imagePrompts":["a","b"]}',
@@ -832,7 +835,7 @@ void main() {
     expect(prompt, isNot(contains('# image')));
     expect(prompt, isNot(contains('<memory>')));
 
-    // 只保留 variables 字段,其余即使 LLM 返回也被清空(记忆恒为 null,CW)。
+    // 只保留 variables 字段,其余即使 LLM 返回也被清空(记忆恒为 null)。
     expect(result.variableUpdates, {'hp': '8'});
     expect(result.memoryUpdate, isNull);
     expect(result.imagePrompt, isNull);
@@ -1038,8 +1041,8 @@ void main() {
   });
 
   test('memory regenerate prompt carries full transcript + draft, capping the draft at maxMemoryChars', () async {
-    // 全量重生成(CW):角色卡 + 全部活跃对话 + 既有记忆草稿一并送入;既有记忆
-    // 超长时截断保留开头(与旧逐轮维护的 D1 兜底同规格)。
+    // 全量重生成:角色卡 + 全部活跃对话 + 既有记忆草稿一并送入;既有记忆
+    // 超长时截断保留开头(与记忆截断兜底同规格)。
     final backend = _RecordingBackend('{"memory":"new memory"}');
     final engine = BackgroundEngine(backend);
     final longDraft = '${'fact-'.padRight(BackgroundEngine.maxMemoryChars, 'x')}ZZTAILZZ';
@@ -1107,7 +1110,7 @@ void main() {
     );
     final result = ok(await engine.run(model: 'm', variables: const {}, history: const []));
     expect(result.variableUpdates, {'hp': '8'}); // 其余字段不受影响
-    expect(result.memoryUpdate, isNull); // CW 批:快状态轮记忆恒清空
+    expect(result.memoryUpdate, isNull); // 快状态轮记忆恒清空
     final active = ok(await engine.runMemoryInit(
       model: 'm',
       character: const CharacterCard(name: 'A'),
@@ -1121,7 +1124,7 @@ void main() {
     await engine.run(model: 'm', variables: const {}, history: const []);
     final request = backend.lastRequest!;
     expect(request.temperature, BackgroundEngine.maxTemperature);
-    // CW 批:快状态轮统一 maxOutputTokens 防跑飞(记忆轮放宽档只属主动轮)。
+    // 快状态轮统一 maxOutputTokens 防跑飞(记忆轮放宽档只属主动轮)。
     expect(request.maxTokens, BackgroundEngine.maxOutputTokens);
   });
 
@@ -1153,7 +1156,7 @@ void main() {
     );
     final request = backend.lastRequest!;
     expect(request.temperature, BackgroundEngine.maxTemperature);
-    // CW 批起快状态轮统一 maxOutputTokens(用户给的 9999 也被掐到这);
+    // 快状态轮统一 maxOutputTokens(用户给的 9999 也被掐到这);
     // 放宽档 maxOutputTokensMemory 只属于记忆主动轮(init/regenerate)。
     expect(request.maxTokens, BackgroundEngine.maxOutputTokens);
   });
@@ -1315,7 +1318,7 @@ void main() {
     // 旧代码 `afterColon = stack.last == '['` 在栈里永远遇不到 '['(栈存闭合
     // 括号),数组逗号后的裸值(null/数字)被当成键,修出 `["one","42":null]`
     // 无法解析 → 整轮解析失败。现在按 `stack.last == ']'` 判断数组内逗号,
-    // 裸值照常落出;坏项仍按 C2 由 _asPromptList 过滤。
+    // 裸值照常落出;坏项仍由 _asPromptList 过滤。
     final engine = BackgroundEngine(_JsonBackend('{"memory":"abc","imagePrompts":["one",42,true,"two","t'));
     final result = ok(await engine.runMemoryInit(model: 'm', character: const CharacterCard(name: 'A')));
     expect(result.memoryUpdate, 'abc');
@@ -1486,8 +1489,8 @@ void main() {
   group('cancelSignal 即时唤醒(CR 批)', () {
     test('流挂起(零事件期)cancelSignal 触发即立刻返回 cancelled,不等流事件', () async {
       // 旧实现下 shouldCancel 只能在下个流事件到达时才命中,LLM 思考期
-      // 0~30 秒不吐首块时中断按钮要等这么久才生效;本批引入 cancelSignal
-      // 镜像主写 _interrupt.whenCancelled,中断令牌触发立即解除等待。
+      // 0~30 秒不吐首块时中断按钮要等这么久才生效;cancelSignal
+      // 镜像主写的中断令牌语义,令牌完成即解除等待。
       final release = Completer<void>();
       final backend = _HangingBackend(release.future);
       final engine = BackgroundEngine(backend);
@@ -1618,7 +1621,7 @@ void main() {
     const card = CharacterCard(name: 'Alice');
 
     test('调用方传模型级 maxTokens 时,重试请求也不带 max_tokens(用户上限不再泄漏)', () async {
-      // BL 批只放开了档位上限:用户给模型配置过「最大输出 tokens」时,该值仍
+      // 只放开档位上限时:用户给模型配置过「最大输出 tokens」时,该值仍
       // 原样发进每次重试 —— 三次尝试带同一个 max_tokens,推理模型把预算烧在
       // 不可见思考上时正文恒空,"模型未返回任何内容"三连败(偶发残留根因)。
       final backend = _ScriptedBackend([
@@ -1706,7 +1709,7 @@ void main() {
     });
 
     test('fails with parseFailure (after retries) when the LLM emits no valid memory', () async {
-      // BM 批起缺 memory 字段也纳入重试:三次尝试都只有 {"memory":null} → 失败,
+      // 缺 memory 字段也纳入重试:三次尝试都只有 {"memory":null} → 失败,
       // detail 注明缺少 memory(不再以"成功但无记忆"返回)。
       final engine = BackgroundEngine(_JsonBackend('{"memory":null}'));
       final outcome = await engine.runMemoryInit(model: 'm', character: card);
@@ -1763,8 +1766,8 @@ class _ScriptedBackend implements LlmBackend {
   }
 }
 
-/// Emits a single delta then waits for [release] before completing, so the test
-/// can interrupt and let the stream end — exercising the post-loop cancel check.
+/// 先发一段文本再等 [release] 收流:测试可在流挂起时中断,
+/// 覆盖流结束后的取消检查。
 class _GateBackend implements LlmBackend {
   final String text;
   final Future<void> release;

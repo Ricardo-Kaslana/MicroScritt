@@ -1,3 +1,4 @@
+// Anthropic Messages 后端测试:SSE 增量、提示缓存断点、thinking 预算与断链。
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -348,8 +349,8 @@ void main() {
       // system 只含稳定块(可变内容已全部移出 system)。
       final system = withCache['system'] as List;
       expect(system.length, 1);
-      // CW 批:断点锚在真正的最后一条消息(用户实际输入)上 —— 附件/通知都在
-      // 数组内部,不再有旁路消息排在用户输入之后。
+      // 断点锚在真正的最后一条消息(用户实际输入)上:附件/通知都在数组内部,
+      // 用户输入之后没有旁路消息。
       final msgs = withCache['messages'] as List;
       expect(msgs.length, 3);
       final last = msgs.last as Map<String, dynamic>;

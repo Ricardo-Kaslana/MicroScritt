@@ -1,3 +1,10 @@
+/// 文件选择的字节/路径读取与单文件大小上限。
+///
+/// `file_picker` 的 bytes 通道在 Android 走原生一次性整读,大文件会 OOM 或
+/// 静默失败;因此调用方关掉 `withData` 只给路径,这里读 path 并统一执行
+/// [kMaxPickedFileBytes] 上限。会话归档等超大文件另走 [pickedFilePath]。
+library;
+
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -6,9 +13,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 /// 单次导入/选图可接受的文件大小上限:整个文件要读进 Dart 堆再解析,不设
-/// 上限时误选/恶意超大文件直接 OOM。50MB 对角色卡(几百 KB~几 MB)、会话
-/// 归档与照片头像都绰绰有余;超限抛 [FormatException],调用方的导入
-/// try/catch 会把提示原样吐给用户。
+/// 上限时误选/恶意超大文件直接 OOM。50MB 对角色卡(几百 KB~几 MB)、世界书、
+/// 生图插件与照片头像都绰绰有余;超限抛 [FormatException],调用方的导入
+/// try/catch 会把提示原样吐给用户。会话归档不受此限,另走 [pickedFilePath]。
 const int kMaxPickedFileBytes = 50 * 1024 * 1024;
 
 /// 从一次文件选择结果中拿到完整字节。

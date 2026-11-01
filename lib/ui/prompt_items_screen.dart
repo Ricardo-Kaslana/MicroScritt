@@ -1,3 +1,11 @@
+/// 全局提示词项管理页与编辑屏。
+///
+/// 预设(preset)与规则(rule)共用一张表,按 kind + position 拼进主写
+/// system 的对应段;条目只影响主写请求,不参与后台维护。导出/导入走统一
+/// 资源信封,导入按「类型 + 名称」判重(名称为空时按「类型 + 正文」),
+/// 同名跳过而不是覆盖。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../export/resource_exporter.dart';
@@ -11,10 +19,14 @@ import 'common/resource_io.dart';
 import 'common/searchable_list.dart';
 import 'common/section_header.dart';
 
-/// 全局提示词项管理:预设/规则两类,按 kind+position 进上下文。
+/// 全局提示词列表页(设置页「内容与扩展 · 全局提示词」入口)。
+///
+/// 预设与规则按 kind + position 拼进主写 system 的对应段;条目只影响主写
+/// 请求,不参与后台维护。导入导出走资源信封,判重规则见文件头。
 class PromptItemsScreen extends ConsumerWidget {
   const PromptItemsScreen({super.key});
 
+  /// 切换参与组装:整条重写后失效列表。
   Future<void> _toggle(WidgetRef ref, PromptItem item) async {
     final repo = ref.read(promptItemRepositoryProvider);
     await repo.update(
@@ -30,6 +42,7 @@ class PromptItemsScreen extends ConsumerWidget {
     ref.invalidate(promptItemsProvider);
   }
 
+  /// 删除提示词项:确认弹层展示正文摘要,删除后不再进入 system。
   Future<void> _delete(
     BuildContext context,
     WidgetRef ref,
@@ -47,6 +60,7 @@ class PromptItemsScreen extends ConsumerWidget {
     ref.invalidate(promptItemsProvider);
   }
 
+  /// 导出全部提示词项:信封保留 kind 与排序,不带库内 id。
   Future<void> _exportJson(BuildContext context, WidgetRef ref) async {
     final items = await ref.read(promptItemRepositoryProvider).all();
     if (!context.mounted) return;
@@ -57,6 +71,8 @@ class PromptItemsScreen extends ConsumerWidget {
     );
   }
 
+  /// 导入提示词项:结构错误整份拒绝,按类型 + 名称(空名时正文)去重;
+  /// position 缺失时回落数组下标,保持文件内相对顺序。
   Future<void> _importJson(BuildContext context, WidgetRef ref) async {
     await importResourceFile(
       context,
@@ -147,12 +163,14 @@ class PromptItemsScreen extends ConsumerWidget {
 
   static final _whitespace = RegExp(r'\s+');
 
+  /// 列表标题回退与删除确认用的单行摘要:压掉空白并截断到 60 字符。
   static String _clip(String s) {
     final oneLine = s.replaceAll(_whitespace, ' ').trim();
     return oneLine.length <= 60 ? oneLine : '${oneLine.substring(0, 60)}…';
   }
 }
 
+/// 类型徽标:预设 / 规则,以底色区分两类条目。
 class _KindBadge extends StatelessWidget {
   final PromptItemKind kind;
   const _KindBadge({required this.kind});
@@ -179,8 +197,12 @@ class _KindBadge extends StatelessWidget {
   }
 }
 
-/// 提示词项新建/编辑屏。
+/// 提示词项新建/编辑屏:类型、名称、正文、排序与启用开关。
+///
+/// 内容必填;位置按整数解析,非法输入回落 0(不阻断保存)。保存后失效列表
+/// 并返回上一页;直接返回即丢弃未保存内容。
 class PromptItemEditScreen extends ConsumerStatefulWidget {
+  /// null 表示新建;非 null 时以该行为初值编辑。
   final PromptItem? item;
   const PromptItemEditScreen({super.key, this.item});
 
@@ -218,6 +240,7 @@ class _PromptItemEditScreenState extends ConsumerState<PromptItemEditScreen> {
     super.dispose();
   }
 
+  /// 保存:正文为空即提示中止;名称允许留空(列表回退展示正文摘要)。
   Future<void> _save() async {
     if (_text.text.trim().isEmpty) {
       ScaffoldMessenger.of(

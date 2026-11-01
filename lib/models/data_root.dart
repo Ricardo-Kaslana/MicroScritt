@@ -1,3 +1,8 @@
+/// 应用数据根目录的统一解析。
+///
+/// data 层与 backend 层共用;按分层约定放在 `lib/models/`,两侧互不 import。
+library;
+
 import 'dart:io';
 import 'package:path/path.dart' as p;
 

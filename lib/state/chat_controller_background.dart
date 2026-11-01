@@ -1,9 +1,15 @@
+// 后台维护:自动维护轮、记忆/生图指导主动轮、/rerun 重跑与后台运行时解析;
+// 所有后台轮经 _backgroundInFlight 串行,忙时合并待处理对话。
 part of 'chat_controller.dart';
 
-/// 后台agent:自动维护轮/记忆与生图指导主动轮/后台运行时解析/结果摘要与失败文案。
+/// 后台 agent:自动维护轮/记忆与生图指导主动轮/后台运行时解析/结果摘要与失败文案。
 abstract class ChatControllerBackground extends ChatControllerSession {
+  /// 单次唤醒内最多连跑的后台轮数;剩余待处理对话留到下一次输入。
   static const _maxMaintenanceRounds = 2;
 
+  /// 自动维护入口:累加唤醒号并合并待处理标志;在飞轮不打断,新对话只标记
+  /// 待处理,当前轮收敛后由 [_startPendingMaintenance] 续跑。生图按
+  /// `imageInterval` 降频,变量维护从固定基线起步(最近三条)。
   void _fireBackgroundMaintenance(int targetSeq) {
     final sessionId = state.sessionId;
     if (sessionId == null) return;
@@ -46,6 +52,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     _startPendingMaintenance();
   }
 
+  /// 启动待处理的后台维护轮(串行):同一时刻只允许一个在飞轮,令牌在入口
+  /// 换发;会话已切换或后台被关闭时直接返回。
   void _startPendingMaintenance() {
     if (!ref.mounted || _backgroundInFlight || !_backgroundPending) return;
     final sessionId = state.sessionId;
@@ -60,10 +68,10 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     unawaited(backgroundTask!);
   }
 
-  /// 解析后台用运行时(后端/模型/参数):后台agent 若指定了专用模型,则用该模型
-  /// (可解耦于主写引擎的模型);未指定(或该模型已失效)时回退主写引擎的后端与
-  /// 模型。推理强度取后台独立设置(background_reasoning_level),不跟随主对话的
-  /// 推理等级。后端未配置返回 null。
+  /// 解析后台用运行时(后端/模型/参数):后台 agent 若指定了专用模型,则用该
+  /// 模型(可解耦于主写引擎的模型);未指定(或该模型已失效)时回退主写引擎的
+  /// 后端与模型。推理强度取后台独立设置(background_reasoning_level),不跟随
+  /// 主对话的推理等级。后端未配置返回 null。
   Future<
     ({
       LlmBackend backend,
@@ -110,9 +118,9 @@ abstract class ChatControllerBackground extends ChatControllerSession {
   }
 
   /// 主动初始化会话记忆:新会话记忆为空时,用户点击「生成初始记忆」触发一次,依据
-  /// **角色卡 + 常驻(恒定)世界书**生成一份初始长期记忆并落库。CW 批起记忆由
-  /// 用户主动维护:初始化/手动编辑/全量重生成([regenerateMemory])三途,后台
-  /// agent 不再逐轮改写(记忆非空时按钮本就不出现,这里再防御一次)。
+  /// **角色卡 + 常驻(恒定)世界书**生成一份初始长期记忆并落库。记忆由用户主动
+  /// 维护:初始化/手动编辑/全量重生成([regenerateMemory])三途,后台 agent 不再
+  /// 逐轮改写(记忆非空时按钮本就不出现,这里再防御一次)。
   ///
   /// 与自动后台维护共用 [_backgroundInFlight] 串行化与后台专用模型选择,避免两轮
   /// 后台 LLM 并发写记忆互相覆盖。
@@ -151,8 +159,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
       return;
     }
     _backgroundInFlight = true;
-    // 本轮令牌(EF 批换发语义):此刻无任何在飞后台轮(串行化已保证),
-    // 换新实例并捕获;闭包与结果判定都认这个实例。
+    // 本轮令牌:此刻无任何在飞后台轮(串行化已保证),换新实例并捕获;
+    // 闭包与结果判定都认这个实例。
     _backgroundToken = InterruptToken();
     final token = _backgroundToken;
     state = state.copyWith(
@@ -199,8 +207,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
       return;
     }
     _backgroundInFlight = true;
-    // 本轮令牌(EF 批换发语义):此刻无任何在飞后台轮(串行化已保证),
-    // 换新实例并捕获;闭包与结果判定都认这个实例。
+    // 本轮令牌:此刻无任何在飞后台轮(串行化已保证),换新实例并捕获;
+    // 闭包与结果判定都认这个实例。
     _backgroundToken = InterruptToken();
     final token = _backgroundToken;
     state = state.copyWith(
@@ -264,8 +272,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
       return;
     }
     _backgroundInFlight = true;
-    // 本轮令牌(EF 批换发语义):此刻无任何在飞后台轮(串行化已保证),
-    // 换新实例并捕获;闭包与结果判定都认这个实例。
+    // 本轮令牌:此刻无任何在飞后台轮(串行化已保证),换新实例并捕获;
+    // 闭包与结果判定都认这个实例。
     _backgroundToken = InterruptToken();
     final token = _backgroundToken;
     state = state.copyWith(
@@ -297,8 +305,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
   /// [action] 在解析出运行时后执行;[isImageGuide] 区分落库后的失效对象
   /// (记忆失效 memoriesProvider + 重算上下文;指导失效 imageGuideProvider)。
   /// [runningSummary] 仅用于异常兜底文案。[token] 是调用方捕获的本轮中断
-  /// 令牌(EF 批换发语义):结果判定只认它,不读控制器字段 —— 期间并发的
-  /// 其它轮换发不影响本轮的"已中断"判定。
+  /// 令牌:结果判定只认它,不读控制器字段 —— 期间并发的其它轮换发不影响本轮
+  /// 的"已中断"判定。
   Future<void> _runMemoryAction({
     required int sessionId,
     required String runningSummary,
@@ -397,7 +405,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
               : turn.skippedReason,
         );
       } else {
-        // 引擎失败(C4):按细分原因给出更具体的文案;引擎披露的诊断摘要
+        // 引擎失败:按细分原因给出更具体的文案;引擎披露的诊断摘要
         // (后端错误消息 / 响应片段)拼在括号里,帮用户区分网关报错与空响应。
         final reason = turn.failureReason;
         final base = switch (reason) {
@@ -444,6 +452,9 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     }
   }
 
+  /// 自动维护轮执行体:至多 [_maxMaintenanceRounds] 轮,每轮核对令牌/代数/
+  /// 唤醒号,只消费属于自己的待处理标志;变量有剩余或期间来了新对话时续跑,
+  /// 图片任务与轮次解耦,由落点回调记录替换目标。
   Future<void> _runBackgroundMaintenance({
     required int sessionId,
     required int epoch,
@@ -903,7 +914,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
   }
 
   /// 成功轮记账(`_runBackgroundMaintenance` 与重跑共用):
-  /// - 变量真跑了才更新重放窗口(成功但没跑变量的轮次清空,避免重放到过旧批次);
+  /// - 变量真跑了才更新重放窗口(成功但没跑变量的轮次清空,避免重放到过旧区间);
   /// - 有图片任务时作废旧目标、把收集器留给回调逐张填;没图片任务则连旧图一起
   ///   作废 —— 那一轮的图片不再是"最新结果",重跑不该去替换它。
   void _recordMaintenanceWindow(
@@ -920,6 +931,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     _recordMaintenanceImages(turn, roundImages);
   }
 
+  /// 记录本轮图片任务:作废旧替换目标,把收集器交给任务回调逐张填充;
+  /// 任务收敛后清空 [_backgroundImageTask],解除对 `/rerun` 的阻塞。
   void _recordMaintenanceImages(
     BackgroundTurnResult turn,
     List<BackgroundImagePlacement> roundImages,
@@ -949,7 +962,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
   /// 生图落点回调(自动维护与重跑共用):
   /// - 记进本轮收集器,归属校验通过后同步到 [_lastMaintenanceImages](供下次重跑
   ///   原地替换;替换会改写描述,所以记的正是新描述);
-  /// - 原地替换时 bump 图片修订号(与 regenerateImage 同款),气泡才会换掉缓存的旧图;
+  /// - 原地替换时递增图片修订号(与 regenerateImage 同款),气泡才会换掉缓存的旧图;
   /// - 刷新消息列表;[summaryGuard] 通过时把摘要里的「图片生成中」改成完成文案。
   void Function(BackgroundImagePlacement) _imagePlacementHandler({
     required int sessionId,

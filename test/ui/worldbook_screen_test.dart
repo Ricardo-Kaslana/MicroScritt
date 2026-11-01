@@ -1,3 +1,4 @@
+// 世界书页 widget 测试:条目列表与启停、批量启停、删除、新建条目与菜单入口。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -31,7 +32,7 @@ void main() {
           characterId: 0,
           name: '被咒之剑',
           keys: ['圣剑', 'excalibur'],
-          // 表单外字段 + extra 透传:启停(EJ 修)后必须原样保留。
+          // 表单外字段 + extra 透传:启停后必须原样保留。
           caseSensitive: true,
           matchWholeWords: true,
           selective: true,
@@ -73,7 +74,7 @@ void main() {
     expect(toggled.enabled, isFalse);
     expect(entries.singleWhere((e) => e.name.isEmpty).enabled, isTrue);
     // 启停只翻 enabled:表单外的匹配语义字段与 extra 透传字段不再被重建抹掉
-    //(旧实现逐字段重建,启停一次即丢,EJ 修)。
+    //(旧实现逐字段重建,启停一次即丢)。
     expect(toggled.caseSensitive, isTrue);
     expect(toggled.matchWholeWords, isTrue);
     expect(toggled.selective, isTrue);

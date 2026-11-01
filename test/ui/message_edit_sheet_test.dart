@@ -1,3 +1,5 @@
+// 聊天页消息编辑底部区:打开/保存/取消、字数统计、按内容收缩的布局回归,
+// 以及经真实 sqflite 落库后的气泡刷新。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

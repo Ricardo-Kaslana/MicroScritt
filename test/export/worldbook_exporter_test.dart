@@ -1,3 +1,4 @@
+// 世界书导出测试:ST World Info 形态、order/uid 回退与经导入器的往返。
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';

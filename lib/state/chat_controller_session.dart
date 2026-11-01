@@ -1,13 +1,15 @@
+// 会话生命周期:原子切换加载、窗口化刷新、贴顶分页、搜索定位与会话列表失效。
 part of 'chat_controller.dart';
 
 /// 会话生命周期:原子切换加载/贴顶分页/窗口消息刷新/会话列表失效/token 用量持久化。
 abstract class ChatControllerSession extends ChatControllerContext {
+  /// 按当前窗口下界刷新消息列表(窗口化;floor 为 null 时等价全量)。
+  /// 并发刷新只允许最新一次查询落进 state,晚到的旧快照不得覆盖新图。
   Future<void> _refreshMessages() async {
     final sessionId = state.sessionId;
     if (sessionId == null || !ref.mounted) return;
     final fetch = ++_messageFetchSeq;
-    // 窗口化(DV 批):按当前窗口下界刷新,而非全量重读 —— 会话越长收益
-    // 越大;从未窗口化的会话(floor=null)等价全量,行为不变。
+    // 会话越长收益越大;从未窗口化的会话(floor=null)行为不变。
     final messages = await ref
         .read(messageRepositoryProvider)
         .bySessionSince(sessionId, sinceSeq: _windowFloor);
@@ -29,6 +31,12 @@ abstract class ChatControllerSession extends ChatControllerContext {
     ref.invalidate(sessionInfosProvider(characterId));
   }
 
+  /// 加载会话并原子切换聊天页状态。
+  ///
+  /// 入口先使后台任务失效并递增代数:旧会话的在飞轮随后因归属校验失败而
+  /// 丢弃结果;加载链每一步 await 后都复查挂载与代数,任何一步期间发生切换
+  /// 即放弃本次装载。会话级元数据立即清空,但消息转录暂存到新数据就绪,
+  /// 避免切换瞬间闪出空态(归属见 [ChatState.transcriptSessionId])。
   Future<void> load({
     required int sessionId,
     required CharacterCard character,
@@ -36,12 +44,11 @@ abstract class ChatControllerSession extends ChatControllerContext {
     _invalidateBackground();
     _sessionEpoch++;
     final epoch = _backgroundEpoch;
-    // 原子切换(DR 批):会话级元数据(sessionId/上下文/token/草稿/流式/后台
-    // 状态)立即清空 —— send 靠 sessionId=null 门控,上下文面板/统计条不会
-    // 显示上个会话的残留(沿用旧的清空决策);但**保留消息转录**,旧会话的
-    // 气泡继续显示到新会话数据就绪、由下方最终赋值一次性整体替换。旧的
-    // "先清空一切"会让切换瞬间闪出『发一条消息开始对话』空态。首次加载
-    // (本来就无消息)不受影响。
+    // 原子切换:会话级元数据(sessionId/上下文/token/草稿/流式/后台状态)立即
+    // 清空 —— send 靠 sessionId=null 门控,上下文面板/统计条不会显示上个
+    // 会话的残留;但**保留消息转录**,旧会话气泡继续显示到新会话数据就绪、
+    // 由最终赋值一次性整体替换。旧的"先清空一切"会让切换瞬间闪出
+    // 『发一条消息开始对话』空态。首次加载(本来就无消息)不受影响。
     state = state.messages.isEmpty
         ? const ChatState()
         // 暂存的转录连同它的归属会话一起保留:transcriptSessionId 是 UI 判定
@@ -51,16 +58,16 @@ abstract class ChatControllerSession extends ChatControllerContext {
             messages: state.messages,
             transcriptSessionId: state.transcriptSessionId ?? state.sessionId,
           );
-    // 草稿属会话级瞬态(EF 批起在独立 provider):切换即刻清零,不让上一
-    // 会话的生成中气泡在切换窗口里闪现。
+    // 草稿属会话级瞬态(独立 provider):切换即刻清零,不让上一会话的生成中
+    // 气泡在切换窗口里闪现。
     _setDraft('');
-    // 窗口化加载(DV 批)的游标随会话切换重置。
+    // 窗口化加载的游标随会话切换重置。
     _windowFloor = null;
     _loadingOlder = false;
     // 消息取**窗口**(单次往返:全部 system 行 + 显示/组装双口径尾部,边界
     // 以内联子查询计算)而非全量 —— 进入延迟与内存不再随会话长度线性涨。
     // 注意保持这里的 await 链顺序形态:每一条查询在前一条落定后才派发,
-    // 边界条件与真机/测试的事件循环推进模型都兼容(DV 批曾尝试并行起跑,
+    // 边界条件与真机/测试的事件循环推进模型都兼容(曾尝试并行起跑,
     // 在无帧推进的等待窗内会饿死后续链路,已回退)。
     final window = await ref
         .read(messageRepositoryProvider)
@@ -91,8 +98,8 @@ abstract class ChatControllerSession extends ChatControllerContext {
     _backgroundCursorSeq = null;
     _maintenanceRunCount = 0;
     // 基线上下文预览:打开会话即能看到"当前上下文里有什么",不必先发一条消息。
-    // 变量不参与主写组装(CL 批起变量只进后台 agent 上下文),故此处不读 variables;
-    // 技能同理不进组装(CW 批起只有 @ 触发附件,随消息历史进数组)。
+    // 变量不参与主写组装(只进后台 agent 上下文),故此处不读 variables;
+    // 技能同理不进组装(只有 @ 触发附件,随消息历史进数组)。
     final snapshot = ContextAssembler().assemble(
       character: character,
       items: await ref.read(promptItemRepositoryProvider).allEnabled(),
@@ -136,9 +143,9 @@ abstract class ChatControllerSession extends ChatControllerContext {
     await _reassembleContext();
   }
 
-  /// 按当前窗口下界抓取消息(不重算边界)。[load] 经 [_fetchSessionWindow]
-  /// 计算下界;运行期刷新(发送/压缩/回滚)用本方法 —— 分页补进来的历史
-  /// 在刷新后保持在窗。
+  /// 按当前窗口下界抓取消息(不重算边界)。[load] 经
+  /// `MessageRepository.sessionWindow` 计算下界;运行期刷新(发送/压缩/回滚)
+  /// 用本方法 —— 分页补进来的历史在刷新后保持在窗。
   Future<List<Message>> _fetchCurrentWindow(int sessionId) {
     return ref
         .read(messageRepositoryProvider)
@@ -194,7 +201,7 @@ abstract class ChatControllerSession extends ChatControllerContext {
   /// 目标已在窗口内时只做存在性校验;在更早历史中时才把显示窗口下界下移到
   /// 目标 seq 并重读 —— 这会暂时载入「目标到最新」的整段尾部(搜索跳转的
   /// 显式代价),但**不影响组装窗口**:上下文组装始终独立读
-  /// [MessageRepository.activeWindow](见 `_reassembleContext`),搜索跳转
+  /// `MessageRepository.activeWindow`(见 `_reassembleContext`),搜索跳转
   /// 不会改变发给 LLM 的内容。目标已被删除、属于其它会话或不是聊天流可见行
   /// (system/附件)时返回 false,绝不把窗口换成半截数据。
   Future<bool> revealMessage(int messageId) async {

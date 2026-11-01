@@ -1,9 +1,19 @@
+/// 消息行(`messages` 表)的持久化:追加、窗口读取、图片分块与导入落库。
+///
+/// 消息只追加、seq 单调;图片字节永不随列表查询整列加载(Android
+/// CursorWindow 上限 2MB),一律按 id 分块读取。
+library;
+
 import 'dart:collection';
 
 import 'package:sqflite/sqflite.dart';
 import '../models/message.dart';
 import 'database.dart';
 
+/// 消息仓储:单行追加、显示/组装双口径窗口读取与内存缓存。
+///
+/// 缓存按 `(Database, sessionId, includeImages)` 跨实例共享,任一实例的写
+/// 路径都会精确失效对应会话;窗口读取不进缓存(形状由调用方游标决定)。
 class MessageRepository {
   final AppDatabase db;
 
@@ -28,10 +38,9 @@ class MessageRepository {
   static final LinkedHashMap<_MessageCacheKey, List<Message>> _cache =
       LinkedHashMap<_MessageCacheKey, List<Message>>();
 
-  /// 容量 12(DT 批起从 64 收敛):缓存的意义是"同一轮生成/同一次交互里的
-  /// 重复读",活跃会话同一时刻不过一两个,12 足以覆盖当前 + 近期读过的
-  /// 会话与导出变体;64 会让重度多会话使用的实例常驻几十份全量消息列表
-  /// 白占内存。逐出按插入序(FIFO),被逐出的会话下次读照常回库重建。
+  /// 容量 12:缓存的意义是"同一轮生成/同一次交互里的重复读",活跃会话
+  /// 同一时刻不过一两个;再大只会让重度多会话实例常驻几十份全量消息列表。
+  /// 逐出按插入序(FIFO),被逐出的会话下次读照常回库重建。
   static const int _cacheCap = 12;
 
   MessageRepository(this.db);
@@ -50,17 +59,19 @@ class MessageRepository {
     _cache[_MessageCacheKey(db, sessionId, includeImages)] = messages;
   }
 
-  // seq 的读-写在同一事务内完成:单连接下事务串行,消除
-  // "读 MAX(seq) 后并发插入拿到相同 seq" 的非原子窗口。
-  /// 追加一条消息,返回落库后的完整行(id/seq 已定)。事务成功后把该会话的
-  /// 轻量缓存**替换为追加后的新列表**(替换而非原地改动:旧列表实例保持
-  /// 冻结,持有旧快照的 ChatState/组装输入不受影响)—— 发送管线每轮
-  /// 「落库 → bySession 刷新 state」的第二跳由此从整表重读(append 使缓存
-  /// 失效后必然回库)变成一次缓存命中,每轮成本从 O(会话长度) 降为 O(1),
-  /// 会话越长收益越大。轻量缓存行按 [bySession] 同口径剥掉 image_base64
-  /// (置 has_image 标志,字节走惰性单条读取);带图缓存条目无法原地补行
-  /// (图片字节逐条回填),连同失效等下次读库。缓存本就不在(首次/被逐出)
-  /// 时维持旧行为:仅失效,等下次读库重建。
+  /// 追加一条消息,返回落库后的完整行(id/seq 已定)。
+  ///
+  /// seq 的读-写在同一事务内完成:单连接下事务串行,消除"读 MAX(seq) 后
+  /// 并发插入拿到相同 seq"的非原子窗口。
+  ///
+  /// 事务成功后把该会话的轻量缓存**替换为追加后的新列表**(替换而非原地
+  /// 改动:旧列表实例保持冻结,持有旧快照的 ChatState/组装输入不受影响)——
+  /// 发送管线每轮「落库 → bySession 刷新 state」的第二跳由此从整表重读
+  /// (append 使缓存失效后必然回库)变成一次缓存命中,每轮成本从
+  /// O(会话长度) 降为 O(1),会话越长收益越大。轻量缓存行按 [bySession]
+  /// 同口径剥掉 image_base64(置 has_image 标志,字节走惰性单条读取);
+  /// 带图缓存条目无法原地补行(图片字节逐条回填),连同失效等下次读库。
+  /// 缓存本就不在(首次/被逐出)时维持旧行为:仅失效,等下次读库重建。
   Future<Message> append({
     required int sessionId,
     required String role,
@@ -133,14 +144,17 @@ class MessageRepository {
     _cache.remove(_MessageCacheKey(db, sessionId, true));
   }
 
-  /// 默认轻量查询:不取 `image_base64`(每张图 2~4MB 的 base64 字符串,全量读
-  /// 会让聊天每次刷新都搬几十 MB),只带 `has_image` 标志,渲染层经
-  /// [imageBase64For] 按需单条读取。导出等确需完整数据的调用方传
-  /// `includeImages: true`(图片同样经 [imageBase64For] 分块回填,不整列读)。
+  // 轻量投影:不取 `image_base64`,只带 `has_image` 标志;图片字节由
+  // [imageBase64For] 按需单条读取。
   static const String _messageProjection =
       'id, session_id, role, content, seq, is_compacted, compact_of, image_url, image_prompt, '
       "kind, ref_id, image_base64 IS NOT NULL AND image_base64 != '' AS has_image";
 
+  /// 某会话的全部消息,按 seq 升序。
+  ///
+  /// 默认轻量:每张图片 2~4MB 的 base64,全量读会让聊天每次刷新都搬几十 MB,
+  /// 故只回 has_image 标志,渲染层经 [imageBase64For] 按需读取。导出等确需
+  /// 完整数据的调用方传 `includeImages: true`,图片同样逐条分块回填、不整列读。
   Future<List<Message>> bySession(int sessionId, {bool includeImages = false}) async {
     final cached = _peek(db.db, sessionId, includeImages);
     if (cached != null) return cached;
@@ -164,12 +178,12 @@ class MessageRepository {
     return rows;
   }
 
-  // ===== 窗口化读取(DU 批)=====
+  // ===== 窗口化读取 =====
   //
   // 长会话的全量读取成本随行数线性涨(进入延迟/内存/行映射全如此)。本组
   // 原语只服务 **UI 显示窗口**(聊天页尾部若干行 + 分页游标);**上下文组装
-  // 不走这里** —— 组装自 2026-09-28 批起不再按条数裁剪,必须看到全部未折叠
-  // 活跃行,由 [activeWindow] 独立取。两者分离是刻意的:分页会下移显示游标,
+  // 不走这里** —— 组装不按条数裁剪,必须看到全部未折叠活跃行,由
+  // [activeWindow] 独立取。两者分离是刻意的:分页会下移显示游标,
   // 若组装共用同一游标,用户翻阅历史就会改变发给 LLM 的上下文。
   // [bySession] 全量读取保留给压缩/导出/后台引擎等确需全量转录的调用方,
   // 静态缓存亦只服务全量口径。
@@ -178,10 +192,10 @@ class MessageRepository {
   /// `role != system`)的 seq;行数不足 [displayCount] 时返回 null(全量在窗)。
   ///
   /// **只服务 UI 显示窗口**(聊天页渲染 + 分页游标)。组装窗口**不共用**它 ——
-  /// 组装需要全部未折叠活跃行,由 [activeWindow] 独立取(2026-09-28 批)。
+  /// 组装需要全部未折叠活跃行,由 [activeWindow] 独立取。
   /// 两者必须分离:分页([bySessionPageBefore])会下移显示游标,若组装共用
   /// 同一游标,用户翻阅历史就会改变发给 LLM 的上下文。
-  /// 边界的 OFFSET 定位依赖 v44 的 (session_id, seq) 索引。
+  /// 边界的 OFFSET 定位依赖 `(session_id, seq)` 索引。
   Future<int?> sessionWindowFloor({
     required int sessionId,
     required int displayCount,
@@ -194,17 +208,17 @@ class MessageRepository {
     ));
   }
 
-  /// 单次往返的窗口读取(DV 批):`sessionWindowFloor` + `bySessionSince`
-  /// 的合并形态 —— 显示/组装双口径边界以内联标量子查询计算,消息行与窗口
-  /// 下界一次取回。进入会话的加载链路里每一次 DB 往返都对总延迟有贡献,
-  /// 也影响测试环境(FakeAsync)下事件循环的推进预算,能合并则合并。
+  /// 单次往返的窗口读取:`sessionWindowFloor` + `bySessionSince` 的合并形态
+  /// —— 显示/组装双口径边界以内联标量子查询计算,消息行与窗口下界一次取回。
+  /// 进入会话的加载链路里每一次 DB 往返都对总延迟有贡献,也影响测试环境
+  /// (FakeAsync)下事件循环的推进预算,能合并则合并。
   /// 返回 [SessionMessageWindow.floor] 为 null 表示无需窗口化(全量在窗)。
   Future<SessionMessageWindow> sessionWindow({
     required int sessionId,
     required int displayCount,
   }) async {
     // 边界是标量子查询(0 或 1 行):OFFSET 越界返回空集,COALESCE(-1) 兜底
-    // "装得下 => 全量在窗"。定位依赖 v44 的 (session_id, seq) 索引。
+    // "装得下 => 全量在窗"。定位依赖 `(session_id, seq)` 索引。
     const boundarySubquery = '''
         SELECT seq FROM messages
         WHERE session_id = ? AND COALESCE(kind, 'chat') = 'chat' AND role != 'system'
@@ -232,9 +246,9 @@ class MessageRepository {
 
   /// 组装窗口:全部 system 行 + **全部未折叠活跃行**,按 seq 升序。
   ///
-  /// 与 [sessionWindow] 的分工是刻意的(2026-09-28 批):后者服务 UI 显示
-  /// (尾部若干行 + 分页游标),本方法服务**上下文组装** —— 组装不再按条数
-  /// 裁剪,必须看到全部未折叠活跃行,少一行就是上下文缺内容。
+  /// 与 [sessionWindow] 的分工是刻意的:后者服务 UI 显示(尾部若干行 +
+  /// 分页游标),本方法服务**上下文组装** —— 组装不按条数裁剪,必须看到
+  /// 全部未折叠活跃行,少一行就是上下文缺内容。
   /// 用独立的活跃下界(最早未折叠活跃行的 seq)而非显示游标:分页会下移显示
   /// 游标,共用它会让"用户翻阅历史"改变发给 LLM 的上下文。
   /// 活跃行规模由压缩按 token 占用率控制(压缩把旧行标 `is_compacted=1`),
@@ -507,9 +521,11 @@ class MessageRepository {
     return rows.map(Message.fromMap).toList();
   }
 
+  /// 追加一条 system 行(压缩摘要等),返回新行 id。
+  ///
+  /// seq 读-写与 [append] 同款事务模板,防止并发插入拿到相同 seq。
   Future<int> insertSystem({required int sessionId, required String content}) async {
     _invalidate(db.db, sessionId);
-    // seq 读-写与 append 同款事务模板(文件头约定:同事务内完成防并发重复)。
     return db.db.transaction((txn) async {
       final next = Sqflite.firstIntValue(
         await txn.rawQuery('SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?', [sessionId]),
@@ -518,6 +534,11 @@ class MessageRepository {
     });
   }
 
+  /// 把 [ids] 标记为已压缩折叠并指向摘要行 [compactOf]。
+  ///
+  /// 先按首条 id 反查会话以失效缓存(级联删除会绕过本仓库,见 [_cache]);
+  /// 批量 update 放在普通 batch 中,不构成事务边界 —— 调用方需要原子性时
+  /// 用 [insertSystemAndCompact]。
   Future<void> markCompacted(List<int> ids, {required int compactOf}) async {
     if (ids.isEmpty) return;
     // 需要知道受影响会话以失效其缓存;从任意一个 id 反查 session_id。

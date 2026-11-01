@@ -1,3 +1,4 @@
+// 资源导入测试:五类资源往返进新库、重复项跳过与格式校验先于任何写入。
 import 'dart:convert';
 import 'dart:io';
 

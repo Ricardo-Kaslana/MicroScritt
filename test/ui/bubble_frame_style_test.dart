@@ -1,3 +1,5 @@
+// 气泡边框样式:默认面/圆角、定制色与透明度、尾巴角固定、用户气泡
+// 不受定制,以及高亮描边与文字色自动对比。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/bubble_style.dart';

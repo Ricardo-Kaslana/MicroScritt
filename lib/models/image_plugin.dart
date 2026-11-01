@@ -1,26 +1,70 @@
+/// 生图插件包模型:manifest、动态设置字段、权限与代码。
+///
+/// 插件是单文件 JSON(`formatVersion: 1`):manifest 声明身份、设置表单、
+/// 联网 origin 白名单与支持的操作,`code` 为同步 JS `step(ctx)`。宿主只
+/// 执行受限动作(`http`/`sleep`/`done`/`error`),强制 origin 校验、超时、
+/// 响应大小上限与禁重定向;解析失败一律抛 [FormatException],不进入
+/// 数据库。
+///
+/// 内置协议插件同样经此模型解析,但代码由仓库维护、用户不可编辑。
+library;
+
 import 'dart:convert';
 
+/// 当前支持的插件包格式版本;不匹配的包一律拒绝导入。
 const int kImagePluginFormatVersion = 1;
+
+/// 插件包(manifest + code)的最大字节数。
 const int kMaxImagePluginPackageBytes = 1024 * 1024;
+
+/// 插件 JS 代码的最大字节数;与包上限分开校验,防止 manifest 挤占额度。
 const int kMaxImagePluginCodeBytes = 512 * 1024;
 
+/// 动态设置字段的类型,决定设置页控件与默认值校验规则。
 enum ImagePluginFieldType {
+  /// 单行文本。
   text,
+
+  /// 密码文本(界面默认遮蔽)。
   password,
+
+  /// HTTP(S) 地址;可被 [ImagePluginPermissions.endpointSetting] 引用。
   url,
+
+  /// 整数。
   integer,
+
+  /// 数值(整数或小数)。
   number,
+
+  /// 布尔开关。
   boolean,
+
+  /// 枚举选择,必须提供非空 options 且默认值在选项内。
   select,
 }
 
+/// 插件声明的一项动态设置(渲染为设置页表单字段)。
 class ImagePluginField {
+  /// 设置键;写入 `pluginSettings`,须匹配 `^[A-Za-z][A-Za-z0-9_]{0,63}$`。
   final String key;
+
+  /// 表单标签。
   final String label;
+
+  /// 控件类型与默认值校验规则。
   final ImagePluginFieldType type;
+
+  /// 是否必填;仅为界面提示,宿主不代插件做业务校验。
   final bool required;
+
+  /// 默认值;null 表示无默认值,[type] 必须与之匹配。
   final Object? defaultValue;
+
+  /// 输入提示文本,可为空。
   final String hint;
+
+  /// [ImagePluginFieldType.select] 的可选值;其他类型恒为空。
   final List<ImagePluginOption> options;
 
   const ImagePluginField({
@@ -45,8 +89,12 @@ class ImagePluginField {
   };
 }
 
+/// [ImagePluginFieldType.select] 的一个选项。
 class ImagePluginOption {
+  /// 写入 `pluginSettings` 的值;允许空串。
   final String value;
+
+  /// 下拉框展示文本。
   final String label;
 
   const ImagePluginOption({required this.value, required this.label});
@@ -54,8 +102,17 @@ class ImagePluginOption {
   Map<String, Object?> toJson() => {'value': value, 'label': label};
 }
 
+/// 插件联网权限声明。
+///
+/// 宿主只允许请求 [allowedOrigins] 中的精确 origin(不匹配子域、不支持
+/// 通配符),这是插件沙箱的边界;`http` 动作的相对路径会拼到 endpoint
+/// 所在 origin 上。
 class ImagePluginPermissions {
+  /// 允许访问的精确 origin(如 `https://api.example.com`),不含路径。
   final List<String> allowedOrigins;
+
+  /// 指定哪个设置字段提供端点 origin:`baseUrl` 表示核心配置的 API 地址,
+  /// 其余值必须是本插件声明的 url 类型设置键。
   final String? endpointSetting;
 
   const ImagePluginPermissions({
@@ -69,13 +126,27 @@ class ImagePluginPermissions {
   };
 }
 
+/// 一个已解析的生图插件(manifest + 代码 + 启用状态)。
 class ImagePlugin {
+  /// 插件 id,须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`。
   final String id;
+
+  /// 显示名。
   final String name;
+
+  /// 插件自报版本;仅用于展示与排障。
   final String version;
+
+  /// 动态设置字段(有序,键唯一)。
   final List<ImagePluginField> fields;
+
+  /// 联网权限声明。
   final ImagePluginPermissions permissions;
+
+  /// 同步 JS `step(ctx)` 源码。
   final String code;
+
+  /// 是否启用;停用后引用它的配置不可发起生图。
   final bool enabled;
 
   /// 该插件是否使用宿主的标准生图参数(size/scale/cfg/sampler/artist/噪声/步数/
@@ -112,6 +183,9 @@ class ImagePlugin {
     supportsListModels: supportsListModels,
   );
 
+  /// 从单文件插件包解析;先校验总大小,再解析 JSON 与全部字段。
+  ///
+  /// 体积/格式/字段非法时抛 [FormatException],调用方据此提示导入失败。
   factory ImagePlugin.fromPackageJson(String source) {
     if (utf8.encode(source).length > kMaxImagePluginPackageBytes) {
       throw const FormatException('插件文件过大(上限 1MB)');
@@ -125,6 +199,10 @@ class ImagePlugin {
     return _parse(_object(decoded, '插件根节点'), null, true);
   }
 
+  /// 从数据库行重建:manifest 与 code 分列存储,`enabled` 为当前启停状态。
+  ///
+  /// manifest 损坏时抛 [FormatException];调用方需 fail-safe 跳过坏行,
+  /// 不能让单条插件记录阻断设置页加载。
   factory ImagePlugin.fromStorageJson(
     String manifest,
     String code,
@@ -290,6 +368,7 @@ class ImagePlugin {
     if (!valid) throw FormatException('设置 $key 的默认值与类型不匹配');
   }
 
+  /// 编码 manifest(不含 code;code 在库中单独一列,避免重复存储)。
   String toManifestJson() => jsonEncode({
     'formatVersion': kImagePluginFormatVersion,
     'id': id,
@@ -327,6 +406,10 @@ class ImagePlugin {
   }
 }
 
+/// 归一化并校验联网 origin。
+///
+/// 只接受无用户信息、无通配符、无路径/查询/片段的 http(s) 地址;非法值抛
+/// [FormatException]。返回 [Uri.origin] 形式,供严格相等匹配。
 String normalizeImagePluginOrigin(String value) {
   final uri = Uri.parse(value.trim());
   if (!(uri.isScheme('http') || uri.isScheme('https')) ||

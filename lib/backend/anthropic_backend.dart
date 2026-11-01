@@ -1,3 +1,9 @@
+/// Anthropic Messages 协议的流式后端。
+///
+/// 负责 SSE 解析、system/末条消息的多断点提示缓存、thinking budget 映射
+/// 与用量快照合并;每次请求独享连接,取消订阅即断链。
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
@@ -9,7 +15,9 @@ import 'sse_parser.dart';
 import 'stream_timeout.dart';
 import 'upstream_error.dart';
 
+/// Anthropic Messages 协议后端。
 class AnthropicBackend implements LlmBackend {
+  /// 本次后端使用的 provider/模型配置。
   final BackendConfig config;
 
   /// 测试注入的 client(生产为 null,每次请求独享新建)。
@@ -28,7 +36,7 @@ class AnthropicBackend implements LlmBackend {
   @override
   String get id => 'anthropic';
 
-  /// 推理等级 → Anthropic thinking budget_tokens 映射。
+  /// 推理等级 → Anthropic thinking budget_tokens 映射;off 不在表中。
   static const _thinkingBudgets = {
     ReasoningLevel.low: 5000,
     ReasoningLevel.medium: 10000,
@@ -63,7 +71,7 @@ class AnthropicBackend implements LlmBackend {
             request.cacheMessageBreakpoint &&
             wireMessages.isNotEmpty) {
           // 锚一个显式断点在 messages 末条上:把稳定前缀(system + 记忆第 0 条 +
-          // 历史 + 附件)整体缓存。CW 批起可变内容只追加在数组尾部(新消息/新附件/
+          // 历史 + 附件)整体缓存。可变内容只追加在数组尾部(新消息/新附件/
           // 一次性通知),断点前的字节跨轮一致,轮次间命中稳定区。后台请求只缓存
           // stableSystemPart(可变尾部不重复读),置 cacheMessageBreakpoint=false
           // 跳过此断点。

@@ -1,3 +1,4 @@
+// OpenAI 兼容后端测试:SSE 增量、故障分类、用量合并、请求头与断链超时。
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -308,8 +309,7 @@ void main() {
       temperature: 0.7,
     )).toList();
 
-    // CW 批:不再有尾部状态旁路 —— 消息数组逐条原样映射(含附件/通知在内),
-    // 用户输入始终是最后一条。
+    // 消息数组逐条原样映射(含附件/通知),用户输入始终是最后一条。
     final msgs = body['messages'] as List;
     expect(msgs.length, 4); // system + 3 数组消息
     expect((msgs[1] as Map)['content'], '<system-reminder>memory</system-reminder>');

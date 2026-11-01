@@ -1,3 +1,9 @@
+/// 管理类长列表的通用外壳:检索框 + 虚拟化列表/网格 + 滚动回顶钮。
+///
+/// 过滤在内存里完成(管理数据本来就已全量加载),这里只做小写包含匹配;
+/// 有数据但无匹配时展示内置空态,完全无数据时的引导页仍由调用方负责。
+library;
+
 import 'package:flutter/material.dart';
 import 'app_search_field.dart';
 import 'empty_state.dart';

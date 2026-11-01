@@ -1,3 +1,4 @@
+// 会话压缩服务测试:合并式单一摘要、机械折叠兜底、摘要重试与用量回调。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/data/character_repository.dart';
@@ -95,7 +96,7 @@ void main() {
     expect(summaries.single.content, 'SUMMARY');
 
     final compacted = all.where((m) => m.isCompacted).toList();
-    expect(compacted.length, 5); // 25 live - 20 kept
+    expect(compacted.length, 5); // 25 条活跃 - 保留 20 条
     expect(compacted.every((m) => m.compactOf == summaries.single.id), isTrue);
   });
 

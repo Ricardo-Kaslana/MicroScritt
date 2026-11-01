@@ -1,3 +1,4 @@
+// 上游故障分类测试:状态码/错误类型/文案判定表与错误形态提取。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/upstream_error.dart';
 

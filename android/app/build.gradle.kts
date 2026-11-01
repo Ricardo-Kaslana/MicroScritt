@@ -1,3 +1,7 @@
+// Android 应用模块:应用标识、SDK 版本与 release 签名策略。
+//
+// 开源仓库不内置签名密钥;发布构建请在本地配置 keystore,并保持
+// applicationId 与 iOS bundle id 一致。
 plugins {
     id("com.android.application")
     id("kotlin-android")

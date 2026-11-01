@@ -1,3 +1,8 @@
+/// 通用底部文本编辑区:拖拽把手 + 多行编辑 + 字数统计 + 保存。
+///
+/// 空文本(仅空白)不保存,直接按取消关闭,避免把已有内容清空。
+library;
+
 import 'package:flutter/material.dart';
 
 import 'copy_button.dart';

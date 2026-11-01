@@ -1,3 +1,9 @@
+/// LLM provider 与模型目录(`llm_providers` + `llm_models`)的持久化。
+///
+/// 把当前在用的 provider + 选中模型映射为运行链路消费的 `BackendConfig`;
+/// 模型行按 id upsert,保住被 `app_settings.background_model_id` 引用的 id。
+library;
+
 import '../backend/backend_config.dart';
 import '../models/endpoint_compat.dart';
 import '../models/llm_provider.dart';
@@ -6,7 +12,7 @@ import 'database.dart';
 /// 按 provider 分组的 LLM 后端配置持久化。
 ///
 /// 管理 `llm_providers` + `llm_models` 两张表,并把"当前在用的 provider+模型"
-/// 映射为运行链路消费的 `BackendConfig`(与旧单行配置接口对接)。
+/// 映射为运行链路消费的 `BackendConfig`。
 class LlmProviderRepository {
   final AppDatabase db;
   LlmProviderRepository(this.db);
@@ -92,6 +98,7 @@ class LlmProviderRepository {
     });
   }
 
+  /// 删除 provider 及其全部模型行(单事务,避免留下孤儿模型)。
   Future<void> deleteProvider(int id) async {
     await db.db.transaction((txn) async {
       await txn.delete('llm_models', where: 'provider_id = ?', whereArgs: [id]);

@@ -1,3 +1,4 @@
+// 提示词项管理页:种子列表、新建(规则项排在预设之后)、启用开关与删除。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -23,8 +24,8 @@ void main() {
     await tester.pumpWidget(harness());
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
     await tester.pump();
-    // 全新安装自带 2 条内置默认提示词(角色扮演基调 / 格式生成指导,均默认
-    // 启用),因此空态不出现。
+    // openTestDb 只清 provider/正则/生图插件种子,提示词种子保留:全新库
+    // 自带 2 条(角色扮演基调 / 格式生成指导,均启用),空态不出现。
     expect(find.text('暂无提示词项'), findsNothing);
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
     final all = await tester.runAsync(() => PromptItemRepository(db).all());
@@ -64,7 +65,7 @@ void main() {
       await tester.pumpAndSettle();
     });
 
-    // 新项是「规则」类,排在 12 条默认预设之后,需滚动到它再断言。
+    // 新项默认「规则」类,按 kind 排序落在默认预设之后,需滚动到再断言。
     final created = find.textContaining('永远用中文回复');
     final scrollable = find.byType(Scrollable).last;
     for (var i = 0; i < 30 && created.evaluate().isEmpty; i++) {
@@ -72,7 +73,7 @@ void main() {
       await tester.pump();
     }
     expect(created, findsWidgets);
-    // 新项默认「规则」徽标(默认库另有三条规则项,断言锚定新项所在行)。
+    // 新项带「规则」徽标;默认库里另有一条规则项,断言锚定到新项所在行。
     final newRow = find.ancestor(of: created, matching: find.byType(ListTile));
     expect(find.descendant(of: newRow, matching: find.text('规则')), findsOneWidget);
     await tester.runAsync(() => db.db.close());
@@ -87,7 +88,7 @@ void main() {
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
     await tester.pump();
 
-    // 该项排在 12 条默认预设之后,先滚动到可见。
+    // 规则项按 kind 排序落在默认预设之后,先滚动到可见。
     final togglable = find.textContaining('可开关的项');
     final scrollable = find.byType(Scrollable).last;
     for (var i = 0; i < 30 && togglable.evaluate().isEmpty; i++) {
@@ -95,7 +96,7 @@ void main() {
       await tester.pump();
     }
     await tester.runAsync(() async {
-      // 该行滚到可见,但开关可能在视图底部被 FAB 遮住;先居中摆到屏中再点。
+      // 开关可能落在视图底部被 FAB 遮住;先 ensureVisible 滚进可视区再点。
       final switchFinder = find.descendant(
         of: find.ancestor(of: find.textContaining('可开关的项'), matching: find.byType(ListTile)),
         matching: find.byType(Switch),
@@ -131,7 +132,7 @@ void main() {
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
     await tester.pump();
 
-    // 该项排在 12 条默认预设之后,先滚动到可见。
+    // 规则项按 kind 排序落在默认预设之后,先滚动到可见。
     final target = find.textContaining('可删除的项');
     final scrollable = find.byType(Scrollable).last;
     for (var i = 0; i < 30 && target.evaluate().isEmpty; i++) {

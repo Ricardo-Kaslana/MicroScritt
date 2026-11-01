@@ -1,17 +1,25 @@
+/// 剪贴板写入与文本框旁的一键复制按钮。
+///
+/// 复制内容取 [TextEditingController] 的当前值,空白内容不写入剪贴板,
+/// 避免用空串覆盖用户已有内容。
+library;
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 /// 把 [text] 写入剪贴板;空白内容不写入并返回 false。
+///
+/// 返回值供调用方决定是否给成功反馈(对勾/提示),失败不抛异常。
 Future<bool> copyTextToClipboard(String text) async {
   if (text.trim().isEmpty) return false;
   await Clipboard.setData(ClipboardData(text: text));
   return true;
 }
 
-/// 文本框标题旁的一键复制按钮:点击时读取控制器当前内容,
-/// 不订阅输入内容本身;无内容时置灰,复制成功后短暂变为对勾。
+/// 文本框标题旁的一键复制按钮:复制时直接读控制器当前文本,不缓存副本;
+/// 监听内容只为驱动置灰与提示,无内容时按钮不可点,复制成功后短暂变对勾。
 class CopyTextButton extends StatefulWidget {
   final TextEditingController controller;
   final String tooltip;

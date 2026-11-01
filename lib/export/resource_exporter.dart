@@ -1,3 +1,9 @@
+/// 全局文本资产(技能/提示词/Hooks/正则脚本/生图风格)的导出。
+///
+/// 统一使用 `{format, version, items}` 信封,便于导入端识别类型并在版本
+/// 升级时向后兼容;id 不出现在文件里,跨设备迁移不依赖原库自增 id。
+library;
+
 import 'dart:convert';
 
 import '../models/hook.dart';
@@ -7,9 +13,10 @@ import '../models/regex_script.dart';
 import '../models/skill.dart';
 
 /// 全局文本资产的导出:统一 `{format, version, items}` 信封,便于识别类型
-/// 并在版本升级时向后兼容。id 一律不出现在文件里 —— 导入端按 name 去重后
-/// 重新分配,跨设备迁移不依赖原库自增 id。
+/// 并在版本升级时向后兼容。id 一律不出现在文件里 —— 导入端按名称去重后
+/// 重新分配(提示词按 kind+name),跨设备迁移不依赖原库自增 id。
 class ResourceExporter {
+  /// 信封 `version` 的当前值;导入端遇到更大的版本会拒绝导入。
   static const int formatVersion = 1;
 
   static const String skillsFormat = 'microscritt.skills';

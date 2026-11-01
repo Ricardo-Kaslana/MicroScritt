@@ -1,3 +1,5 @@
+// 发送主流程:忙碌门控、附件展开与落库、硬挡/软挡压缩、流式生成与回复落库、
+// 中断收尾、重发/重生成与消息增删改。
 part of 'chat_controller.dart';
 
 /// 发送主流程:trySend 忙碌门控/发送管线与附件展开/硬挡与软挡压缩/回复生成/重发·重生成/消息增删改。
@@ -130,10 +132,10 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   /// [ContextBudgetPolicy.target] = 20%)。
   ///
   /// 触发依据是**上下文窗口占用量**(估算输入 / 模型容量),不再是掉窗消息
-  /// 条数;压缩后占用回落到目标挡,与软挡间约 40 个百分点的滞回天然防抖,
-  /// 不再需要旧的按条数降频(minChunk)。摘要失败共 1+3 次尝试,全部失败时
-  /// 静默放弃 —— 下一轮占用仍超软挡会自然再试。best-effort:不阻塞回复展示,
-  /// 失败不影响已落库的回复。总开关关闭或模型无容量信息时跳过。
+  /// 条数;压缩后占用回落到目标挡,与软挡间约 40 个百分点的滞回天然防抖。
+  /// 摘要失败共 1+3 次尝试,全部失败时静默放弃 —— 下一轮占用仍超软挡会自然
+  /// 再试。best-effort:不阻塞回复展示,失败不影响已落库的回复。总开关关闭
+  /// 或模型无容量信息时跳过。
   ///
   /// 压缩成功后置 [_compactNoticePending](下一次用户输入注入压缩通知)并刷新
   /// 记忆冻结副本 —— 软挡发生在回复落库后,本轮请求已发出,通知属于下一次。
@@ -172,7 +174,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     if (keep >= active.length) return; // 高占用来自系统段而非历史,压无可压
 
     // 回复已落库后的软挡压缩:同样进入「压缩中」活动态并响应停止
-    //(此刻主写流已结束,停止键本不可用 —— 置 busyCommand 让它重新可用)。
+    // (此刻主写流已结束,停止键本不可用 —— 置 busyCommand 让它重新可用)。
     state = state.copyWith(busyCommand: 'compact');
     try {
       final done = await CompactService(backend, messageRepo).compact(
@@ -323,8 +325,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         return;
       }
       state = state.copyWith(messages: messages);
-      // DG 批:剪断后消费待发通知;行落库在最后一条用户消息之后,组装期
-      // 位置校正把它挪到该用户消息之前(字节对齐旧合成位置)。
+      // 剪断后消费待发通知;行落库在最后一条用户消息之后,组装期位置校正
+      // 把它挪到该用户消息之前(字节对齐旧合成位置)。
       await _persistPendingNotices(sessionId);
       await _generateReply();
     } finally {
@@ -339,7 +341,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     state = state.copyWith(error: null, fallbackModelHint: null, contractDriftWarning: false);
   }
 
-  /// 生成失败后的备用模型建议(P1 契约层):错误属于"换模型可能有用"的三类
+  /// 生成失败后的备用模型建议:错误属于"换模型可能有用"的三类
   /// (contentFlag/quota/gatewayPolicy —— 风控拦截/额度不足/网关策略)且当前
   /// provider 目录还有其它模型时,记下切换目标并把展示名挂到错误横幅;
   /// 其余错误(transient 已由后端透明重试、auth 换模型无意义)不提供建议。
@@ -381,10 +383,9 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   }
 
   /// 追加一条用户消息并走完整生成管线(测试生成 / 推动剧情共用)。
-  /// [userText] 同样过 `beforeContextAssembly`(EQ 批修):/test /continue 注入
-  /// 的消息此前绕过输入改写 hook,main/jump 等输入改写在所有入口一致生效
-  /// 静默失效 —— 现在"用户输入 → beforeContextAssembly → 组装管线"的数据流
-  /// 对所有注入入口一致(改写后的文本才落库与进上下文,spec §12)。
+  /// [userText] 同样过 `beforeContextAssembly`:/test /continue 注入的消息
+  /// 也遵循"用户输入 → beforeContextAssembly → 组装管线"的数据流,输入改写
+  /// 在所有入口一致生效(改写后的文本才落库与进上下文)。
   Future<bool> _appendAndGenerate(String userText) async {
     final sessionId = state.sessionId;
     if (sessionId == null || state.character == null) return false;
@@ -407,7 +408,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
           ? beforeCtx['userText'] as String
           : userText;
       if (rewritten.trim().isEmpty) return false; // hook 清空了消息 → 本轮无事可做
-      // DG 批:该路径不经 _sendPipeline,待发通知同样在此消费落库,
+      // 该路径不经 _sendPipeline,待发通知同样在此消费落库,
       // 避免滞留到下一次用户发送。
       await _persistPendingNotices(sessionId);
       await ref
@@ -444,6 +445,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     return true;
   }
 
+  /// 异步发送入口(与 [trySend] 对偶,不返回是否受理):正忙时静默返回,
+  /// 未预期异常落到错误横幅。正常 UI 路径用 [trySend] 以保留输入框内容。
   Future<void> send(String text) async {
     if (state.streaming || _busy) return;
     _busy = true;
@@ -458,11 +461,11 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
 
   /// 发送管线主体([send] 与 [resend] 共用,不含 busy 门控):
   /// beforeContextAssembly 可以改写用户输入,改写后的文本才落库与进上下文
-  /// (spec §12 数据流:用户输入 → beforeContextAssembly → 组装管线)。
+  /// (数据流:用户输入 → beforeContextAssembly → 组装管线)。
   /// 随后计算本轮附件(@技能/世界书触发,去重记账)并**先于用户消息**落库
   /// —— 附件行的 seq 因此天然位于它所属的用户消息之前,组装无需重排;
-  /// 最后追加用户消息并生成回复。@技能名 记号只在附件里展开(CY 批):实际
-  /// 落库的用户消息与请求末条 user 消息不再携带触发记号。
+  /// 最后追加用户消息并生成回复。@技能名 记号只在附件里展开:实际落库的
+  /// 用户消息保留原话,请求出口再统一剥离触发记号。
   Future<void> _sendPipeline(String text) async {
     final sessionId = state.sessionId;
     final backend = ref.read(backendProvider);
@@ -483,10 +486,10 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         : text;
     if (userText.trim().isEmpty) return; // hook 清空了消息 → 本轮无事可做
 
-    // attachments(CW 批):@技能提及 + 世界书触发命中,按"窗口内是否已注入"
+    // attachments:@技能提及 + 世界书触发命中,按"窗口内是否已注入"
     // 去重后逐条落库(append-only)。落库顺序在用户消息之前 → 组装时位于
     // 用户实际输入之前,用户输入始终是请求的最后一条消息。
-    // DG 批:待发通知(压缩/记忆差异)也先落库为附件行,同样位于用户消息之前。
+    // 待发通知(压缩/记忆差异)也先落库为附件行,同样位于用户消息之前。
     await _persistPendingNotices(sessionId);
     await _appendSessionAttachments(sessionId, userText);
 
@@ -504,26 +507,26 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
 
   /// 计算并落库本轮附件行(@技能 / 世界书触发):
   ///
-  /// 用户消息本体**原样落库**(含 @记号,DA 批起剥离移到组装出口);
+  /// 用户消息本体**原样落库**(含 @记号,剥离在组装出口);
   /// 世界书键匹配基于剥离后的文本 —— 记号是调用语法,不参与键匹配。
   ///
   /// 1. **@技能**:用户输入里出现 `@技能名`(启用中的技能)才注入 —— 有且仅有
   ///    主动触发,技能不再常驻 system;
   /// 2. **世界书触发**:对"窗口内对话文本 + 即将发送的用户输入"做键匹配,
   ///    常驻条目不在此列(它们始终在 system 稳定段);
-  /// 3. **去重记账**(对齐 Claude Code skill_listing 的账本哲学):窗口内
-  ///    已有同 ref 的附件行则跳过 —— 触发型世界书命中频率高,不去重会导致
-  ///    同一条目反复注入、请求越滚越大;被压缩/裁剪挤出窗口后(行不在窗口里)
-  ///    重新注入合法;
-  /// 4. **单轮预算与优先级**(DG 批):候选经 [selectWithinBudget] 筛选 ——
-  ///    技能(用户主动)豁免名额全收,世界书触发占名额、超出全局限额
+  /// 3. **去重记账**:窗口内已有同 ref 的附件行则跳过 —— 触发型世界书命中
+  ///    频率高,不去重会导致同一条目反复注入、请求越滚越大;被压缩/裁剪挤出
+  ///    窗口后(行不在窗口里)重新注入合法;世界书另按条目**名**去重,挡住
+  ///    同一条目因历史编辑留下多个 refId 的存量旧行;
+  /// 4. **单轮预算与优先级**:候选经 [selectWithinBudget] 筛选 —— 技能(用户
+  ///    主动)豁免名额全收,世界书触发占名额、超出全局限额
   ///    (`AppSettings.maxAutoAttachments`)按命中顺序丢弃尾部。通知附件
-  ///    不在此处(系统事件,[ _persistPendingNotices] 落库,同样豁免)。
+  ///    不在此处(系统事件,由 [_persistPendingNotices] 落库,同样豁免)。
   Future<void> _appendSessionAttachments(int sessionId, String userText) async {
     final assembler = ContextAssembler();
     // 去重集合:当前窗口内已出现的附件 ref(用与组装同一把窗口尺子)。
-    // 窗口下界覆盖全部未折叠活跃行(2026-09-28 批),所以这里的行集与组装
-    // 所见完全一致 —— 账本口径与发送内容口径不再有偏差。
+    // 窗口下界覆盖全部未折叠活跃行,所以这里的行集与组装所见完全一致 ——
+    // 账本口径与发送内容口径不再有偏差。
     final history = await ref.read(messageRepositoryProvider).activeWindow(sessionId);
     final windowed = ContextAssembler.activeRows(history);
     final injectedRefs = windowed
@@ -531,9 +534,9 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         .map((m) => m.refId)
         .whereType<String>()
         .toSet();
-    // 世界书条目按**名**去重(2026-09-28 批):refId 含数据库 id,而历史编辑
-    // 让同一条目留下过多个 refId —— 只按 refId 比对挡不住存量旧行,条目会
-    // 再注入一遍。名字取自附件行文本(与组装侧收敛同一判据)。
+    // 世界书条目按**名**去重:refId 含数据库 id,而历史编辑让同一条目留下过
+    // 多个 refId —— 只按 refId 比对挡不住存量旧行,条目会再注入一遍。名字取自
+    // 附件行文本(与组装侧收敛同一判据)。
     final injectedWorldbookNames = windowed
         .map(ContextAssembler.worldbookEntryNameOf)
         .whereType<String>()
@@ -648,9 +651,9 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     final backend = ref.read(backendProvider);
     if (sessionId == null || character == null || backend == null) return;
 
-    // 本轮的中断令牌(EF 批换发语义):入口换新实例并捕获,本轮全部的取消
-    // 判定/唤醒通道都走这个局部引用 —— 后台轮或下一轮主写换发不影响在飞的
-    // 本轮,上一轮遗留的取消也绝不会泄漏到本轮。
+    // 本轮的中断令牌:入口换新实例并捕获,本轮全部的取消判定/唤醒通道都走
+    // 这个局部引用 —— 后台轮或下一轮主写换发不影响在飞的本轮,上一轮遗留的
+    // 取消也绝不会泄漏到本轮。
     _mainToken = InterruptToken();
     final token = _mainToken;
 
@@ -663,7 +666,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       var messages = await messageRepo.activeWindow(sessionId);
       if (!ref.mounted) return;
 
-      // DG 批:通知(压缩/记忆差异)已由调用方(_sendPipeline/_appendAndGenerate/
+      // 通知(压缩/记忆差异)已由调用方(_sendPipeline/_appendAndGenerate/
       // regenerate)落库为附件行,随历史自然进数组,此处不再合成插入。
       var snapshot = await _assembleSnapshot(messages);
       if (snapshot == null || !ref.mounted) return;
@@ -700,7 +703,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         return;
       }
 
-      // afterContextAssembly may rewrite the system prompt before the request.
+      // afterContextAssembly:请求发出前可改写 system prompt。
       final afterAssembly = await _runHooks(
         HookTriggerPoint.afterContextAssembly,
         {'systemPrompt': snapshot.systemPrompt},
@@ -709,7 +712,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
           ? afterAssembly['systemPrompt'] as String
           : snapshot.systemPrompt;
 
-      // beforeGenerate: 请求发出前最后一次改写机会 —— systemPrompt / 参数
+      // beforeGenerate:请求发出前最后一次改写机会 —— systemPrompt / 参数
       // (temperature / maxTokens)读写回并应用到请求。
       final beforeGenerate = await _runHooks(HookTriggerPoint.beforeGenerate, {
         'systemPrompt': effectivePrompt,
@@ -728,8 +731,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
 
       // 缓存分段透传:仅当 hook 未改写 system prompt 时才传组装器的稳定分段
       // (hook 改写后分段边界不再可靠,传 null 让 Anthropic 后端回退到纯字符串
-      // system 格式)。CW 批起可变内容(附件/通知)都在 messages 数组内,不再有
-      // system 尾部旁路;末条消息锚 cache_control 断点,稳定前缀
+      // system 格式)。可变内容(附件/通知)都在 messages 数组内,没有 system
+      // 尾部旁路;末条消息锚 cache_control 断点,稳定前缀
       // (system + 记忆第 0 条 + 历史)整体命中缓存。
       final promptRewritten = finalPrompt != snapshot.systemPrompt;
       final request = LlmRequest(
@@ -775,13 +778,13 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       Timer? throttleTimer;
       var lastFlushMs = 0;
       const throttleIntervalMs = 40; // 约 25FPS 节流刷新,兼顾视觉平滑度并避免高频渲染导致移动端卡顿
-      // 本轮失败的稳定分类(备用模型建议判据,P1 契约层)。
+      // 本轮失败的稳定分类(备用模型建议判据)。
       UpstreamErrorKind? failureKind;
 
       void flushDraft() {
         if (!ref.mounted || token.cancelled) return;
         // 只写独立 draft provider,不再触碰 ChatState —— 这是流式期间唯一的
-        // 高频写,拆出后整页 watch 不会被拖着重建(EF 批)。
+        // 高频写,拆出后整页 watch 不会被拖着重建。
         _setDraft(buffer.toString());
         lastFlushMs = DateTime.now().millisecondsSinceEpoch;
       }
@@ -874,7 +877,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       }
       if (!ref.mounted) return;
 
-      // 契约漂移预警(P2):连续 ≥3 轮以 contractViolation 失败 → 上游协议
+      // 契约漂移预警:连续 ≥3 轮以 contractViolation 失败 → 上游协议
       // 疑似变更,错误横幅加导语(保留最后一轮原文供排查);成功一轮或其它
       // 类别失败即复位 —— 预警不该在无关错误上误触发。被中断的轮次不计。
       if (!token.cancelled) {
@@ -895,7 +898,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         }
       }
 
-      // 生成失败的备用模型建议(P1 契约层):流结束后按失败分类决定是否在
+      // 生成失败的备用模型建议:流结束后按失败分类决定是否在
       // 错误横幅挂「切换备用模型」一键动作。被中断的轮次不提供建议。
       if (!token.cancelled && failureKind != null) {
         await _offerFallbackModel(failureKind!);
@@ -937,7 +940,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         return;
       }
 
-      // afterStream may rewrite the buffered reply text (regex replace/filter).
+      // afterStream 可在落库前改写缓冲的回复文本(正则替换/过滤)。
       var finalText = buffer.toString();
       final afterStream = await _runHooks(HookTriggerPoint.afterStream, {
         'text': finalText,
@@ -946,7 +949,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         finalText = afterStream['text'] as String;
       }
 
-      // beforePersist may rewrite the text one last time before it is stored.
+      // beforePersist 是落库前最后一次文本改写机会。
       final beforePersist = await _runHooks(HookTriggerPoint.beforePersist, {
         'text': finalText,
       });
@@ -970,9 +973,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         );
       }
 
-      // Refresh state BEFORE background work so the reply + token stats render
-      // immediately, without waiting on the background LLM call.
-      // 窗口刷新(DV 批):回复落库后按当前窗口下界取回,而非全量重读。
+      // 先刷新消息与 token 统计再触发后台维护:回复立即可见,不等待后台 LLM。
+      // 窗口刷新:回复落库后按当前窗口下界取回,而非全量重读。
       messages = await messageRepo.bySessionSince(
         sessionId,
         sinceSeq: _windowFloor,
@@ -991,8 +993,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         lastSentInputTokens: hasUsage ? inTok : state.lastSentInputTokens,
       );
 
-      // Background maintenance: best-effort, only after a reply was produced.
-      // Its token usage is accounted separately from the main write (spec §6).
+      // 后台维护:best-effort,仅在产出回复后执行;其 token 用量单独记账。
       // 与主回复解耦:这里只同步置 running 并触发,后台轮在独立 future 中运行,
       // _generateReply 立即返回、_busy 随之释放 —— 用户可马上发送下一条消息,
       // 不再被后台 LLM 调用(生图时最长 5 分钟)挂住。

@@ -1,3 +1,11 @@
+// 聊天页重入回归:退出再进入同一会话(含 A→B→A)时列表不得停在透明隐藏态,
+// 也不能串入其它会话的转录。
+//
+// 真实导航是 push/pop —— pop 销毁 ChatScreen State,重进新建 State,而
+// chatControllerProvider 是全局的,控制器仍停留在上一个会话的已加载数据上。
+// 二次进入同一会话时首帧就有「属于本屏会话」的残留状态,初始定位判定与
+// 首次进入不同;若切换窗口的隐藏分支不区分暂存转录的归属会话,列表会永远
+// 滞留在 _entrySettling 的透明态,表现为「消息列表为空」。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,12 +19,6 @@ import 'package:microscritt/ui/chat_screen.dart';
 import 'package:microscritt/ui/widgets/message_list.dart';
 import '../support/test_database.dart';
 
-/// 复现「退出会话后重新进入,消息列表为空」的 UI 层回归:
-/// 真实导航是 push/pop —— pop 销毁 ChatScreen State,重进新建 State,而
-/// chatControllerProvider 是全局的,控制器仍停留在上一个会话的已加载数据上。
-/// 二次进入同一会话时首帧就有「属于本屏会话」的残留状态,初始定位判定与
-/// 首次进入不同;若切换窗口的隐藏分支不区分暂存转录的归属会话,列表会永远
-/// 滞留在 _entrySettling 的透明态,表现为「消息列表为空」。
 void main() {
   double opacityOf(WidgetTester t) => t.widget<Opacity>(
         find.byKey(const ValueKey('message-list-visibility')),

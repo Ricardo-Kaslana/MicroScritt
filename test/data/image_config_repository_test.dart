@@ -1,3 +1,4 @@
+// 生图 provider 仓储:插件关联、动态设置、活跃互斥与脏值兜底。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/image_config.dart';
 import 'package:microscritt/data/database.dart';

@@ -1,3 +1,5 @@
+// 会话归档流式读取测试:各分块大小下与 jsonDecode 等价,截断/坏结构在
+// 第一遍扫描即报 FormatException。
 import 'dart:convert';
 import 'dart:io';
 
@@ -52,6 +54,8 @@ void main() {
       ],
     });
     final expected = jsonDecode(text) as Map<String, dynamic>;
+    // 块大小 1/2/3 会把 emoji 的代理对与反斜杠转义切在两块之间 —— 扫描器
+    // 必须跨块续读;整串大小则覆盖"一次读满"的路径。
     for (final size in [1, 2, 3, 7, 64, text.length]) {
       final actual = await _scan(text, size);
       expect(actual, expected, reason: 'chunk size $size');
@@ -66,6 +70,7 @@ void main() {
       'version': 4,
       'session': {'title': '王都之旅', 'usage': {'inputTokens': 3}},
       'character': {'name': 'Alice'},
+      // 未知顶层键:头部扫描必须整体跳过而不是读进内存,否则等于全文件解码。
       'unknownHuge': {
         'payload': List.filled(1000, 'x' * 100),
       },
@@ -114,6 +119,7 @@ void main() {
     expect(header.messageCount, 2);
 
     final raws = <String>[];
+    // 重复 messages 键与整文件 jsonDecode 同语义(后者覆盖):前一个数组跳过。
     await reader.forEachMessage(
       skipArrays: header.messagesArrays - 1,
       messageCount: header.messageCount,
@@ -136,6 +142,8 @@ void main() {
       'memory': 'm',
     });
     final file = File('${dir.path}/archive.json');
+    // 每个前缀长度都必须失败(含 0):截断可能落在任何位置,只测几个边界
+    // 挡不住"读一半就放行"的回归。
     for (var length = 0; length < text.length; length++) {
       file.writeAsStringSync(text.substring(0, length));
       await expectLater(

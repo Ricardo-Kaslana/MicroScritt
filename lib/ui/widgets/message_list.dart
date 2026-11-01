@@ -1,3 +1,9 @@
+/// 聊天消息列表:reverse 懒加载、连续同角色气泡分组与选中操作排。
+///
+/// 只渲染可显示的行(`role != 'system'` 且 [MessageKind.chat]),图片解码与
+/// 富文本都在气泡内完成;窗口化与分页由控制器决定,本列表不回库、不写消息。
+library;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -9,14 +15,25 @@ import '../../models/message.dart';
 import 'message_bubble.dart';
 import 'rich_message_text.dart';
 
-/// 消息气泡的操作入口定义:复制 / 编辑 / 删除 / 重新生成(仅助手)/
+/// 消息气泡的操作入口:复制 / 编辑 / 删除 / 重新生成(仅助手)/
 /// 重新发送(仅用户,把该条输入原样重发一遍)/ 重新生成图片(带原始描述的图片)。
 enum MessageAction { copy, edit, delete, regenerate, resend, regenerateImage }
 
+/// 聊天消息列表。
+///
+/// 负责显示口径过滤、reverse 下标换算、气泡分组与滚动定位;只消费外部传入
+/// 的 [messages] 与草稿参数,滚动贴底/翻页/定位都基于外部 [controller]。
 class MessageList extends StatefulWidget {
+  /// 时间序(旧 → 新)消息;system 摘要与附件行在渲染前被过滤掉。
   final List<Message> messages;
+
+  /// 流式草稿正文;为空且 [streaming] 时草稿气泡显示打字指示器。
   final String draft;
+
+  /// 是否正在流式生成(决定草稿伪条目是否出现)。
   final bool streaming;
+
+  /// 外部滚动控制器;reverse 列表下 offset 0 恒为贴底。
   final ScrollController controller;
 
   /// 更早历史是否还有下一页(控制列表远端的分页提示行)。
@@ -25,7 +42,7 @@ class MessageList extends StatefulWidget {
   /// 当前是否正在读取更早的一页(提示行显示转圈)。
   final bool loadingOlder;
 
-  /// 长按/右键某条消息时回调(旧入口,弹菜单)。
+  /// 长按/右键某条消息时回调(弹操作菜单);null = 不响应长按。
   final void Function(Message message)? onMessageLongPress;
 
   /// 气泡下方操作按钮触发的回调。
@@ -128,6 +145,10 @@ class MessageList extends StatefulWidget {
   State<MessageList> createState() => MessageListState();
 }
 
+/// 一个已布局条目的几何信息(reverse 列表口径)。
+///
+/// [layoutOffset] 是条目视觉**底边**到内容底部的距离,`bottom` 是视觉上边缘;
+/// 爬楼与定位都按这个口径换算视口位置。
 class _RenderItemInfo {
   final int index;
   final double layoutOffset;
@@ -141,6 +162,10 @@ class _RenderItemInfo {
   });
 }
 
+/// 列表状态:缓存显示口径投影与下标映射,并暴露爬楼/搜索定位入口。
+///
+/// 投影按 [MessageList.messages] 的实例记忆化 —— 流式草稿变化只换草稿参数,
+/// 不触发全量重扫;控制器整体替换 messages 实例时自然失效。
 class MessageListState extends State<MessageList> {
   /// 显示口径过滤结果的记忆化(见 build 内注释):[_visibleSource] 记录上次
   /// 过滤的源列表实例,实例不变(仅 draft/streaming 等参数变化)时直接复用
@@ -149,8 +174,8 @@ class MessageListState extends State<MessageList> {
   List<Message>? _visibleMessages;
 
   /// 可见消息 id → 时间序下标(与 [_visibleMessages] 同批重建),供
-  /// `findChildIndexCallback` O(1) 定位;旧实现的 indexWhere 在长会话里
-  /// 每次重建都要扫一遍列表。
+  /// `findChildIndexCallback` O(1) 定位;逐条 indexWhere 在长会话里每次
+  /// 重建都要扫一遍列表。
   Map<int, int> _visibleIndexById = const {};
 
   /// 当前被选中、因而显示下方操作按钮的消息 id(null 表示都不显示)。
@@ -311,7 +336,7 @@ class MessageListState extends State<MessageList> {
 
   /// 把指定消息滚动到视口内(聊天页搜索命中后的跳转)。
   ///
-  /// 目标可能刚经 [ChatController.revealMessage] 扩窗补入,先等列表重建到
+  /// 目标可能刚经 `ChatController.revealMessage` 扩窗补入,先等列表重建到
   /// 可见投影里出现该 id;随后按**反向列表下标**定位 —— `reverse: true` 下
   /// 条目 offset 从内容底部起算,目标不在已布局窗口时用已布局条目的
   /// index→offset 局部斜率估算落点,跳到附近后再由真实布局校正,最多多帧
@@ -462,16 +487,14 @@ class MessageListState extends State<MessageList> {
 
   @override
   Widget build(BuildContext context) {
-    // Compaction summaries (role=system) are internal context, not chat
-    // bubbles — hide them from the view. Attachment rows (kind=attachment,
-    // CW 批的世界书/@技能 <system-reminder> 注入)同样不在气泡中渲染 ——
-    // 它们是给模型的旁路资料,不是用户发言;上下文面板里可逐条查看。
-    // Compacted originals (is_compacted=1) 仍按聊天消息渲染:用户想看历史就
-    // 必须看到这些,即便它们已不再进 LLM 上下文(ContextAssembler 的过滤口径
-    // 未改,见 context_assembler.dart),也不会被二次发出去。
-    // 过滤结果按 messages 列表实例记忆化(EF 批):流式草稿变化只换 draft
-    // 参数、messages 实例不变,同一份过滤结果直接复用,不再每次 build 全量
-    // 重扫(列表可达数百行);发送/落库时控制器整体替换 messages 实例,自然失效。
+    // 压缩摘要(role=system)是内部上下文,不在聊天流渲染;附件行
+    // (kind=attachment,世界书/@技能的 <system-reminder> 注入)同样不渲染 ——
+    // 它们是给模型的旁路资料,不是用户发言,上下文面板里可逐条查看。
+    // 已压缩的原始消息(is_compacted=1)仍按聊天消息显示:用户回看历史必须
+    // 看得到,即便它们已不再进 LLM 上下文,也不会被二次发出去。
+    // 过滤结果按 messages 列表实例记忆化:流式草稿变化只换 draft 参数、
+    // messages 实例不变,直接复用同一份结果,不每次 build 全量重扫(列表可达
+    // 数百行);发送/落库时控制器整体替换 messages 实例,自然失效。
     if (!identical(_visibleSource, widget.messages)) {
       _visibleSource = widget.messages;
       final visibleMessages = widget.messages
@@ -488,7 +511,7 @@ class MessageListState extends State<MessageList> {
       // 但 `onActionsVisibleChanged` 的监听方是聊天页侧的导航组
       // ([MessageList.onActionsVisibleChanged] → _messageActionsOpen),它**不是**
       // 本列表的后代而是兄弟子树 —— build 期写值会让其 AnimatedBuilder 在
-      // build 期 markNeedsBuild 而炸(EL 批真机必现),上报推迟到帧末。
+      // build 期 markNeedsBuild 而炸(真机必现),上报推迟到帧末。
       final selected = _selectedId.value;
       if (selected != null && !widget.messages.any((m) => m.id == selected)) {
         _selectedId.value = null;
@@ -512,13 +535,13 @@ class MessageListState extends State<MessageList> {
         ),
       );
     }
-    // reverse:true —— 下标 0 在**底部**(最新),下标增大向上(更旧)。
-    // 这样 offset 0 恒等于"贴底",与内容总高度彻底解耦:懒加载列表的
-    // maxScrollExtent 是「已布局窗口平均高度 × 剩余条数」的估算,本列表条目
-    // 高度差异极大(短文本 ~100px vs 图片气泡最高 520px)且图片高度异步变化,
-    // 估算可偏离真值数倍 —— 此前贴底跟随要跳到那个估算值,落点越过真实末尾
-    // 落进空白死区再被弹簧拖回,即长会话里「发送消息后先快速滚到远处又滚回来」。
-    // 反向后贴底退化为 jumpTo(0) 一次精确落位,估算误差不再作用于此。
+    // reverse:true —— 下标 0 在**底部**(最新),下标增大向上(更旧),offset 0
+    // 恒等于"贴底",与内容总高度彻底解耦。懒加载列表的 maxScrollExtent 只是
+    // 「已布局窗口平均高度 × 剩余条数」的估算,而本列表条目高度差异极大
+    // (短文本 ~100px vs 图片气泡最高 520px)且图片高度异步变化,估算可偏离
+    // 真值数倍;正向列表按它贴底会越过真实末尾落进空白区再被弹簧拖回
+    // (长会话里「发送后先滚到远处又滚回来」)。反向后贴底退化为 jumpTo(0)
+    // 一次精确落位,估算误差不再作用于此。
     // 渲染下标 index 与时间序下标 logical 的换算:`index == 0` 是草稿(有则)
     // 或最新消息;消息按时间倒序向上;最远端 `total - 1` 是历史分页提示行。
     return ListView.builder(
@@ -564,9 +587,9 @@ class MessageListState extends State<MessageList> {
         final logical = visible.length - 1 - (index - leading);
         if (logical >= 0 && logical < visible.length) {
           final m = visible[logical];
-          // 连续同角色消息归为一组:iMessage 式气泡串 —— 组内收紧间距、
-          // 只有组内末条带尾巴圆角。中间消息四角全圆,视觉上合并成一条。
-          // 分组按**时间序**(prev = 更旧、next = 更新)判定,与渲染方向无关。
+          // 连续同角色消息归为一组:组内收紧间距,只有组内末条带尾巴圆角,
+          // 中间消息四角全圆,视觉上合并成一串。分组按**时间序**判定
+          // (prev = 更旧、next = 更新),与渲染方向无关。
           final prev = logical > 0 ? visible[logical - 1] : null;
           final next = logical + 1 < visible.length
               ? visible[logical + 1]
@@ -659,7 +682,7 @@ class MessageListState extends State<MessageList> {
   }
 }
 
-/// 头像半径(气泡上方小头像,与旧实现一致)。
+/// 头像半径(气泡上方的小头像)。
 const double kMessageAvatarRadius = 18;
 
 /// 流式草稿的纯文本降级阈值(字符)。富文本解析(主正则扫描/词典匹配/
@@ -819,9 +842,8 @@ class _MessageItemState extends State<_MessageItem> {
       selected: _selected,
       highlighted: widget.highlighted,
     );
-    // 头像在气泡上方:用户头像右对齐(与气泡同侧)、角色头像左对齐(与气泡
-    // 同侧)。头像不占气泡横向宽度,气泡宽度上限与旧实现完全一致。
-    // 两侧均始终显示头像:未设置头像时用占位图标,点击仍可打开对应状态卡。
+    // 头像在气泡上方:用户右对齐、角色左对齐,均与气泡同侧;头像不占气泡
+    // 横向宽度。两侧始终显示头像,未设置时用占位图标,点击仍可打开状态卡。
     final avatarImage = isUser
         ? widget.userAvatarImage
         : widget.assistantAvatarImage;
@@ -832,7 +854,7 @@ class _MessageItemState extends State<_MessageItem> {
           : CrossAxisAlignment.start,
       children: [
         Padding(
-          // 用户侧右对齐留 20 右缘(与旧实现一致),助手侧左对齐对称留 20 左缘。
+          // 用户侧右缘留 20,助手侧左缘对称留 20,与气泡边距对齐。
           padding: EdgeInsets.fromLTRB(
             isUser ? 12 : 20,
             2,

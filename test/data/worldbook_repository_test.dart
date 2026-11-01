@@ -1,3 +1,4 @@
+// 世界书仓储:按 id 稳定替换、跨角色 id 隔离、大列分块读与旧库打开。
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -45,7 +46,7 @@ void main() {
   });
 
   test('replaceForCharacter keeps entry ids stable across saves (refId ledger)', () async {
-    // 回归(2026-09-28 批):保存世界书必须保持条目 id。附件去重账本以
+    // 回归:保存世界书必须保持条目 id。附件去重账本以
     // `wb:<id>` 记账,id 一变旧附件行就再也匹配不上,条目会被当成"没注入过"
     // 重新注入 —— 而旧附件行仍在活跃窗口里,同一条目于是在上下文里并存多份,
     // 面板上的附件数远超条目数。旧实现是全删再全插,AUTOINCREMENT 让每次保存
@@ -161,7 +162,7 @@ void main() {
     sqfliteFfiInit();
     final dir = Directory.systemTemp.createTempSync('microscritt_mig');
     final path = p.join(dir.path, 'test.db');
-    // Historical v1 schema (only what the migration touches needs to exist).
+    // v1 旧库:2.0 起不再有增量迁移,打开时整库归档后按基线重建。
     final v1 = await databaseFactoryFfi.openDatabase(path, options: OpenDatabaseOptions(
       version: 1,
       onCreate: (db, _) async {

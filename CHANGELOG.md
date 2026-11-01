@@ -4,6 +4,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),
 版本遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 文档
+
+- 完成全仓库注释规范化:在 `CONTRIBUTING.md` 新增文件头、公共 API、实现注释、
+  版式与测试注释规范;`lib/` 150 个 Dart 文件统一补齐文件头与 `library;`,
+  `test/` 132 个测试文件补齐覆盖目标文件头,Android/iOS/Windows 入口与
+  runner 模板补充来源说明;同时清理内部批次代号、第三方项目指涉与已移除
+  功能描述。仅调整注释,不改变运行行为。
+
 ## 2.3.0 - 2026-11-01
 
 ### 新增

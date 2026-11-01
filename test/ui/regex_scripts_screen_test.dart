@@ -1,3 +1,4 @@
+// 正则脚本管理页:脚本列表、内置对话高亮总开关与删除。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,7 +20,7 @@ void main() {
   testWidgets('lists seeded scripts and toggles the built-in highlight switch', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      // 清掉全新安装种入的默认脚本,只留可控的两条。
+      // openTestDb 已清空种子脚本;这里再删一次,确保列表只留可控的两条。
       await db.db.delete('regex_scripts');
       final repo = RegexScriptRepository(db);
       await repo.insert(const RegexScript(name: '斜体动作', findRegex: r'\*([\s\S]+?)\*', replace: '<i>\$1</i>'));
@@ -64,6 +65,7 @@ void main() {
     await tester.runAsync(() async {
       await tester.tap(find.widgetWithText(FilledButton, '删除'));
       final container = ProviderScope.containerOf(tester.element(find.byType(RegexScriptsScreen, skipOffstage: false)));
+      // 删除写库后 provider 失效,按条件轮询到目标消失再断言。
       for (var i = 0; i < 80; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
         await tester.pump();

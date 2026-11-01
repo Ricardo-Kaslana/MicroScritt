@@ -1,3 +1,10 @@
+/// OpenAI 兼容 `chat/completions` 的流式后端。
+///
+/// 负责 SSE 解析、工具通道回复(`replyViaTool`)、提示词随机前缀
+/// (`noncePrefix`)、用量快照合并与上游故障分类;每次请求独享连接,
+/// 取消订阅即断链。
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -180,7 +187,9 @@ String _generateNonce() {
   }
 }
 
+/// OpenAI 兼容协议后端。
 class OpenAiBackend implements LlmBackend {
+  /// 本次后端使用的 provider/模型配置。
   final BackendConfig config;
 
   /// 测试注入的 client(生产为 null,每次请求独享新建)。

@@ -1,10 +1,15 @@
+/// 会话级变量(`variables`)及其回收站/待确认删除的持久化。
+///
+/// 变量只进后台 agent 的上下文,不参与主写组装,故写入不触发 `refreshContext()`;
+/// 自动写入走 revision CAS,删除在事务内按当前权限二次校验并先进回收站
+/// (严格模式只落待确认提案)。
+library;
+
 import 'package:sqflite/sqflite.dart';
 import '../models/variable.dart';
 import 'database.dart';
 
-/// 会话级变量的读写。变量只进后台 agent 的上下文
-/// (`BackgroundEngine._buildPrompt` 的 `<variables>` 段),不参与主写组装 ——
-/// 所以本仓库的写入**不需要**触发 `refreshContext()`。
+/// 变量仓储:快照、revision CAS 写入与三档权限的删除防护。
 ///
 /// 变更安全:
 /// - 所有自动写入走 [compareAndApply] 的 revision CAS,人工改动会让在途旧结果
@@ -14,6 +19,10 @@ import 'database.dart';
 /// - 严格模式(`confirmRemovals`)下只写 [VariableDeletionProposal],由用户
 ///   在状态面板确认后才移入回收站。
 class VariableRepository {
+  // revision 必须跨 repository 实例共享:同一进程里可能存在多个实例
+  // (provider、临时构造、测试各开库),实例级计数会让另一实例的写入不可见,
+  // 在途 CAS 会错误通过。按底层 Database 对象做 Expando 键,测试各开内存库时
+  // 天然隔离;进程重启后在途结果已不存在,计数归零无害。
   static final _revisions = Expando<Map<int, int>>();
 
   /// 单轮后台删除的实际上限:限制一次误判/越权提议的爆炸半径。删除失败或
@@ -51,6 +60,8 @@ class VariableRepository {
     return [for (final row in rows) Variable.fromMap(row)];
   }
 
+  /// 读一致性快照:值、权限与 revision 在同一读事务内取,作为后台轮次的
+  /// CAS 基线(rev 之后若有人工写入,compareAndApply 会整体放弃)。
   Future<
     ({
       Map<String, String> values,
@@ -464,6 +475,8 @@ class VariableRepository {
   Future<VariableApprovalResult> approveAllDeletions(int sessionId) =>
       _approveDeletions(sessionId);
 
+  // 批准前逐条复核:变量仍存在、仍为 full、值与提议时一致,否则按失效建议
+  // 清掉;复核与移动在同一事务内,防止确认期间后台又改动变量。
   Future<VariableApprovalResult> _approveDeletions(
     int sessionId, {
     int? proposalId,
@@ -548,6 +561,8 @@ class VariableRepository {
     );
   }
 
+  // 同键重复删除会覆盖回收站旧行(UNIQUE(session_id, key)):回收站只保留
+  // 该键最近一次删除的值,足够恢复一档。
   Future<void> _moveToTrash(
     Transaction txn, {
     required int sessionId,

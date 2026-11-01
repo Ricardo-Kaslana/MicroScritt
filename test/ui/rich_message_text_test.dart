@@ -1,3 +1,5 @@
+// 富文本显示管线:{{user}}/{{char}} 宏、样式标记与引号台词、显示层正则、
+// 名词词典、<chip> 胶囊,以及各环节串联后的端到端输出。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/display_regex.dart';

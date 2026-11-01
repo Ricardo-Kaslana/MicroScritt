@@ -1,3 +1,5 @@
+// 文件选择字节读取:按路径分块读取并回报进度、内联 bytes 直接使用,
+// 以及缺失路径/空选择返回 null。
 import 'dart:io';
 import 'dart:typed_data';
 

@@ -1,3 +1,10 @@
+/// 后台状态维护引擎:把最新对话解析为变量更新与生图描述。
+///
+/// 只维护快状态(变量/生图);记忆与生图指导仅由用户主动触发的初始化/
+/// 全量重生成路径产出。调用错误与解析失败返回可细分的原因,由
+/// `Orchestrator` 决定跳过,不落库、不推进游标。
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -10,13 +17,15 @@ import '../models/message.dart';
 import '../models/token_usage.dart';
 import '../models/worldbook_entry.dart';
 
-/// 后台引擎一轮的结果:成功带出 [BackgroundResult];失败带细分原因
-/// (C4:不再一律 null,让编排器/控制器区分"调用出错"与"解析失败")。
+/// 后台引擎一轮的结果:成功带出 [BackgroundResult];失败带细分原因,让
+/// 编排器/控制器区分"调用出错"与"解析失败"。
 sealed class BackgroundRunResult {
   const BackgroundRunResult();
 }
 
+/// 成功轮:带出解析后的状态更新。
 class BackgroundRunSuccess extends BackgroundRunResult {
+  /// 解析结果;[BackgroundEngine.run] 返回时已按功能开关清空未启用字段。
   final BackgroundResult result;
   const BackgroundRunSuccess(this.result);
 }
@@ -33,7 +42,9 @@ enum BackgroundFailureReason {
   parseFailure,
 }
 
+/// 失败轮:细分原因与可选诊断摘要。
 class BackgroundRunFailure extends BackgroundRunResult {
+  /// 失败类别;编排器按此区分取消、后端错误与解析失败。
   final BackgroundFailureReason reason;
 
   /// 失败诊断摘要(已截断/压成单行):后端错误消息,或解析失败时原始响应的
@@ -43,12 +54,16 @@ class BackgroundRunFailure extends BackgroundRunResult {
   const BackgroundRunFailure(this.reason, {this.detail});
 }
 
+/// 一轮后台维护解析出的状态更新;各字段的最终取舍由调用方决定。
 class BackgroundResult {
+  /// 需要写入的变量键值;只含本轮发生变化的键,空表示无变化。
   final Map<String, String> variableUpdates;
 
   /// LLM 显式要求删除的既有键(仅 `removeVariables`;绝不从 updates 的缺省键
   /// 推断删除)。是否真正执行由仓库按权限/上限再次裁决。
   final List<String> variableRemovals;
+
+  /// 单张生图的场景描述;null 表示本轮未产出(多张时见 [imagePrompts])。
   final String? imagePrompt;
 
   /// 一次多张(「每次生图数量」>1)时,后台 LLM 产出的 N 个**同场景不同**
@@ -56,12 +71,12 @@ class BackgroundResult {
   /// [imagePrompt] 单条;两者皆空则本轮不生成。
   final List<String>? imagePrompts;
 
-  /// 后台 LLM 调用的 token 用量,与主写引擎分开记账(spec §6)。
+  /// 后台 LLM 调用的 token 用量,与主写引擎分开记账。
   final TokenUsage usage;
 
-  /// 记忆初始化/重生成的产出(CW 批起记忆不再逐轮维护,只经
+  /// 记忆初始化/重生成的产出;记忆不再逐轮维护,只经
   /// [BackgroundEngine.runMemoryInit]/[BackgroundEngine.runMemoryRegenerate]
-  /// 这两条主动路径产出,快状态轮恒为 null)。
+  /// 这两条主动路径产出,快状态轮恒为 null。
   final String? memoryUpdate;
 
   /// 生图指导初始化([BackgroundEngine.runImageGuideInit])的产出;
@@ -120,10 +135,12 @@ class _BackgroundPrompt {
 /// 只读输入;二者在快状态轮以**只读锚定段**注入(仅 image 开启时,
 /// 各带截断上限),让生图贴合当前剧情。
 class BackgroundEngine {
+  /// 后台 LLM 后端;调用方按后台模型设置解析(未指定专用模型时回退主写)。
   final LlmBackend backend;
   BackgroundEngine(this.backend);
 
-  /// 后台维护是结构化 JSON 输出:压低温度提高确定性,限制输出上限防跑飞。
+  /// 后台维护是结构化 JSON 输出:温度上限压到 0.5 提高确定性(与主写参数
+  /// 解耦);输出上限见 [maxOutputTokens]。
   static const double maxTemperature = 0.5;
 
   /// 快状态轮(变量/image)首试输出上限的 standard 档基准:结构化 JSON
@@ -153,8 +170,9 @@ class BackgroundEngine {
         BackgroundOutputTier.unlimited => null,
       };
 
-  /// 记忆主动轮送入提示的既有记忆/指导文本的最长字符数:超长时截断保留开头,
-  /// 避免把几百 KB 文本塞进一次性请求;提示词已要求维持精炼,截断只是兜底。
+  /// 全量重生成记忆时送入提示的既有记忆文本的最长字符数:超长时截断保留
+  /// 开头,避免把几百 KB 文本塞进一次性请求;提示词已要求维持精炼,截断
+  /// 只是兜底。
   static const int maxMemoryChars = 4000;
 
   /// 每轮后台调用的最大尝试次数:首试 + 2 次自动重试(瞬态 backendError /
@@ -181,7 +199,7 @@ class BackgroundEngine {
 
   /// 快状态轮**单条**世界书条目的字符上限:逐条独立截断 —— 此前只按总量截
   /// 拼接后整块,靠后的条目会被前面的预算吃光整段消失,用户勾选多条角色外貌
-  /// 设定时只有 position 最前的一条真进了上下文(EX 批后续修)。
+  /// 设定时只有 position 最前的一条真进了上下文。
   static const int maxBackgroundWorldbookEntryChars = 1000;
 
   /// 快状态轮世界书锚定段的总字符上限(逐条截断后拼合的兜底,防极端多条目
@@ -195,7 +213,7 @@ class BackgroundEngine {
   static const int maxRerunPreviousImageChars = 500;
 
   /// 长期记忆的**内容定义** —— 记忆初始化与全量重生成两条主动轮共用的宪法段,
-  /// 消除两处各写各的导致的口径漂移(PR 批提示词重写)。只描述"记忆装什么",
+  /// 消除两处各写各的导致的口径漂移。只描述"记忆装什么",
   /// 数据来源/语言等差异由各自 prompt 的上下文段补。
   static const String _memoryContract = '''
 Long-term memory is the durable record reused across the whole session. Keep only facts with
@@ -212,6 +230,13 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
   static final _thinkBlock = RegExp(r'<think>[\s\S]*?</think>');
   static final _anyWhitespace = RegExp(r'\s+');
 
+  /// 执行一轮快状态维护:按启用的功能构建提示词、调用后台 LLM 并解析 JSON。
+  ///
+  /// 失败语义:后端错误、解析失败与取消都返回 [BackgroundRunFailure]
+  /// (总尝试次数至多 [maxAttemptsPerRound],即首试 + 2 次重试;取消不
+  /// 重试);未开启功能的字段一律清空(防御模型多给字段)。[rerunContext]
+  /// 非空表示 `/rerun` 重放,提示词会显式告知模型并附用户方向与上一轮
+  /// 图片描述。
   Future<BackgroundRunResult> run({
     required String model,
     required Map<String, String> variables,
@@ -224,7 +249,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
 
-    /// 输出上限档位(v54):按档位决定首试请求的 max_tokens(standard 时与
+    /// 输出上限档位:按档位决定首试请求的 max_tokens(standard 时与
     /// 历史硬编码 [maxOutputTokens] 一致);unlimited 首试也不带上限。
     BackgroundOutputTier tier = BackgroundOutputTier.standard,
     int imageCount = 1,
@@ -576,16 +601,16 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       systemPrompt: prompt,
       messages: [ChatMessage(ChatRole.user, _userMessage)],
       temperature: (temperature ?? 0.7).clamp(0.0, maxTemperature).toDouble(),
-      // 后台推理强度(v48):默认 off 不发送;开启后 openai 兼容端点映射
+      // 后台推理强度:默认 off 不发送;开启后 openai 兼容端点映射
       // reasoning_effort、anthropic 映射 thinking 预算(其内部会连带省略
       // temperature 并抬高 max_tokens,见 anthropic_backend)。
       reasoningLevel: reasoningLevel,
       // outputCap 为 null(重试)= **完全**不设输出上限 —— 连调用方透传的
       // 模型级 maxTokens(用户在模型配置里的「最大输出 tokens」)也不带:
-      // BL 批只放开了档位上限,用户配置过 max_output 时它仍原样发进每次
-      // 重试,三次尝试带同一个 max_tokens,推理模型把预算烧在不可见思考上
-      // 时正文恒为空 → "模型未返回任何内容"三连败(BN 批实测残留根因)。
-      // 首试取用户值与档位的较小者。
+      // 只放开档位上限时,用户配置过的 max_output 仍会原样发进每次重试,
+      // 三次尝试带同一个 max_tokens;推理模型把预算烧在不可见思考上时
+      // 正文恒为空 → "模型未返回任何内容"三连败。首试取用户值与档位的
+      // 较小者。
       maxTokens: outputCap == null
           ? null
           : (maxTokens == null ? outputCap : math.min(maxTokens, outputCap)),
@@ -600,11 +625,10 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
 
     final buffer = StringBuffer();
     var inTok = 0, outTok = 0, cachedTok = 0;
-    // CR 批:与主写同款竞速唤醒。LLM 思考期不吐首块,旧实现 `await for` 只能
-    // 等下一个流事件到达才轮询到 shouldCancel —— 后台场景下中断按钮要等模型
-    // 终于吐第一个 token(可能 5~30 秒)才生效。引入 cancelSignal 镜像主写
-    // 的 _interrupt.whenCancelled:中断令牌触发即可立刻解除等待 + 关掉底层
-    // HTTP 订阅(sub.cancel),与主写行为完全一致。
+    // 与主写同款的竞速唤醒。LLM 思考期不吐首块,`await for` 只能等下一个
+    // 流事件到达才轮询到 shouldCancel —— 中断按钮要等模型终于吐第一个
+    // token(可能 5~30 秒)才生效。cancelSignal 镜像主写的取消令牌:触发
+    // 即立刻解除等待 + 关掉底层 HTTP 订阅(sub.cancel),与主写行为一致。
     final completer = Completer<BackgroundRunResult>();
     StreamSubscription<LlmEvent>? sub;
     var cancelled = false;
@@ -1071,8 +1095,8 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
   /// 多选)且启用的条目,按 position 排序,**逐条截断**后拼合再套总量兜底。
   /// 逐条截断是显式语义:用户勾了几条,每条都要真进锚定段(哪怕被夹到
   /// [maxBackgroundWorldbookEntryChars]),不能让 position 靠后的外貌条目
-  /// 被前面吃光预算整段清零。EU 批起不再按常驻判断;初始化路径(记忆/生图
-  /// 指导)仍按常驻取数,不走此函数。
+  /// 被前面吃光预算整段清零。后台锚定按用户选定,不再按常驻判断;初始化
+  /// 路径(记忆/生图指导)仍按常驻取数,不走此函数。
   static String _backgroundWorldbookText(
     List<WorldbookEntry> worldbook,
     int maxChars,
@@ -1138,12 +1162,13 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     return instruction.toString();
   }
 
-  /// 全量重生成记忆的提示词([runMemoryRegenerate] 用):角色卡 + 常驻世界书 +
-  /// **全部活跃对话**(旧→新)+ 既有记忆(只读参考)。转录超长时保最新
-  /// [maxRegenerateMessages] 条 —— 记忆重生成是低频主动操作,截尾只是防止
-  /// 一次性请求超窗,更早剧情若有价值应已沉淀在既有记忆里。
+  /// 全量重生成记忆的转录上限:超长时保最新 [maxRegenerateMessages] 条 ——
+  /// 记忆重生成是低频主动操作,截尾只是防止一次性请求超窗;更早剧情若有
+  /// 价值应已沉淀在既有记忆里。
   static const int maxRegenerateMessages = 500;
 
+  /// 全量重生成记忆的提示词([runMemoryRegenerate] 用):角色卡 + 常驻世界书 +
+  /// **全部活跃对话**(旧→新)+ 既有记忆(只读参考)。
   static String _buildMemoryRegeneratePrompt(
     CharacterCard character,
     List<WorldbookEntry> worldbook,
@@ -1293,7 +1318,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
   /// 3. 切片也失败时做宽容修复(_repairJson):截断/未转义控制字符/裸键等;
   /// 4. 顶层非 Map(如数组/标量)视为无效。
   ///
-  /// 字段级容错(C2):定位出 JSON 对象后,每个字段**独立**提取 —— 某个字段坏了
+  /// 字段级容错:定位出 JSON 对象后,每个字段**独立**提取 —— 某个字段坏了
   /// (如 activeSkills 是字符串而非数组)只丢弃该字段,其余字段照常落库,不再
   /// 因一个坏字段丢弃整轮状态更新。
   BackgroundResult? _parse(String text, {bool requireVariables = false}) {
@@ -1395,7 +1420,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
   ///    键/值补 null 或丢弃、未闭合的容器补右括号 —— 救出对象前半段里能用的
   ///    字段(记忆在形状最前,通常能整段活下来);
   /// ③ 裸键漏引号(如 `imagePrompt:` 直接写)。
-  /// 修复只求"救出可解析字段",字段级容错(C2)照常过滤;修不出可解析对象返回
+  /// 修复只求"救出可解析字段",字段级容错照常过滤;修不出可解析对象返回
   /// null(维持 parseFailure)。候选起点从**最靠后的 `{`** 往前逐个尝试(与切片
   /// 兜底"取最后一个有效对象"同向:推理在前、目标 JSON 在后时优先命中后者;
   /// `{` 落在字符串内容里的伪候选修不出自然失败)。
@@ -1434,7 +1459,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
 
     /// 引号键已完整落出(flushKey 后 keyBuf 已清空)、但还没等到它的 ':'。
     /// 裸键仍留在 keyBuf 里由 [endPendingKey] 兜底;引号键在落出瞬间就丢失了
-    /// "还在等冒号"的状态,必须在分隔/收尾处单独补 ":null"(BC 批后实测残留
+    /// "还在等冒号"的状态,必须在分隔/收尾处单独补 ":null"(实测残留
     /// 的解析失败主因:输出掐在 `{"activeSkills"` / `{"memory":null,"imagePrompt"`
     /// 这类"键已闭合、值未开始"的位置,修出的 `{"key"}` 无法解析)。
     var awaitingColon = false;
@@ -1603,12 +1628,12 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     Map<String, dynamic> json, {
     bool requireVariables = false,
   }) {
-    // activeSkills 字段已随 v37 退役:LLM 若仍返回该键,这里直接忽略。
+    // activeSkills 字段已退役:LLM 若仍返回该键,这里直接忽略。
     final vars = _asStringMap(json['variables']);
     if (requireVariables && vars == null) return null;
     final mem = json['memory'];
     // memory 通常为字符串;推理模型偶尔给结构化对象/数组 —— 序列化为文本保留
-    // 内容,不再判"未产出有效记忆"(BL 批实测:初始化高发)。
+    // 内容,不再判"未产出有效记忆"(初始化途中最易出现)。
     String? memStr;
     if (mem is String && mem.isNotEmpty && mem != 'null') {
       memStr = mem;
@@ -1648,7 +1673,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
   }
 
   /// `imagePrompts` 数组解析:只收非空字符串项(非字符串/空串/字面 "null" 丢弃,
-  /// 坏项不报废整轮,C2);非数组或解析后为空 → null(视同没有多张)。
+  /// 坏项不报废整轮);非数组或解析后为空 → null(视同没有多张)。
   static List<String>? _asPromptList(Object? raw) {
     if (raw is! List) return null;
     final out = <String>[];

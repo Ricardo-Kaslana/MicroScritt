@@ -1,3 +1,4 @@
+// 会话文件导入测试:两遍流式读取、图片跨缓冲还原、截断与取消都不留半截数据。
 import 'dart:convert';
 import 'dart:io';
 
@@ -50,6 +51,7 @@ void main() {
     await messages.insertSystem(sessionId: sessionId, content: 'summary');
     final summary = (await messages.bySession(sessionId)).last;
     await messages.markCompacted([1, 2], compactOf: summary.id!);
+    // 1.2MB 图片:base64 远超扫描器的 64KB 缓冲,覆盖跨缓冲拼回的图片还原。
     await messages.append(
       sessionId: sessionId,
       role: 'assistant',

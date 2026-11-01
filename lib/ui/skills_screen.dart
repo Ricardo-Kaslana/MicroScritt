@@ -1,3 +1,10 @@
+/// 全局技能管理页,以及技能编辑与世界书导入两条子流程。
+///
+/// 技能是全局共享的提示词资产(名称 + 描述 + 内容),启用状态与 @提及决定
+/// 它是否进入上下文;导出/导入统一走 `{format, version, items}` 信封,
+/// 导入端按 name 去重,同名项跳过而不是覆盖。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/character_repository.dart';
@@ -13,13 +20,16 @@ import 'common/resource_io.dart';
 import 'common/searchable_list.dart';
 import 'common/section_header.dart';
 
-/// 全局技能管理(设置页入口)。技能是 Anthropic skills 风格的提示词资产:
-/// `name` + `description` + 实际内容,全局共享、手动控制启用;启用中的技能
-/// 在所有会话拼进上下文稳定段。支持自由创建/编辑,以及从已导入角色卡的世界书
-/// 条目按需导入(导入产生的技能没有描述)。
+/// 技能列表页(设置页「内容与扩展 · 技能」入口)。
+///
+/// 技能全局共享,由用户手动控制启用;只有启用中的技能才能被 @技能名 提及,
+/// 提及后经附件行注入该轮上下文。支持自由创建/编辑,以及从已导入角色卡的
+/// 世界书条目按需导入(导入产生的技能没有描述)。导入导出走资源信封,
+/// 导入按 name 去重、同名跳过。
 class SkillsScreen extends ConsumerWidget {
   const SkillsScreen({super.key});
 
+  /// 删除技能:确认后直接删行,之后的上下文不再能 @ 到它。
   Future<void> _delete(BuildContext context, WidgetRef ref, Skill s) async {
     final confirmed = await showConfirmDialog(
       context,
@@ -31,6 +41,7 @@ class SkillsScreen extends ConsumerWidget {
     ref.invalidate(skillsProvider);
   }
 
+  /// 导出全部技能:统一资源信封,不带库内 id,换机导入时重新分配。
   Future<void> _exportJson(BuildContext context, WidgetRef ref) async {
     final items = await ref.read(skillRepositoryProvider).all();
     if (!context.mounted) return;
@@ -41,6 +52,7 @@ class SkillsScreen extends ConsumerWidget {
     );
   }
 
+  /// 导入技能:校验通过才写库,同名(name)项跳过并在结果提示里计数。
   Future<void> _importJson(BuildContext context, WidgetRef ref) async {
     await importResourceFile(
       context,
@@ -153,9 +165,12 @@ class SkillsScreen extends ConsumerWidget {
   }
 }
 
-/// 技能新建/编辑屏:name / description / content(Anthropic skills 三要素)+
-/// 启用开关。
+/// 技能新建/编辑屏:名称 / 描述 / 内容 + 启用开关。
+///
+/// 保存只校验名称与内容非空;内容原样保存,不做模板或格式处理,启用后被
+/// @提及即整段进入上下文。直接返回即丢弃未保存内容,不做草稿持久化。
 class SkillEditScreen extends ConsumerStatefulWidget {
+  /// null 表示新建;非 null 时以该行为初值编辑。
   final Skill? existing;
   const SkillEditScreen({super.key, this.existing});
 
@@ -190,6 +205,8 @@ class _SkillEditScreenState extends ConsumerState<SkillEditScreen> {
     super.dispose();
   }
 
+  /// 保存校验:名称与内容缺一即以提示中止(不落库、不关闭页面);
+  /// 成功后失效技能列表并返回上一页。
   Future<void> _save() async {
     final name = _name.text.trim();
     if (name.isEmpty) {
@@ -290,9 +307,11 @@ class _SkillEditScreenState extends ConsumerState<SkillEditScreen> {
   }
 }
 
-/// 从角色卡世界书导入技能:选角色 → 勾选世界书条目 → 以**无描述**技能落库
-/// (name 取条目显示名,content 取条目内容,同名技能自动跳过)。条目页支持
-/// 全选/取消全选;点击条目可在底部弹层查看完整内容(可复制)。
+/// 从角色卡世界书导入技能(入口:技能页 AppBar「从世界书导入」):选角色 →
+/// 勾选世界书条目 → 以**无描述**技能落库(name 取条目显示名,content 取条目
+/// 内容,同名技能跳过,同批内重复同样跳过)。
+///
+/// 条目页支持全选/取消全选;点击条目可在底部弹层查看完整内容(可复制)。
 class SkillImportScreen extends ConsumerStatefulWidget {
   const SkillImportScreen({super.key});
 
@@ -308,6 +327,8 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
   bool _importing = false;
   String? _error;
 
+  /// 选中角色:清空既有勾选并载入该角色的世界书条目;读库失败落到错误态
+  /// 而不是空列表,避免把网络/库错误误报成「该角色没有条目」。
   Future<void> _pickCharacter(CharacterRecord record) async {
     setState(() {
       _character = record;
@@ -333,6 +354,8 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
     }
   }
 
+  /// 导入勾选条目:调仓库逐条按 name 判重插入(返回导入数与跳过数),
+  /// 结果提示里说明跳过数量,完成后关闭页面。
   Future<void> _importSelected() async {
     final character = _character;
     if (character == null || _importing) return;
@@ -346,7 +369,7 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
           .read(skillRepositoryProvider)
           .importAll([
             for (final e in selected)
-              // 世界书导入的技能没有描述(Anthropic skills 的 description 留空)。
+              // 世界书导入的技能没有描述:条目只有内容,没有「何时使用」的元信息。
               Skill(name: e.displayLabel, description: '', content: e.content),
           ]);
       ref.invalidate(skillsProvider);

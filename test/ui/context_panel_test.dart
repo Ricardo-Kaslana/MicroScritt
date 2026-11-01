@@ -1,3 +1,5 @@
+// 上下文面板 widget 测试:分段构成、Token 用量、历史/世界书/附件条目的
+// 折叠与二级展开,以及历史截断提示的完整说明。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -84,7 +86,7 @@ void main() {
       ).insert(const CharacterCard(name: 'Alice', description: 'a brave knight'));
       sessionId = await SessionRepository(db).create(charId, 's');
       // 一条会命中的世界书条目 + 一条用作历史的消息 + 一条附件行
-      // (CW 批起触发条目由发送管线命中后落库为附件行,面板按行展示)。
+      // (触发条目由发送管线命中后落库为附件行,面板按行展示)。
       db.db.execute('''
         INSERT INTO worldbook_entries(character_id, kind, "key", use_regex, constant, content, position, enabled)
         VALUES($charId, 'rule', '["sword"]', 0, 0, 'The sword is cursed', 0, 1)
@@ -296,8 +298,8 @@ The sword is cursed</system-reminder>', 1, 0, 'attachment', 'wb:1')
 
   testWidgets('history beyond the display window is labelled as omitted, not lost', (tester) async {
     // 回归:加载窗口下界之外还有更早历史时,面板只显示已加载的部分 —— 不加
-    // 说明会被误读成"旧消息被丢弃"。组装自 2026-09-28 批起不再按条数裁剪,
-    // 「窗口之外」与「未进上下文」已是同一件事,判据收敛到 canLoadOlder。
+    // 说明会被误读成"旧消息被丢弃"。组装已不再按条数裁剪,「窗口之外」与
+    // 「未进上下文」是同一件事,判据收敛到 canLoadOlder。
     tester.view.physicalSize = const Size(600, 2400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);

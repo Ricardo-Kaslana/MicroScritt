@@ -1,3 +1,5 @@
+// 会话重入回归:连续 load 同一会话(含 A→B→A)须重建初始窗口而非沿用残留状态;
+// lastSentInputTokens 只在历史被整体重写时失效,网关静默时沿用上次真实锚点。
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/backend_config.dart';

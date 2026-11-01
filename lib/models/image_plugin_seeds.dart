@@ -1,13 +1,16 @@
-import 'image_plugin.dart';
-
-/// 仓库自带的两个生图协议插件(2.3 起取代旧的 Dart `ChatCompletionsImageBackend`
-/// / `Nai2ImageBackend`)。JS 均为本项目原创、仓库受控、非用户可编辑;不含任何
-/// 第三方端点或密钥,服务地址由用户在设置页填写。
+/// 仓库自带的两个生图协议插件种子。
+///
+/// 2.3 起取代旧的 Dart 协议实现:内置的对话式网关与 Nai2API 均以 JSON 插件
+/// 形式幂等种入 `image_plugins`。JS 为本项目原创、仓库受控、非用户可编辑;
+/// 不含任何第三方端点或密钥,服务地址由用户在设置页填写。
 ///
 /// 契约:同步 `step(ctx)` 按 `ctx.operation`(generate/test/listModels)与
 /// `ctx.phase`(start/http/sleep)返回 http/sleep/done/error 动作;网络传输失败
 /// 以 `ctx.response.error` + `receivedBytes` 回传,由插件自行决定是否重试
-/// (宿主绝不自动重试),据此复刻旧后端的防重复计费与轮询竞态语义。
+/// (宿主绝不自动重试),据此实现防重复计费与轮询竞态语义。
+library;
+
+import 'image_plugin.dart';
 
 /// 对话式生图网关(OpenAI 兼容 /chat/completions,SSE 内嵌 Markdown 图片链接)。
 const String _chatCode = r'''
@@ -184,6 +187,9 @@ function step(ctx){
 ''';
 
 /// 全新建库时幂等种入的两条内置插件(均默认启用)。
+///
+/// id 是插件身份的一部分,发布后不得更改或复用;升级插件应递增 version 并
+/// 保留对旧配置的兼容。
 const List<ImagePlugin> kDefaultImagePluginSeeds = [
   ImagePlugin(
     id: 'microscritt.chat-completions',

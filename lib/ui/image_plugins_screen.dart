@@ -1,3 +1,9 @@
+/// 生图插件管理:导入/更新单文件 JSON 插件、启停与删除。
+///
+/// 导入先校验体积、结构以及同步 `step(ctx)` 是否可求值,并让用户确认联网
+/// origin 后才写库;删除受引用保护,仍被生图配置引用的插件会被仓库拒绝。
+library;
+
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
@@ -11,6 +17,10 @@ import 'common/empty_state.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/section_header.dart';
 
+/// 生图插件列表屏,从设置页「生图」区或生图配置页进入。
+///
+/// 启停与删除即时落库并刷新列表;更新同 id 插件时保留原启用状态,
+/// 避免升级插件把用户刻意停用的插件重新启用。
 class ImagePluginsScreen extends ConsumerStatefulWidget {
   const ImagePluginsScreen({super.key});
 
@@ -35,6 +45,8 @@ class _ImagePluginsScreenState extends ConsumerState<ImagePluginsScreen> {
     catalog.state = plugins;
   }
 
+  /// 导入或更新插件:包上限 1MB,去 BOM 后解析结构,写库前用 JS runtime
+  /// 求值确认 `step(ctx)` 存在。所有失败都转成 SnackBar,不留下半截插件。
   Future<void> _import() async {
     if (_importing) return;
     setState(() => _importing = true);
@@ -87,6 +99,8 @@ ${plugin.code}
     }
   }
 
+  /// 权限确认弹层:列出插件声明的 origin 与端点设置字段,并提示脚本可读取
+  /// 该插件配置中的密钥;取消或点外部返回 false。
   Future<bool> _confirmImport(
     ImagePlugin plugin, {
     required bool replacing,
@@ -138,6 +152,8 @@ ${plugin.code}
     await _refresh();
   }
 
+  /// 删除插件;仓库对仍被生图配置引用的插件抛 `StateError`,这里把原因
+  /// 回显给用户,而不是静默失败。
   Future<void> _delete(ImagePlugin plugin) async {
     final confirmed = await showConfirmDialog(
       context,

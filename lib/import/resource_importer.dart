@@ -1,3 +1,10 @@
+/// 技能/提示词/Hooks/正则脚本/生图风格的导入:解析 `{format, version,
+/// items}` 信封,按名称去重后写库。
+///
+/// 先整表校验再写入,结构错误在任何写库前抛中文 [FormatException];与
+/// [ResourceExporter] 的导出互为逆运算。
+library;
+
 import 'dart:convert';
 
 import '../data/database.dart';
@@ -13,7 +20,7 @@ import '../models/prompt_item.dart';
 import '../models/regex_script.dart';
 import '../models/skill.dart';
 
-/// 资源导入结果:导入数 + 同名跳过数。
+/// 资源导入结果:实际写入数 + 去重跳过数。
 class ResourceImportResult {
   final int imported;
   final int skipped;
@@ -22,10 +29,16 @@ class ResourceImportResult {
 
 /// 技能 / 全局提示词 / Hooks / 正则脚本 / 自定义生图风格的导入。
 ///
-/// 统一策略:先整表解析校验(结构错误抛中文 [FormatException],不做半截写入),
-/// 再按 name 去重插入 —— 已存在同名项跳过并计数,保持 [ResourceExporter]
-/// 往返时的幂等性。导入保留文件里的 enabled 状态(用户主动迁移,不偷偷停用)。
+/// 统一策略:先整表解析校验(结构错误抛中文 [FormatException],坏文件不会
+/// 产生任何写入),再按名称去重插入 —— 已存在同名项跳过并计数,保持
+/// [ResourceExporter] 往返时的幂等性。去重键:技能/Hooks/正则脚本按
+/// `name`,提示词按 `kind + name`(无名称时按正文),生图风格还额外避开
+/// 内置预设名。
+///
+/// 导入保留文件里的 enabled 状态(用户主动迁移,不偷偷停用);正则脚本
+/// 直接写表以保留文件里的 position,其余走仓库 insert。
 class ResourceImporter {
+  /// 导入技能文件;按 `name` 去重,保留文件里的 enabled 状态。
   static Future<ResourceImportResult> importSkills(AppDatabase db, List<int> bytes) async {
     final items = _items(bytes, ResourceExporter.skillsFormat);
     final parsed = <Skill>[];
@@ -53,6 +66,7 @@ class ResourceImporter {
     return ResourceImportResult(imported, skipped);
   }
 
+  /// 导入提示词文件;按 `kind + name` 去重,无名称时回退按正文比对。
   static Future<ResourceImportResult> importPromptItems(AppDatabase db, List<int> bytes) async {
     final items = _items(bytes, ResourceExporter.promptItemsFormat);
     final parsed = <PromptItem>[];
@@ -83,6 +97,7 @@ class ResourceImporter {
     return ResourceImportResult(imported, skipped);
   }
 
+  /// 导入 Hooks 文件;按 `name` 去重,未知 `triggerPoint` 抛 [FormatException]。
   static Future<ResourceImportResult> importHooks(AppDatabase db, List<int> bytes) async {
     final items = _items(bytes, ResourceExporter.hooksFormat);
     final parsed = <Hook>[];
@@ -115,6 +130,7 @@ class ResourceImporter {
     return ResourceImportResult(imported, skipped);
   }
 
+  /// 导入正则脚本文件;按 `name` 去重,直接写表以保留 position。
   static Future<ResourceImportResult> importRegexScripts(AppDatabase db, List<int> bytes) async {
     final items = _items(bytes, ResourceExporter.regexScriptsFormat);
     final parsed = <RegexScript>[];
@@ -150,6 +166,7 @@ class ResourceImporter {
     return ResourceImportResult(imported, skipped);
   }
 
+  /// 导入自定义生图风格;按 `name` 去重并避开内置预设名。
   static Future<ResourceImportResult> importImageStyles(AppDatabase db, List<int> bytes) async {
     final items = _items(bytes, ResourceExporter.imageStylesFormat);
     final parsed = <ImageStylePreset>[];

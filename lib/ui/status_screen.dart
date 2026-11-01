@@ -1,3 +1,13 @@
+/// 会话状态面板:后台 agent 的启停与参数,以及变量 / 记忆 / 生图指导的人工
+/// 维护入口。
+///
+/// 变量只供后台请求使用,不进主写上下文,所以这里的变量写操作只失效变量
+/// 相关 provider,绝不调用 `refreshContext()`;记忆以冻结副本占据上下文
+/// 第 0 条,手工编辑后需点「应用到上下文」才整体换新。变量删除一律先进
+/// 回收站;严格模式(`background_deletion_confirm`)下后台的删除提议只写
+/// 待确认建议,由本页确认后才移入回收站。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../engine/background_status.dart';
@@ -20,13 +30,19 @@ import '../models/memory.dart';
 /// 状态面板里变量区的预览条数:超出部分进「查看全部」的虚拟化列表。
 const int _kVariablePreviewLimit = 8;
 
-/// 后台引擎状态查看:变量 / 记忆 / 生图指导(记忆与生图指导为会话级)。
-/// 变量由后台引擎自动维护;记忆(CW 批起)与生图指导由**用户主动维护**
-/// (手动编辑 / 主动生成),后台只读携带,不再逐轮改写。
+/// 状态面板(入口:聊天页 AppBar 菜单与后台 agent 状态条)。
+///
+/// 后台引擎自动维护变量与生图;记忆与生图指导则由**用户主动维护**(手动
+/// 编辑或主动生成),后台只读携带。关键状态:后台启停与最近一轮摘要、
+/// 启用中的维护功能、各区块的空态与记忆「待应用」标记。
 class StatusScreen extends ConsumerWidget {
+  /// 要展示的会话 id(变量 / 记忆 / 生图指导都按它取数)。
   final int sessionId;
   const StatusScreen({super.key, required this.sessionId});
 
+  /// 清空会话记忆:确认后删库并失效列表缓存,再重算一次上下文快照。
+  /// 第 0 条记忆取自冻结副本,清库不会立刻改变上下文 —— 差异由「待应用」
+  /// 入口暴露,用户应用后才整体换新。
   Future<void> _clearMemory(BuildContext context, WidgetRef ref) async {
     final confirmed = await showConfirmDialog(
       context,
@@ -37,7 +53,8 @@ class StatusScreen extends ConsumerWidget {
     if (!confirmed) return;
     await ref.read(memoryRepositoryProvider).clear(sessionId);
     ref.invalidate(memoriesProvider(sessionId));
-    // 记忆变了,上下文面板的"记忆"段也要随之刷新,否则面板显示旧的长期记忆。
+    // 快照重算仍以冻结副本作第 0 条,清库不会立刻改变上下文;是否整体换新
+    // 交给「待应用」入口,避免静默改写提示前缀。
     await ref.read(chatControllerProvider.notifier).refreshContext();
   }
 
@@ -58,8 +75,8 @@ class StatusScreen extends ConsumerWidget {
     await ref.read(chatControllerProvider.notifier).refreshContext();
   }
 
-  /// 编辑记忆:底部编辑区改写后落库。CW 批起记忆以冻结副本进上下文 —— 落库后
-  /// 下一次输入会以 diff 通知送达差异;需立即整体换新时用「应用到上下文」。
+  /// 编辑记忆:底部编辑区改写后落库。记忆以冻结副本进上下文 —— 落库后下一次
+  /// 输入会以 diff 通知送达差异;需立即整体换新时走「应用到上下文」。
   Future<void> _editMemoryEntry(
     BuildContext context,
     WidgetRef ref,
@@ -130,7 +147,8 @@ class StatusScreen extends ConsumerWidget {
     );
   }
 
-  /// 应用到上下文前的确认:第 0 条记忆整体换新会改变提示前缀(缓存重新预热)。
+  /// 「应用到上下文」的确认弹层:第 0 条记忆整体换新会改变提示前缀,缓存
+  /// 只能重新预热,因此不静默执行。确认后刷新冻结副本并重算快照。
   Future<void> _confirmApplyMemory(
     BuildContext context,
     WidgetRef ref, {
@@ -161,6 +179,7 @@ class StatusScreen extends ConsumerWidget {
     await ref.read(chatControllerProvider.notifier).applyMemoryToContext();
   }
 
+  /// 后台 agent 总开关:同步派生 provider 与 `app_settings`(单一真相)后落库。
   Future<void> _toggleBackground(WidgetRef ref, bool enabled) async {
     await persistBackgroundEnabled(
       stateSetter: (v) =>
@@ -173,7 +192,7 @@ class StatusScreen extends ConsumerWidget {
     );
   }
 
-  /// 设置后台agent 专用模型(id 为 llm_models 表整型 id)并落库;
+  /// 设置后台 agent 专用模型(id 为 llm_models 表整型 id)并落库;
   /// 传 null 表示跟随主写引擎当前模型。
   Future<void> _setBackgroundModel(WidgetRef ref, int? modelId) async {
     await persistBackgroundModel(
@@ -185,7 +204,7 @@ class StatusScreen extends ConsumerWidget {
     );
   }
 
-  /// 设置后台agent 请求的推理强度并落库(仅影响后台维护/主动轮,不动主对话)。
+  /// 设置后台 agent 请求的推理强度并落库(仅影响后台维护/主动轮,不动主对话)。
   Future<void> _setBackgroundReasoning(
     WidgetRef ref,
     ReasoningLevel level,
@@ -213,7 +232,7 @@ class StatusScreen extends ConsumerWidget {
     );
   }
 
-  /// 设置后台agent 输出上限档位并落库(仅约束首试请求,重试恒放开)。
+  /// 设置后台 agent 输出上限档位并落库(仅约束首试请求,重试恒放开)。
   Future<void> _setBackgroundOutputTier(
     WidgetRef ref,
     BackgroundOutputTier tier,
@@ -227,7 +246,7 @@ class StatusScreen extends ConsumerWidget {
     );
   }
 
-  /// 切换后台agent 上下文锚定段开关(角色卡/记忆)并落库。
+  /// 切换后台 agent 上下文锚定段开关(角色卡/记忆)并落库。
   Future<void> _toggleAnchor(WidgetRef ref, String key) async {
     await persistBackgroundAnchor(
       key: key,
@@ -238,7 +257,7 @@ class StatusScreen extends ConsumerWidget {
     );
   }
 
-  /// 切换某项后台功能(on/off)并落库。
+  /// 切换某项后台功能(on/off)并落库。[name] 是功能标识而非界面文案。
   Future<void> _toggleFeature(WidgetRef ref, String name) async {
     await persistBackgroundFeature(
       mutate: (f) => f.toggle(name),
@@ -277,6 +296,8 @@ class StatusScreen extends ConsumerWidget {
     ref.invalidate(imageGuideProvider(sessionId));
   }
 
+  /// 清空生图指导:清空后后台生图回退内置 tag 规范,定妆外貌可能漂移,
+  /// 所以先确认。指导不进主写上下文,无需重算快照。
   Future<void> _clearImageGuide(BuildContext context, WidgetRef ref) async {
     final confirmed = await showConfirmDialog(
       context,
@@ -289,12 +310,12 @@ class StatusScreen extends ConsumerWidget {
     ref.invalidate(imageGuideProvider(sessionId));
   }
 
-  // ── 变量的人工维护(新增 / 编辑 / 删除 / 清空)──────────────────
+  // ===== 变量的人工维护 =====
   //
-  // 变量此前只由后台 agent 自动写入,面板只能看。这里补齐人工入口。
-  // 关键约束:**改完不要调 refreshContext()** —— 变量自 CL 批起不进主写
-  // 组装,只作为后台下一轮的输入;失效 variablesProvider 就够了。加上
-  // refreshContext 只会白跑一次组装(且给人"变量会影响正文"的错觉)。
+  // 变量本只由后台 agent 自动写入,面板补齐人工的新增 / 编辑 / 删除 / 清空。
+  // 关键约束:**改完不要调 refreshContext()** —— 变量不进主写组装,只作为
+  // 后台下一轮的输入;失效变量相关 provider 就够了。加上 refreshContext
+  // 只会白跑一次组装,还会给人「变量会影响正文」的错觉。
 
   /// active 变量视图与其它派生面板的刷新。变量不进主写上下文,无需
   /// `refreshContext()`。
@@ -303,13 +324,15 @@ class StatusScreen extends ConsumerWidget {
     ref.invalidate(variableRowsProvider(sessionId));
   }
 
+  /// 回收站与待确认建议的刷新:人工增删改会顺带清掉同键的建议,
+  /// 所以每次写变量后都要连这两份视图一起失效。
   void _refreshVariableAux(WidgetRef ref) {
     ref.invalidate(variableTrashProvider(sessionId));
     ref.invalidate(pendingVariableDeletionsProvider(sessionId));
   }
 
   /// 新增一条变量(空表按钮与标题行菜单共用)。人工新增默认 protected:
-  /// 后台可更新值,但不会删除;需要自动清理时在底单里改成"可改可删"。
+  /// 后台可更新值,但不会删除;需要自动清理时在底单里改成「可改可删」。
   Future<void> _addVariable(
     BuildContext context,
     WidgetRef ref,
@@ -329,7 +352,9 @@ class StatusScreen extends ConsumerWidget {
     _refreshVariableAux(ref);
   }
 
-  /// 编辑一条变量:键可改(改名走事务,不留旧行);键、值与权限都没变时不碰库。
+  /// 编辑一条变量:键可改(改名在仓库事务里删旧插新,不留旧行);键、值与
+  /// 权限都没变时不碰库。目标键已被占用时按仓库语义覆盖,冲突在编辑底单里
+  /// 先行提示。
   Future<void> _editVariable(
     BuildContext context,
     WidgetRef ref,
@@ -342,7 +367,7 @@ class StatusScreen extends ConsumerWidget {
       initialKey: variable.key,
       initialValue: variable.value,
       initialAccess: variable.agentAccess,
-      // 冲突集合要排除自己,否则单纯改值就会误报"将覆盖同名变量"。
+      // 冲突集合要排除自己,否则单纯改值就会误报「将覆盖同名变量」。
       existingKeys: {
         for (final v in current)
           if (v.key != variable.key) v.key,
@@ -399,6 +424,7 @@ class StatusScreen extends ConsumerWidget {
     _refreshVariableAux(ref);
   }
 
+  /// 变量回收站底部弹层:逐条恢复或彻底删除,入口只在回收站非空时出现。
   Future<void> _showTrash(BuildContext context) {
     return showModalBottomSheet<void>(
       context: context,
@@ -493,8 +519,8 @@ class StatusScreen extends ConsumerWidget {
           ),
           // 状态卡与下方维护设置分开呼吸,避免两张白卡贴成一块。
           const SizedBox(height: 12),
-          // 后台agent 启用时:维护功能 / 请求参数 / 上下文锚定 归入一张设置卡,
-          // 世界书条目选择也收进同卡上下文节(EX 批 UI 整理,不再三张卡堆叠)。
+          // 后台 agent 启用时:维护功能 / 请求参数 / 上下文锚定 归入一张设置卡,
+          // 世界书条目选择也收进同卡的上下文节,避免多张卡堆叠。
           if (backgroundEnabled)
             _BackgroundFeatureSelector(
               features: backgroundFeatures,
@@ -531,7 +557,7 @@ class StatusScreen extends ConsumerWidget {
               characterId: characterId,
             ),
           const SizedBox(height: 16),
-          // ── 变量(后台自动维护 + 用户手动增删改)────────────────
+          // ===== 变量(后台自动维护 + 用户手动增删改) =====
           Row(
             children: [
               const Expanded(
@@ -662,7 +688,7 @@ class StatusScreen extends ConsumerWidget {
             child: _PendingVariableDeletions(sessionId: sessionId),
           ),
           const SizedBox(height: 16),
-          // ── 记忆(用户主动维护)──────────────────────────────
+          // ===== 记忆(用户主动维护) =====
           Row(
             children: [
               const Expanded(
@@ -757,7 +783,7 @@ class StatusScreen extends ConsumerWidget {
                           ),
                           onTap: () => _editMemoryEntry(context, ref, m),
                         ),
-                      // 主动维护动作(CW 批):全量重生成(带全部上下文的请求)与
+                      // 主动维护动作:全量重生成(带全部上下文的请求)与
                       // 应用到上下文(把库中最新记忆立即作为第 0 条消息冻结副本)。
                       // 作为卡片内操作行而非独立按钮行:标签较长,窄屏不再换行错位;
                       // 运行时禁用与按钮态一致。
@@ -794,7 +820,7 @@ class StatusScreen extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 16),
-          // ── 生图指导(与记忆分离,后台生图每轮携带)────────────
+          // ===== 生图指导(后台生图每轮携带) =====
           Row(
             children: [
               const Expanded(
@@ -895,6 +921,7 @@ class StatusScreen extends ConsumerWidget {
   }
 }
 
+/// 面板内的空态提示行(变量 / 记忆 / 生图指导三区块共用)。
 class _EmptyHint extends StatelessWidget {
   final String text;
   const _EmptyHint(this.text);
@@ -909,7 +936,9 @@ class _EmptyHint extends StatelessWidget {
   );
 }
 
-/// 变量行的后台权限徽标:图标 + 长按/悬停提示,不额外占一行文字。
+/// 变量行的后台权限徽标:三档 `full` 可改可删 / `protected` 可改不可删 /
+/// `readonly` 只读,图标 + 长按/悬停提示,不额外占一行文字。权限只是提示,
+/// 真正的约束在仓库事务内复核。
 class _VariableAccessBadge extends StatelessWidget {
   final VariableAccess access;
   const _VariableAccessBadge({required this.access});
@@ -937,6 +966,7 @@ class _PendingVariableDeletions extends ConsumerWidget {
   final int sessionId;
   const _PendingVariableDeletions({required this.sessionId});
 
+  /// 建议、变量行与回收站三者会互相影响,处理完一并失效。
   void _refresh(WidgetRef ref) {
     ref.invalidate(pendingVariableDeletionsProvider(sessionId));
     ref.invalidate(variablesProvider(sessionId));
@@ -944,6 +974,8 @@ class _PendingVariableDeletions extends ConsumerWidget {
     ref.invalidate(variableTrashProvider(sessionId));
   }
 
+  /// 确认单条建议:仓库在事务内复核变量仍在、权限仍为 `full` 且值未变;
+  /// 否则视为失效建议并清掉,这里按结果分别提示。
   Future<void> _approveOne(
     BuildContext context,
     WidgetRef ref,
@@ -962,6 +994,7 @@ class _PendingVariableDeletions extends ConsumerWidget {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// 忽略单条建议:只删建议行,变量本身不动。
   Future<void> _dismissOne(
     BuildContext context,
     WidgetRef ref,
@@ -974,6 +1007,8 @@ class _PendingVariableDeletions extends ConsumerWidget {
     _refresh(ref);
   }
 
+  /// 确认全部建议(同一事务):失效建议会计入返回结果,提示里一并说明,
+  /// 避免用户以为全部都已删除。
   Future<void> _approveAll(
     BuildContext context,
     WidgetRef ref,
@@ -997,6 +1032,7 @@ class _PendingVariableDeletions extends ConsumerWidget {
     ).showSnackBar(SnackBar(content: Text('已移除 ${result.removed} 个变量$stale')));
   }
 
+  /// 忽略全部建议:只清空待确认列表,变量本身不动。
   Future<void> _dismissAll(BuildContext context, WidgetRef ref) async {
     await ref.read(variableRepositoryProvider).dismissAllDeletions(sessionId);
     if (!context.mounted) return;
@@ -1317,6 +1353,8 @@ class _VariableTrashSheet extends ConsumerWidget {
     ref.invalidate(variableTrashProvider(sessionId));
   }
 
+  /// 恢复一条回收站变量:同名 active 变量仍存在时仓库拒绝,这里把两种结果
+  /// 都提示出来;恢复后的权限固定为 protected,避免下一轮又被后台删掉。
   Future<void> _restore(
     BuildContext context,
     WidgetRef ref,
@@ -1362,7 +1400,7 @@ class _VariableTrashSheet extends ConsumerWidget {
     }
   }
 
-  /// 清空本会话回收站:整批永久删除。
+  /// 清空本会话回收站:全部永久删除,不可恢复。
   Future<void> _clearAll(BuildContext context, WidgetRef ref, int count) async {
     final confirmed = await showConfirmDialog(
       context,
@@ -1524,7 +1562,7 @@ class _VariableTrashSheet extends ConsumerWidget {
   }
 }
 
-/// 后台agent 状态卡:启用开关 + 最近一轮运行状态与一句话摘要。
+/// 后台 agent 状态卡:启用开关 + 最近一轮运行状态与一句话摘要。
 class _BackgroundAgentCard extends StatelessWidget {
   final bool enabled;
   final BackgroundStatus status;
@@ -1594,9 +1632,9 @@ class _BackgroundAgentCard extends StatelessWidget {
                 // 与「模型与参数」里的下拉框同宽:卡片内再缩进 14,
                 // 叠加卡片左右 16/8 后,灰块左右边缘与模型选择框对齐。
                 padding: const EdgeInsets.fromLTRB(14, 6, 14, 0),
-                // 成功摘要可能列出本轮全部变更(新增变量/技能/生图…),
+                // 成功摘要可能列出本轮全部变更(变量增删改、图片生成中…),
                 // 很长时默认折叠到 3 行,需要时再展开;失败等其它状态的
-                // 引擎诊断摘要保持全文,便于直接回看错误(EO 批)。
+                // 引擎诊断摘要保持全文,便于直接回看错误。
                 child: _BackgroundSummaryText(
                   text: summary,
                   collapsible: status == BackgroundStatus.succeeded,
@@ -1724,11 +1762,11 @@ class _BackgroundSummaryTextState extends State<_BackgroundSummaryText> {
   }
 }
 
-/// 后台agent 设置卡:一张卡承载三个小节(维护功能/模型与参数/上下文锚定),
-/// 细线分隔取代此前"每张一小卡"的碎堆感,视觉上让相关控制彼此贴紧、
-/// 无关小节之间拉开距离。(EX 批 UI 整理)
-/// (CW 批起记忆不再由后台逐轮维护 —— 主动维护入口在上方「记忆」区,
-/// 不属于这里的快状态功能。)
+/// 后台 agent 设置卡:一张卡承载三个小节(维护功能 / 模型与参数 / 上下文
+/// 锚定),小节间用细线分隔,相关控制彼此贴紧。
+///
+/// 维护功能只有变量与生图 —— 记忆与生图指导由用户主动维护,入口在上方
+/// 各自区块,不属于这里的快状态功能。
 class _BackgroundFeatureSelector extends ConsumerWidget {
   final BackgroundFeatures features;
   final void Function(String name) onToggle;
@@ -1751,7 +1789,7 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
   /// 用户选择了输出上限档位。
   final ValueChanged<BackgroundOutputTier> onOutputTierSelected;
 
-  /// 角色卡/记忆是否进入后台上下文锚定段(后台agent 区开关)。
+  /// 角色卡/记忆是否进入后台上下文锚定段(后台 agent 区开关)。
   final bool characterAnchor;
   final bool memoryAnchor;
 
@@ -1947,8 +1985,7 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
   }
 }
 
-/// 设置卡内的小节头:主色小图标 + 标题,label 灰底,与外层卡形成层级。
-/// (EX 批 UI 整理:此前小节之间无分隔,视觉上像堆叠 —— 现在每节一个 header。)
+/// 设置卡内的小节头:主色小图标 + 灰底标题,与外层卡形成层级。
 Widget _cardSection(
   BuildContext context, {
   required IconData icon,
@@ -1984,12 +2021,12 @@ Widget _cardDivider(BuildContext context) {
   );
 }
 
-/// 选择进入后台agent 上下文的世界书条目(角色级,EU 批):多选当前角色的条目,
-/// 选定的进快状态轮(生图)的锚定段,落 [WorldbookEntry.background] 列。
-/// 空选 = 快状态轮不注入世界书锚定段。
+/// 选择进入后台上下文的世界书条目(角色级):多选当前角色的条目,选定的
+/// 进快状态轮的锚定段,落 [WorldbookEntry.background] 列;空选 = 不注入
+/// 该锚定段。
 ///
-/// EX 批 UI 整理:此前独立一张卡,现归入设置卡的「上下文锚定」小节尾行,
-/// 与角色卡/记忆两开关并列 —— 三项同属"什么进后台上下文"这一维度。
+/// 它排在设置卡「上下文锚定」小节的尾行,与角色卡 / 记忆两开关并列 ——
+/// 三项同属「什么进后台上下文」这一维度。
 class _BackgroundWorldbookRow extends ConsumerWidget {
   final int characterId;
   const _BackgroundWorldbookRow({required this.characterId});
@@ -2048,10 +2085,10 @@ class _BackgroundWorldbookRow extends ConsumerWidget {
   }
 }
 
-/// 后台世界书条目多选底单(EW 批):与其余底单同款形态(拖拽把手 + 标题 +
-/// 取消,圆角顶,高度封顶 85%)。每行 = 勾选圆标 + 名称 + 两行内容预览,
-/// 行尾箭头展开/收起完整内容(长文内滚);标题行下带实时已选计数与
-/// 全选/取消全选,底部保存键同样带计数。
+/// 后台世界书条目多选底单:拖拽把手 + 标题 + 取消,圆角顶,高度封顶 85%。
+/// 每行 = 勾选圆标 + 名称 + 两行内容预览,行尾箭头展开/收起完整内容
+/// (长文内滚);标题行下带实时已选计数与全选/取消全选,底部保存键同样
+/// 带计数。
 class _BackgroundWorldbookSheet extends StatefulWidget {
   final List<WorldbookEntry> entries;
   const _BackgroundWorldbookSheet(this.entries);

@@ -1,3 +1,9 @@
+/// 角色世界书:条目列表、启停、导入导出,以及条目编辑屏。
+///
+/// 条目在消息命中关键词(或常驻)时以附件行拼进上下文;世界书没有
+/// 「规则/技能」之分,技能是设置页管理的独立全局目录。
+library;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,13 +20,12 @@ import 'common/pick_file_bytes.dart';
 import 'common/searchable_list.dart';
 import 'common/section_header.dart';
 
-/// 角色的世界书管理:条目触发(关键词/常驻)后拼进上下文。
-/// 世界书自 v37 起不再有「规则/技能」类型之分 —— 全部条目统一按
-/// 关键词命中(或常驻)触发;技能是独立的全局目录,在设置页管理。
+/// 角色的世界书管理:条目触发(关键词/常驻)后拼进上下文;从角色操作菜单
+/// 「世界书」进入,新建/编辑跳 `WorldbookEntryEditScreen`。
 ///
-/// 导入导出以**独立世界书文件**(ST World Info 形态)为准,见
-/// [WorldbookExporter] / [WorldbookImporter]:导出可被 SillyTavern 直接读入,
-/// 导入兼容 ST 世界书、纯条目数组与角色卡 JSON(取其 `character_book`)。
+/// 导入导出以独立世界书文件(ST World Info 形态)为准,见
+/// [WorldbookExporter] / [WorldbookImporter]:导出遵循 ST 形态,导入兼容
+/// ST 世界书、纯条目数组与角色卡 JSON(取其 `character_book`)。
 class WorldbookScreen extends ConsumerWidget {
   final int characterId;
   final String characterName;
@@ -37,7 +42,7 @@ class WorldbookScreen extends ConsumerWidget {
   ) async {
     // 只翻 enabled,其余(含表单外的 caseSensitive/matchWholeWords/selective/
     // secondaryKeys 与 extra 透传字段)必须原样保留 —— 旧实现逐字段重建,
-    // 表单没有的字段全被抹成默认值,启停一次就丢一串匹配语义(EJ 修)。
+    // 表单没有的字段全被抹成默认值,启停一次就丢一串匹配语义。
     final updated = all
         .map((e) => e.id == entry.id ? e.copyWith(enabled: !e.enabled) : e)
         .toList();
@@ -310,7 +315,11 @@ class WorldbookScreen extends ConsumerWidget {
 /// 导入已有条目时的落库方式:追加到现有条目后,或整组替换。
 enum _ImportMode { append, replace }
 
-/// 世界书条目新建/编辑屏。保存走 replaceForCharacter(整组重写)。
+/// 世界书条目新建/编辑屏,从 `WorldbookScreen` 的列表项或「新建条目」进入;
+/// 保存走 `replaceForCharacter`(整组重写)。
+///
+/// 表单只覆盖名称/关键词/内容/位置与三个开关,其余 ST 匹配字段随原条目
+/// `copyWith` 原样带回。
 class WorldbookEntryEditScreen extends ConsumerStatefulWidget {
   final int characterId;
   final WorldbookEntry? entry;
@@ -383,7 +392,7 @@ class _WorldbookEntryEditScreenState
     try {
       // 整组重写:保留其他条目,替换/追加当前条目。编辑时基于原条目 copyWith
       // —— 表单只覆盖可编辑字段,caseSensitive/matchWholeWords/selective/
-      // secondaryKeys 与 extra 透传字段原样携带(旧实现重建即抹掉,EJ 修)。
+      // secondaryKeys 与 extra 透传字段原样携带(旧实现重建即抹掉)。
       final current = await ref
           .read(worldbookRepositoryProvider)
           .byCharacter(widget.characterId);

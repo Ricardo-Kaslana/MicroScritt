@@ -1,12 +1,17 @@
+/// 应用级偏好(`app_settings` 单行表)的读写。
+library;
+
 import 'package:sqflite/sqflite.dart';
 import '../models/app_settings.dart';
 import 'database.dart';
 
-/// 应用级偏好(单行表,id 恒为 1)。未保存过时 load 返回系统默认值。
+/// 应用级偏好(单行表,id 恒为 1)。未保存过时 [load] 返回系统默认值。
 class AppSettingsRepository {
   final AppDatabase db;
   AppSettingsRepository(this.db);
 
+  /// 读取偏好并逐列做类型校验;未保存过或个别列缺失/损坏时回落默认值,
+  /// 不允许脏数据阻断启动水合。
   Future<AppSettings> load() async {
     final rows = await db.db.query('app_settings', where: 'id = 1');
     if (rows.isEmpty) return const AppSettings();
@@ -48,7 +53,7 @@ class AppSettingsRepository {
       backgroundReasoningLevel: bgReasoningRaw is String
           ? ReasoningLevel.fromWire(bgReasoningRaw)
           : ReasoningLevel.off,
-      // 缺列(旧库未迁移)回退 standard,与升级前行为一致。
+      // 脏值/缺失回落 standard,与列默认一致。
       backgroundOutputTier: bgTierRaw is String
           ? BackgroundOutputTier.fromWire(bgTierRaw)
           : BackgroundOutputTier.standard,
@@ -59,7 +64,7 @@ class AppSettingsRepository {
           ? imageIntervalRaw
           : 1,
       maxAutoAttachments: maxAutoRaw is int && maxAutoRaw >= 0 ? maxAutoRaw : 5,
-      // 缺列(旧库未迁移)回退默认开,与升级前行为一致。
+      // 脏值/缺失回落默认开,与列默认一致。
       backgroundCharacterAnchor: charAnchorRaw is int
           ? charAnchorRaw != 0
           : true,
@@ -70,6 +75,7 @@ class AppSettingsRepository {
     );
   }
 
+  /// 整行 upsert(id 恒为 1)。
   Future<void> save(AppSettings s) async {
     await db.db.insert('app_settings', {
       'id': 1,
@@ -83,8 +89,9 @@ class AppSettingsRepository {
       'background_model_id': s.backgroundModelId,
       'background_reasoning_level': s.backgroundReasoningLevel.name,
       'background_output_tier': s.backgroundOutputTier.name,
-      // 旧列 auto_compact_chunk(v34)与 slow_state_interval(v33)随对应功能
-      // 退役:不再写入,列定义带 DEFAULT,插入缺省即回填历史默认值,无需破坏性迁移。
+      // `auto_compact_chunk` / `slow_state_interval` 两列随对应功能退役:
+      // 基线 DDL 保留(带 DEFAULT)但不再写入,缺省插入即回填历史默认值,
+      // 无需为删列重建数据库。
       'auto_compact_enabled': s.autoCompactEnabled ? 1 : 0,
       'image_interval': s.imageInterval,
       'max_auto_attachments': s.maxAutoAttachments,

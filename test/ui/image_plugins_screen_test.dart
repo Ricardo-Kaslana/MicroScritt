@@ -1,3 +1,5 @@
+// 生图插件管理页:导入(权限确认)、启停与删除;导入校验的 JS 求值用
+// 替身 runtime,不与本机 QuickJS/Node 桥接耦合。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +13,8 @@ import '../support/fake_file_picker.dart';
 import '../support/test_database.dart';
 import '../support/wait_until.dart';
 
+/// 导入只校验插件 JS 能求出 `step` 函数;协议语义由后端插件测试用真实
+/// 引擎覆盖,这里恒返回 "ok",避免 UI 测试依赖本机 JS 桥接库。
 class _FakeRuntime implements HookRuntime {
   @override
   Future<String?> evaluate(String js) async => 'ok';
@@ -33,11 +37,14 @@ void main() {
       await tester.runAsync(() async {
         db = await openTestDb();
       });
+      // 仓库自带示例插件声明 baseUrl 端点权限,导入时会弹权限确认。
       FakeFilePicker.install(pickedPath: 'examples/image_plugins/openai_images.json');
       await tester.pumpWidget(harness());
       expect(find.text('暂无生图插件'), findsOneWidget);
 
       await tester.tap(find.widgetWithText(FloatingActionButton, '导入 JSON'));
+      // 读文件、解析 manifest 与 JS 求值都是真实异步,FAB 里的进度圈不会
+      // 收敛,不能用 pumpAndSettle,按弹层出现轮询。
       await tester.runAsync(() async {
         for (
           var i = 0;

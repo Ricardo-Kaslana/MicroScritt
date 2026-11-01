@@ -1,18 +1,23 @@
+// 聊天状态与取消通道:ChatState 值对象、InterruptToken 协作式取消与流式草稿
+// Provider。本 part 不发起 I/O,状态写入一律经 ChatController;草稿独立成
+// Provider,避免流式高频刷新拖垮整页 watch。
 part of 'chat_controller.dart';
 
-/// 协作式中断令牌:主写引擎与后台agent 共用同一驱动取消的通道。
+/// 协作式中断令牌:主写引擎与后台 agent 共用同一驱动取消的通道。
 /// 双通道语义 —— 轮询([cancelled],每消费一个事件/每步状态写入前检查,后台
 /// 引擎的 shouldCancel 用)+ 即时通知([whenCancelled],让"等待首个流事件"
 /// 的消费者在零事件期也能被立即唤醒)。
 ///
-/// 令牌**不可复用**(EF 批):没有 reset。"供下一轮使用"靠控制器每轮入口
-/// 换发新实例(主写/后台双槽位,见 ChatController 字段注释)。在飞轮持有
-/// 自己的实例,其 cancelled 永真;若在实例上清标志(旧 reset),会把**另一
-/// 条还在飞的轮**(后台维护常与下一轮主写并发)的取消通道一并吹灭 —— 用户
-/// 按了停止,后台轮却因标志被清而继续跑完并写状态。
+/// 令牌**不可复用**:没有 reset。"供下一轮使用"靠控制器每轮入口换发新实例
+/// (主写/后台双槽位,见 ChatController 字段注释)。在飞轮持有自己的实例,
+/// 其 cancelled 永真;若在实例上清标志,会把**另一条还在飞的轮**(后台维护
+/// 常与下一轮主写并发)的取消通道一并吹灭 —— 用户按了停止,后台轮却因标志
+/// 被清而继续跑完并写状态。
 class InterruptToken {
   bool _cancelled = false;
   Completer<void>? _completer;
+
+  /// 是否已取消;在飞轮每消费一个事件/每步状态写入前轮询。
   bool get cancelled => _cancelled;
 
   /// 下一次 [cancel] 发生时完成的 Future;已取消时立即完成。
@@ -20,6 +25,7 @@ class InterruptToken {
   Future<void> get whenCancelled =>
       _cancelled ? Future.value() : (_completer ??= Completer<void>()).future;
 
+  /// 取消一次:幂等,并唤醒 [whenCancelled] 的等待者;该实例此后永久为取消态。
   void cancel() {
     if (_cancelled) return;
     _cancelled = true;
@@ -28,49 +34,75 @@ class InterruptToken {
   }
 }
 
+/// 聊天页的不可变状态快照。
+///
+/// [messages] 是按时间序(旧→新)的**显示窗口**,不是全量转录;发送/重生成
+/// 期间可能暂存组装窗口的活跃行,收尾刷新回到显示窗口。聊天页以 reverse 列表
+/// 渲染(下标 0 在底部),上下文组装另读 `MessageRepository.activeWindow` ——
+/// 两者刻意分离,翻阅历史不改变发给 LLM 的内容。会话切换窗口内转录可能暂存,
+/// 归属由 [transcriptSessionId] 标记。
 class ChatState {
+  /// 当前会话 id;未加载与切换窗口内为 null,发送管线靠它门控。
   final int? sessionId;
+
+  /// 当前会话所属角色 id。
   final int? characterId;
+
+  /// 当前角色卡(发送与组装使用的最新副本)。
   final CharacterCard? character;
+
+  /// 当前展示的消息(时间序旧→新;UI 以 reverse 列表渲染,下标 0 为最新)。
+  /// 通常为显示窗口;流式期间可能短暂持有组装窗口的活跃行。
   final List<Message> messages;
 
   /// [messages] 这份转录归属的会话 id。与 [sessionId] 的区别只在 load 的
-  /// 切换窗口内有意义:元数据清空后 [sessionId] 为 null,但转录按 DR 批的
-  /// 原子切换语义被暂存 —— 本字段记下暂存转录真正属于谁,UI 据此区分
+  /// 切换窗口内有意义:元数据清空后 [sessionId] 为 null,但转录按原子切换
+  /// 语义被暂存 —— 本字段记下暂存转录真正属于谁,UI 据此区分
   /// 「切往其它会话时的旧转录(须隐藏,防串味)」与「重进同一会话时暂存的
   /// 就是本屏会话的转录(内容与新窗口一致,照常显示,不得再触发隐藏)」。
   final int? transcriptSessionId;
+
+  /// 世界书快照;load 与发送前经 [_syncWorldbook] 与库对齐,引擎只读它。
   final List<WorldbookEntry> worldbook;
+
+  /// 主写流式生成中(忙碌门控与输入区状态依据)。
   final bool streaming;
+
+  /// 最近一次可展示的错误(错误横幅);null 表示无。
   final String? error;
 
-  /// 备用模型建议(P1 契约层):生成失败且错误属于"换模型可能有用"
+  /// 备用模型建议:生成失败且错误属于"换模型可能有用"
   /// (contentFlag/quota/gatewayPolicy)、当前 provider 目录还有其它模型时,
   /// 控制器在此放入备用模型的展示名 —— 灵动岛错误横幅随之给出「切换备用
   /// 模型」一键动作。null = 无建议(错误不可换模型修复/没有其它模型)。
   /// 切换执行、清除错误或开始新一轮生成时置空。
   final String? fallbackModelHint;
 
-  /// 契约漂移预警(P2):主写连续 ≥3 轮以 contractViolation 失败时置位 ——
+  /// 契约漂移预警:主写连续 ≥3 轮以 contractViolation 失败时置位 ——
   /// 上游协议疑似变更,横幅在错误原文前加"疑似变更"导语提示用户用分级探测
   /// 复核。成功一轮、其它类别失败、清除错误或一键切换模型时复位。
   final bool contractDriftWarning;
+
+  /// 最近一轮主写请求的 token(输入/输出/命中缓存),取服务端上报的精确值;
+  /// 网关未上报时保留上一次快照。
   final int inputTokens;
   final int outputTokens;
   final int cachedInputTokens;
+
+  /// 后台维护独立的 token 计数:自动维护轮写回本轮用量,重跑累加进该桶。
   final int backgroundInputTokens;
   final int backgroundOutputTokens;
   final int backgroundCachedInputTokens;
 
-  /// 压缩摘要(compact)调用的 token 用量,与主写/后台分开记账(D2)。
+  /// 压缩摘要(compact)调用的 token 用量,与主写/后台分开记账。
   final int compactInputTokens;
   final int compactOutputTokens;
   final int compactCachedInputTokens;
 
-  /// 后台agent 最近一轮的运行状态(状态面板/聊天页顶部展示)。
+  /// 后台 agent 最近一轮的运行状态(状态面板/聊天页顶部展示)。
   final BackgroundStatus backgroundStatus;
 
-  /// 后台agent 最近一轮维护的一句话摘要(如"新增技能 战斗 · 变量 hp→9")。
+  /// 后台 agent 最近一轮维护的一句话摘要(如"新增技能 战斗 · 变量 hp→9")。
   final String backgroundSummary;
 
   /// 最近一次组装出的上下文快照(发送时更新;load 时给出基线预览)。
@@ -97,8 +129,8 @@ class ChatState {
   /// 重锚;会话行的 `input_tokens` 同为"最近一轮"口径,load 时据此恢复。
   final int? lastSentInputTokens;
 
-  /// 消息窗口之上是否还有更早的历史(DV 批窗口化加载):true 时聊天页贴顶
-  /// 触发 [ChatController.loadOlder] 向上分页。会话全部消息装进窗口时为
+  /// 消息窗口之上是否还有更早的历史:true 时聊天页贴顶触发
+  /// [ChatController.loadOlder] 向上分页。会话全部消息装进窗口时为
   /// false(绝大多数会话如此,行为与全量加载完全一致)。
   final bool canLoadOlder;
 
@@ -153,9 +185,10 @@ class ChatState {
     this.busyCommand,
   });
 
-  // Sentinel so `copyWith(error: null)` can clear a previously set error.
+  // 哨兵:让 `copyWith(error: null)` 能清除已有错误,而不是保留旧值。
   static const _unset = Object();
 
+  /// 复制并覆盖字段;可空字段用哨兵区分"未提供"与"显式置 null"。
   ChatState copyWith({
     int? sessionId,
     int? characterId,
@@ -236,18 +269,21 @@ class ChatState {
   );
 }
 
-/// 流式草稿/命令反馈文本的独立 provider(EF 批,自 ChatState 拆出)。
+/// 流式草稿/命令反馈文本的独立 provider(自 ChatState 拆出)。
 /// 它是全状态里唯一的高频字段(流式期间约 25FPS 一刷),而消费面很窄 ——
 /// 只有消息列表的"生成中气泡"与贴底跟随逻辑。独立之后,chat_screen 的页面级
 /// watch 不再被它拖着走:每个流式块只重建消息列表一小块,AppBar/输入区/
-/// 灵动岛/上下文面板整页陪跑重建的历史就此结束。会话切换时由 [ChatController.load] 清零。
+/// 灵动岛/上下文面板整页陪跑重建的历史就此结束。会话切换时由
+/// [ChatController.load] 清零。
 class ChatDraftNotifier extends Notifier<String> {
   @override
   String build() => '';
 
+  /// 覆盖草稿文本;流式路径经节流写入,不触碰 [ChatState]。
   void set(String value) => state = value;
 }
 
+/// 流式草稿/命令反馈文本;高频写入,消费面仅生成中气泡与贴底跟随。
 final chatDraftProvider = NotifierProvider<ChatDraftNotifier, String>(
   ChatDraftNotifier.new,
 );

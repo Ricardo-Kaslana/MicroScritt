@@ -1,3 +1,4 @@
+// 生图插件包模型测试:manifest 校验、设置字段默认值与 origin 规范化。
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';

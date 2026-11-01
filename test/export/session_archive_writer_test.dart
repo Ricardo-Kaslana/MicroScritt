@@ -1,3 +1,4 @@
+// 归档 writer 测试:流式写文件与整串导出逐字节一致,取消时不留半成品。
 import 'dart:convert';
 import 'dart:io';
 

@@ -1,3 +1,5 @@
+// ChatController 行为契约:主写发送/重生成/重发送、后台维护编排、压缩与
+// Hook 改写、生图落库与错误分类;用假后端钉住时序与落库副作用。
 import 'dart:async';
 import 'dart:convert';
 
@@ -123,7 +125,8 @@ class _FakeImageBackend implements ImageBackend {
 }
 
 /// 生图后端在 [release] 放行前一直挂起:模拟真实云端生图耗时远超后台轮
-/// (后台状态早已 succeeded,图片才姗姗落库)的场景 —— A3 解耦后的关键路径。
+/// (后台状态早已 succeeded,图片才姗姗落库)的场景 —— 生图与轮次解耦后的
+/// 关键路径。
 class _GatedImageBackend implements ImageBackend {
   final Completer<void> release = Completer<void>();
   bool started = false;
@@ -212,9 +215,7 @@ class _BackgroundCombinedRetryBackend implements LlmBackend {
   }
 }
 
-/// A backend that replies on the first call (main write) and then returns a
-/// memory update on the background call (second), so tests can verify the
-/// background write persists a memory row.
+/// 主写回复一次;后台轮回传 memory 字段,验证该字段不落库(记忆仅由用户维护)。
 class _BackgroundMemoryBackend implements LlmBackend {
   int calls = 0;
 
@@ -282,6 +283,8 @@ class _BackgroundThenHang implements LlmBackend {
   void closeBg() => _bgController.close();
 }
 
+/// 受控后台后端:主写恒回 'reply.';后台轮按请求序回放 [firstResponse]/[response],
+/// 第 1 次后台调用挂起直到 [unblock](用 [started] 观测),便于编排合并/失败用例。
 class _ControlledBackgroundBackend implements LlmBackend {
   _ControlledBackgroundBackend({
     this.firstResponse = '{"variables":{"hp":"8"}}',
@@ -322,6 +325,7 @@ class _ControlledBackgroundBackend implements LlmBackend {
   }
 }
 
+/// 生图假后端:记录描述,按 [failure]('throw'/'empty')或 [gate] 模拟失败/挂起。
 class _TrackingImageBackend implements ImageBackend {
   _TrackingImageBackend({this.base64 = 'bmV3', this.failure, this.gate});
 
@@ -343,7 +347,7 @@ class _TrackingImageBackend implements ImageBackend {
   }
 }
 
-/// EF 回归专用:第 1 次调用 = 第一轮主写(自动完成);第 2 次 = 后台维护
+/// 中断回归专用:第 1 次调用 = 第一轮主写(自动完成);第 2 次 = 后台维护
 /// (挂起,closeBg 放行);第 3 次 = 第二轮主写(挂起,closeMain2 放行)。
 /// 两处挂起都可观测,让"中断落在第二轮主写期间、后台仍挂起"成为确定时序。
 class _BgHangThenMainHang implements LlmBackend {
@@ -419,7 +423,7 @@ class _ErrorBackend implements LlmBackend {
   Stream<LlmEvent> generate(LlmRequest request) => Stream.fromIterable(const [ErrorEvent('boom'), DoneEvent()]);
 }
 
-/// P2 契约漂移:前 3 轮以 contractViolation 失败(触发阈值),之后恒成功。
+/// 契约漂移回归:前 3 轮以 contractViolation 失败(触发阈值),之后恒成功。
 class _DriftSequenceBackend implements LlmBackend {
   int calls = 0;
 
@@ -441,7 +445,7 @@ class _DriftSequenceBackend implements LlmBackend {
   }
 }
 
-/// P1 契约层:主写直接失败并携带稳定分类(备用模型建议的判据输入)。
+/// 分类错误回归:主写直接失败并携带稳定分类(备用模型建议的判据输入)。
 class _ClassifiedErrorBackend implements LlmBackend {
   final String message;
   final UpstreamErrorKind kind;
@@ -585,7 +589,7 @@ class _MemoryInitErrorBackend implements LlmBackend {
 }
 
 /// 主写回复 + 每次后台调用都记录请求并返回技能 JSON。
-/// 偶数次调用是后台轮,奇数次是主写 —— 主写/后台交替(B3/B4 请求形状断言用)。
+/// 偶数次调用是后台轮,奇数次是主写 —— 主写/后台交替(请求形状断言用)。
 class _MainBgRecordingBackend implements LlmBackend {
   final List<LlmRequest> bgRequests = [];
   int calls = 0;
@@ -630,7 +634,7 @@ class _RemovalBgBackend implements LlmBackend {
   }
 }
 
-/// 主写 / 压缩摘要(带用量)/ 后台 三合一:验证 compact 用量单独记账(D2)。
+/// 主写 / 压缩摘要(带用量)/ 后台 三合一:验证 compact 用量单独记账。
 class _CompactUsageBackend implements LlmBackend {
   int calls = 0;
 
@@ -740,7 +744,7 @@ void main() {
   );
 
   /// 种入当前在用的 provider+模型(带上下文容量)。容量是占用率驱动压缩
-  /// (60%/80%/20% 三挡)的输入;不种时容量未知,压缩逻辑整体跳过。
+  /// (60%/80%/20% 三挡)的输入;不种时按兜底容量 16384 估算。
   Future<void> seedCapacityModel(int contextCapacity) async {
     final repo = LlmProviderRepository(db);
     await repo.saveProvider(LlmProviderConfig(
@@ -795,7 +799,7 @@ void main() {
   }
 
   test('session load clears a stale draft (EF: draft lives in its own provider)', () async {
-    // 草稿自 ChatState 拆出(EF 批)后,会话切换的"元数据立即清空"语义要
+    // 草稿自 ChatState 拆出后,会话切换的"元数据立即清空"语义要
     // 覆盖到新家:上一会话的生成中气泡绝不能闪进下一会话。
     final backend = _FakeBackend();
     final container = makeContainer(backend);
@@ -1494,7 +1498,8 @@ void main() {
   });
 
   test('runCommand compact summarizes when there is enough history', () async {
-    final backend = _CountingBackend(); // 1st call main reply, 2nd call summary
+    // 本用例只发 /compact:首次调用即压缩摘要请求,返回 'reply.'。
+    final backend = _CountingBackend();
     final container = makeContainer(backend);
     addTearDown(container.dispose);
     final controller = container.read(chatControllerProvider.notifier);
@@ -1642,7 +1647,7 @@ void main() {
     // (segmentSources 有值但 segments 为空)。这是会话更新后面板空白的回归防护。
     expect(ctx.segments, isNotEmpty);
     // 分段顺序镜像组装顺序:静态段(内置默认预设→角色卡)在会话历史
-    // (随 messages 数组)之前。全新 DB 自带 16 条默认预设,故首段为 preset。
+    // (随 messages 数组)之前。全新 DB 自带 2 条默认预设,故首段为 preset。
     final keys = ctx.segments.map((s) => s.key).toList();
     expect(keys.first, 'preset');
     expect(keys.indexOf('character'), greaterThan(keys.indexOf('preset')));
@@ -1719,8 +1724,9 @@ void main() {
   });
 
   test('send skips occupancy-based auto compact when the model has no capacity info', () async {
-    // 未种入任何 provider/模型 → 容量未知,占用率无法计算,自动压缩(三挡)
-    // 整体跳过。触发依据已从"掉窗消息条数"改为上下文占用率。
+    // 未种入任何 provider/模型 → 容量未知,按兜底容量 16384 估算;本用例的
+    // 短消息占用远低于软挡,自动压缩不触发(触发依据是上下文占用率,不再是
+    // 掉窗消息条数)。
     final backend = _CountingBackend();
     final container = makeContainer(backend);
     addTearDown(container.dispose);
@@ -2015,7 +2021,7 @@ void main() {
     );
     await controller.send('hi');
 
-    // A3:生图任务与后台轮解耦 —— 后台轮收敛时图片可能还在生成/下载。
+    // 生图任务与后台轮解耦 —— 后台轮收敛时图片可能还在生成/下载。
     // 轮询等待图片消息经 onImagePlaced 刷新进聊天列表。
     var imageSeen = false;
     for (var i = 0; i < 250 && !imageSeen; i++) {
@@ -2171,7 +2177,7 @@ void main() {
   });
 
   group('/rerun 重跑后台维护', () {
-    /// 后台请求里 `<variable_delta>` 段的正文 —— 重跑重放的是哪批对话就看它。
+    /// 后台请求里 `<variable_delta>` 段的正文 —— 重跑重放的是哪段对话就看它。
     String bgDelta(String prompt) => RegExp(
       r'<variable_delta>[^\n]*\n(.*?)</variable_delta>',
       dotAll: true,
@@ -2491,10 +2497,10 @@ void main() {
     await controller.send('hi');
     await awaitBackground(container);
 
-    // 技能自 v37 起是全局目录、用户手动管理:后台轮不再写技能状态。
+    // 技能是全局目录、用户手动管理:后台轮不再写技能状态。
     expect(await db.db.query('skills'), isEmpty);
 
-    // Background usage is accounted separately from the main write (spec §6).
+    // 后台用量与主写分开记账。
     final state = container.read(chatControllerProvider);
     expect(state.backgroundInputTokens, 120);
     expect(state.backgroundOutputTokens, 15);
@@ -2701,7 +2707,7 @@ void main() {
   });
 
   test('variables-only maintains every round with a small delta window (CW: no slow rounds)', () async {
-    // CW 批回归防护:慢变降频已随逐轮记忆维护退役 —— 只开变量时每轮都是快状态轮,
+    // 回归防护:慢变降频已随逐轮记忆维护退役 —— 只开变量时每轮都是快状态轮,
     // 转录走增量游标(窗口很小),不存在"慢变维护未到期"的跳过;连续多轮每轮
     // 都真正发起后台维护。
     final backend = _MainBgRecordingBackend();
@@ -2919,7 +2925,7 @@ void main() {
   test('interrupting the background agent while its stream is hung returns immediately (CR)', () async {
     // 回归测试:旧实现下后台中断要等 LLM 终于吐首个流事件才能命中
     // shouldCancel(LLM 思考期不吐事件,可能 5~30 秒)。本测试在后台进入 running
-    // 后**只**调 controller.interrupt(),不主动关流 —— CR 批的 cancelSignal
+    // 后**只**调 controller.interrupt(),不主动关流 —— cancelSignal
     // 通道让状态立即翻成 interrupted,不等流事件。
     final backend = _BackgroundThenHang();
     final container = makeContainer(backend);
@@ -2955,7 +2961,7 @@ void main() {
     // 回归防护「reset 吹灭并发轮的取消通道」:旧实现主写与后台共用一个令牌,
     // 第二轮主写被中断后其收尾就地 reset —— 并发在飞的后台轮若还没走到自己的
     // cancelled 判定,标志已被清成 false,按停止后后台继续跑完并写状态。
-    // EF 批换发语义:后台轮持有自己的令牌实例,取消对它不可逆。
+    // 令牌逐轮换发:后台轮持有自己的令牌实例,取消对它不可逆。
     final backend = _BgHangThenMainHang();
     final container = makeContainer(backend);
     addTearDown(container.dispose);
@@ -3511,7 +3517,7 @@ void main() {
 
     expect(backend.bgRequests, hasLength(4));
     for (final req in backend.bgRequests) {
-      // 快状态块:变量 + 生图指令在场;结构化标签分段(ES 批)。
+      // 快状态块:变量 + 生图指令在场;结构化标签分段。
       expect(req.systemPrompt, contains('<variables>'));
       expect(req.systemPrompt, contains('# image'));
       // 本会话无记忆 → 无记忆锚定段;角色卡锚定段由控制器透传注入。
@@ -3560,7 +3566,7 @@ void main() {
     expect(state.compactCachedInputTokens, 80);
     expect(state.inputTokens, 0);
     expect(state.backgroundInputTokens, 0);
-    // 已持久化:重开会话仍能恢复(D2 随 sessions 表落库)。
+    // 已持久化:重开会话仍能恢复(随 sessions 表落库)。
     final persisted = await SessionRepository(db).get(sessionId);
     expect(persisted!.compactInputTokens, 120);
     expect(persisted.compactOutputTokens, 15);
@@ -3611,7 +3617,7 @@ void main() {
 
   test('activeWindow assembles the same snapshot as the full transcript (DV)', () async {
     // 组装窗口 = 全部 system 行 + 全部未折叠活跃行,与全量喂入逐字节一致 ——
-    // 组装自 2026-09-28 批起不再按条数裁剪,窗口只需覆盖活跃行;显示窗口
+    // 组装不再按条数裁剪,窗口只需覆盖活跃行;显示窗口
     // (300 条)与组装窗口是两个独立口径,前者不再影响后者。
     final characters = CharacterRepository(db);
     final sessions = SessionRepository(db);

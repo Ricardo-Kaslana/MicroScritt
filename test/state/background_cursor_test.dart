@@ -1,3 +1,5 @@
+// 后台维护游标回归:历史改写(regenerate/resend/clear/删尾)会复用 seq,
+// 陈旧游标不得让下一轮后台以「无新对话可维护」跳过。
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/backend_config.dart';
@@ -40,7 +42,6 @@ class _NoopRuntime implements HookRuntime {
   Future<String?> evaluate(String js) async => null;
 }
 
-/// 历史改写会复用 seq,必须使旧后台任务和处理进度同时失效。
 void main() {
   late AppDatabase db;
   late int sessionId;

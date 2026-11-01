@@ -1,3 +1,5 @@
+// 会话归档导出/导入整链路(真实临时文件与真实库):归档结构、
+// 桌面 .part 原子替换与同名角色复用。
 import 'dart:convert';
 import 'dart:io';
 
@@ -14,6 +16,8 @@ import 'package:microscritt/ui/sessions_screen.dart';
 import '../support/fake_file_picker.dart';
 import '../support/test_database.dart';
 
+/// 导出/导入走真实文件 IO,进度对话框的不定进度条不会收敛,
+/// 不能用 pumpAndSettle;按条件轮询,期间留在 runAsync 里推进 IO。
 Future<void> pumpUntil(WidgetTester tester, bool Function() condition, {int polls = 160}) async {
   await tester.runAsync(() async {
     for (var i = 0; i < polls; i++) {
@@ -43,6 +47,7 @@ void main() {
     });
 
     final savePath = '${tmp.path}/session.json';
+    // 替身只决定保存路径;文件由导出代码自己写入,随后可回读校验内容。
     FakeFilePicker.install(savePath: savePath);
     await tester.pumpWidget(ProviderScope(
       overrides: [databaseProvider.overrideWithValue(db)],

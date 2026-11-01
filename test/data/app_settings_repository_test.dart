@@ -1,3 +1,4 @@
+// app_settings 单行表的默认值、字段往返与旧功能掩码位兼容。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/app_settings_repository.dart';
 import 'package:microscritt/data/database.dart';

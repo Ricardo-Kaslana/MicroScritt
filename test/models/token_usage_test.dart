@@ -1,3 +1,4 @@
+// token 用量解析测试:OpenAI/Anthropic 缓存口径与未命中输入计算。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/token_usage.dart';
 

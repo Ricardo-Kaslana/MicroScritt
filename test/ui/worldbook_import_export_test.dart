@@ -1,3 +1,5 @@
+// 世界书导入导出的端到端界面测试:选择文件 → 解析 → 合并 → 落库 → 列表刷新。
+// 文件选择靠 FakeFilePicker 注入(默认走 MethodChannel),各步真实 I/O 由 waitUntil 轮询。
 import 'dart:convert';
 import 'dart:io';
 
@@ -15,13 +17,6 @@ import '../support/fake_file_picker.dart';
 import '../support/test_database.dart';
 import '../support/wait_until.dart';
 
-/// 世界书导入导出的**端到端**界面测试:选择文件 → 读字节 → 解析 → 合并 → 落库
-/// → 列表刷新。这条链路此前零覆盖(它是唯一依赖原生文件选择器的路径),靠
-/// [FakeFilePicker] 注入 `FilePickerPlatform.instance` 才测得动 —— 默认实现是
-/// MethodChannel,测试环境里没有原生侧响应。
-///
-/// 等待一律走 [waitUntil] 按条件轮询,不用固定 `Future.delayed`:这条链路每步都
-/// 是真实 I/O(读文件、写 DB、provider 重取),固定延时在并发跑全量套件时不够。
 void main() {
   late AppDatabase db;
   late int charId;

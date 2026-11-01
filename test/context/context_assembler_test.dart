@@ -1,3 +1,5 @@
+// 主写上下文组装测试:system 稳定段、记忆/摘要前置消息、附件行位置校正
+// 与 messages 前缀缓存不变量。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/context/context_assembler.dart';
 import 'package:microscritt/models/character_card.dart';
@@ -36,17 +38,17 @@ void main() {
     );
     final sp = snapshot.systemPrompt;
     expect(sp.contains('You are an RP assistant'), isTrue);
-    // CV 批起各段以 <tag> 标签块包裹;顺序即标签块顺序。
+    // 各段以 <tag> 标签块包裹;标签块顺序即线上 system 的段顺序。
     expect(sp.indexOf('<rules>') < sp.indexOf('<character>'), isTrue);
     expect(sp.contains('Alice'), isTrue);
     expect(sp.contains('knight'), isTrue);
   });
 
   test('sends the whole active history — no per-count trimming', () {
-    // 组装自 2026-09-28 批起不做按条数裁剪:上下文规模由压缩按 token 占用率
-    // 控制(target/soft/hard 三挡),组装器只渲染调用方给的窗口。此前的 2x
-    // 滞回裁剪会每轮把数组首条后移,使 messages 前缀每轮全变、提示缓存永久
-    // 失效(实测命中率由 95% 掉到 30% 且不恢复)。
+    // 组装不做按条数裁剪:上下文规模由压缩按 token 占用率控制(target/soft/hard
+    // 三挡),组装器只渲染调用方给的窗口。此前的 2x 滞回裁剪会每轮把数组首条
+    // 后移,使 messages 前缀每轮全变、提示缓存永久失效(实测命中率由 95% 掉到
+    // 30% 且不恢复)。
     final history = List.generate(
       60,
       (i) => Message(sessionId: 1, role: i.isEven ? 'user' : 'assistant', content: 'm$i', seq: i),
@@ -123,7 +125,7 @@ void main() {
   });
 
   test('triggered worldbook no longer recomputed at assembly (attachments own it)', () {
-    // CW 批:触发条目由发送管线命中后落库为附件行;组装器不再对历史做键匹配。
+    // 触发条目由发送管线命中后落库为附件行;组装器不对历史做键匹配。
     // 同样的匹配文本经公开的 matchTriggered 由调用方完成。
     final snapshot = assembler.assemble(
       character: const CharacterCard(name: 'A'),
@@ -181,8 +183,7 @@ void main() {
   });
 
   test('attachments segment lists all attachment kinds with per-type labels (DG)', () {
-    // DG 批:附件段展示全部类型(技能/世界书/压缩通知/记忆差异),段名不再
-    // 限定"世界书触发/技能"。
+    // 附件段展示全部类型(技能/世界书/压缩通知/记忆差异),而非只列世界书触发。
     final snapshot = assembler.assemble(
       character: const CharacterCard(name: 'A'),
       items: const [],
@@ -271,7 +272,7 @@ void main() {
   });
 
   test('notice attachment rows persisted after the latest user row are corrected before it', () {
-    // DG 批:通知落库为附件行;晚于最新用户行落库的(硬挡中途压缩/regenerate)
+    // 通知落库为附件行;晚于最新用户行落库的(发送中途硬挡压缩 / regenerate)
     // 组装时挪到该用户行之前,字节对齐旧合成插入位置。
     final snapshot = assembler.assemble(
       character: const CharacterCard(name: 'A'),
@@ -359,7 +360,7 @@ void main() {
   });
 
   test('skills never enter system or messages unless attached explicitly', () {
-    // CW 批:技能不进 system 稳定段;只有用户 @ 主动触发的附件行(已落库)进数组。
+    // 技能不进 system 稳定段;只有用户 @ 主动触发的附件行(已落库)进数组。
     final snapshot = assembler.assemble(
       character: const CharacterCard(name: 'A'),
       items: const [],
@@ -383,7 +384,7 @@ void main() {
     expect(snapshot.leadingSummaryContent, contains('Earlier: they met'));
     final contents = snapshot.messages.map((m) => m.content).toList();
     expect(contents.length, 3);
-    // CV 批:摘要前置消息整段包 <summary> 标签块(开标签后是说明行,再是正文)。
+    // 摘要前置消息整段包 <summary> 标签块(开标签后是说明行,再是正文)。
     expect(contents.first, startsWith('<summary>'));
     expect(contents.first, endsWith('</summary>'));
     expect(contents.first, contains('Earlier: they met'));
@@ -414,7 +415,7 @@ void main() {
     );
     // 线上消息数组:@记号被剥掉(用户输入始终在请求最后,末条即剥离后的文本)。
     expect(snapshot.messages.map((m) => m.content).toList(), ['我拔剑了', '你挥出一道剑光']);
-    // 面板分段保留本地可见的原文(面板可读性与线上格式解耦,CV 批原则)。
+    // 面板分段保留本地可见的原文:面板可读性与线上格式解耦。
     final historySegment = snapshot.segments.firstWhere((s) => s.key == 'history');
     expect(historySegment.content, contains('@剑术'));
     // 空集合不剥离(缺省行为不变)。
@@ -440,8 +441,8 @@ void main() {
   });
 
   test('never includes variables anywhere (main write excludes them)', () {
-    // CL 批:变量只存在于后台 agent 的上下文;主写快照(system/messages/分段)
-    // 一律不含变量 —— assemble 甚至不接受变量输入。
+    // 变量只存在于后台 agent 的上下文;主写快照(system/messages/分段)一律
+    // 不含变量 —— assemble 甚至不接受变量输入。
     final snapshot = assembler.assemble(
       character: const CharacterCard(name: 'A'),
       items: const [],
@@ -485,7 +486,7 @@ void main() {
     expect(stable, isNot(contains('<skills>')));
     expect(stable, isNot(contains('<memory>')));
     expect(stable, isNot(contains('auto fact')));
-    // CW 批:system 即稳定段(可变内容全部移入 messages 数组)。
+    // system 即稳定段:可变内容全部移入 messages 数组。
     expect(snapshot.systemPrompt, stable);
     // 摘要/记忆是数组头部合成消息,真实历史紧随其后。
     expect(snapshot.messages[0].content, startsWith('<system-reminder>'));
@@ -499,7 +500,7 @@ void main() {
       items: const [PromptItem(kind: PromptItemKind.preset, text: 'You are an RP assistant')],
       history: const [],
     );
-    // CV 批线上格式钉死:单一稳定段 = <preset>说明行\n正文</preset>。
+    // 线上格式钉死:单一稳定段 = <preset>说明行\n正文</preset>。
     expect(
       snapshot.stableSystemPrompt,
       '<preset>这是全局预设提示词:定义本次对话的写作风格与基础指令\n'
@@ -566,7 +567,7 @@ void main() {
   });
 
   test('collapseWorldbookDuplicates keeps only the newest row per entry name', () {
-    // 存量收敛(2026-09-28 批):条目 id 曾经不稳定,同一条目在窗口里会留下
+    // 存量收敛:条目 id 曾经不稳定,同一条目在窗口里会留下
     // 多个 refId 的附件行 —— 按条目名只保留最新一条。
     final rows = <Message>[
       Message(sessionId: 1, role: 'user', content: 'q1', seq: 0),
@@ -693,8 +694,8 @@ void main() {
     expect(keys[5], 'history'); // 真实历史随 messages 数组
     expect(keys.last, 'history'); // 无附件时 attachments 段被剔除
     expect(keys, isNot(contains('summary')));
-    expect(keys, isNot(contains('variables'))); // CL 批起变量不进主写分段
-    expect(keys, isNot(contains('skills'))); // CW 批起技能不进分段(只有附件行)
+    expect(keys, isNot(contains('variables'))); // 变量不进主写分段
+    expect(keys, isNot(contains('skills'))); // 技能不进分段(只走附件行)
   });
 
   test('summary segment is listed between memory and history segments', () {
@@ -793,7 +794,7 @@ void main() {
       ],
     );
     // system 稳定段 = preset/rules/character/post-history/常驻世界书 五个标签块
-    // 按序拼接(CW 批起技能移出 system)。
+    // 按序拼接(技能移出 system,只走附件行)。
     const expectedTags = [
       'preset',
       'rules',

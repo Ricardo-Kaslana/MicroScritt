@@ -1,8 +1,8 @@
+// 内置预设提示词种子测试:类型分派、默认启用、位置连续与内容红线。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/prompt_item.dart';
 import 'package:microscritt/models/prompt_seeds.dart';
 
-/// 内置预设种子的不变量:原创中性内容、类型分派、默认开关状态。
 void main() {
   /// 约束输出形式的 rule 类条目。
   const ruleNames = {'格式生成指导'};

@@ -1,3 +1,5 @@
+// 应用主题接线:appSettings 的 themeMode 决定 MaterialApp 的亮/暗主题
+// (最小启动,真实 DB 仅供 provider 依赖)。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

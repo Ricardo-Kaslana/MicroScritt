@@ -1,3 +1,9 @@
+/// 远程图片字节的本地磁盘缓存与近似 LRU 淘汰。
+///
+/// 只缓存 URL-only 图片的字节(base64 图片走 `Image.memory`);缓存失败
+/// 一律静默降级为联网读取,不影响渲染主流程。
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';

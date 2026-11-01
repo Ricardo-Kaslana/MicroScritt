@@ -1,3 +1,5 @@
+// Flutter 窗口宿主实现:创建 FlutterViewController、注册插件并转发
+// 窗口消息(Flutter Windows runner 模板)。
 #include "flutter_window.h"
 
 #include <optional>

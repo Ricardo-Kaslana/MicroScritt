@@ -1,3 +1,10 @@
+/// 导出落盘通道:桌面 `file_picker` 直写,移动端临时文件 + 系统另存为。
+///
+/// 导出内容不做加密 —— 配置快照含明文 API Key,角色卡/会话可能含图片,
+/// 保存位置由用户选择;临时文件在成功/取消/异常时立即清理,异常退出遗留的
+/// 目录一天后回收。
+library;
+
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -10,6 +17,9 @@ import 'package:path_provider/path_provider.dart';
 
 /// 把导出 JSON 存到用户选择的位置。用户取消返回 false;成功/失败均有 SnackBar 反馈。
 /// 平台差异与移动端临时文件通道见 [saveBytesFile]。
+///
+/// UTF-8 编码在这里完成,调用方只给字符串;含 API Key 的配置快照也走这条路,
+/// 失败提示只回显系统异常文本,不回显文件内容。
 Future<bool> saveJsonFile(BuildContext context, {required String fileName, required String content}) async {
   return saveBytesFile(
     context,
@@ -130,8 +140,11 @@ Future<void> _purgeOldExports(Directory root) async {
   }
 }
 
+// 文件名可能来自角色名/会话标题,含系统保留字符时另存为会失败,统一替换掉。
 String _safeFileName(String name) => name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
 
+// 扩展名 -> MIME 只覆盖导出会用到的格式;映射不到时不传过滤器,
+// 让原生对话框自行判断,而不是拒绝对话框打开。
 const Map<String, String> _mimeByExtension = {
   'json': 'application/json',
   'png': 'image/png',

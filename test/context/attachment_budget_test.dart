@@ -1,7 +1,7 @@
+// 单轮附件预算测试:豁免来源(技能/通知)全收,世界书触发受限额截断。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/context/attachment_budget.dart';
 
-/// DG 批:单轮附件注入预算与类型优先级(纯函数)。
 void main() {
   AttachmentCandidate cand(AttachmentOrigin origin, String ref) =>
       AttachmentCandidate(origin: origin, refId: ref, content: 'body-$ref');
@@ -26,6 +26,7 @@ void main() {
   });
 
   test('cap 0 disables auto attachments but keeps exempt ones, exempt first', () {
+    // 返回顺序即落库顺序(seq):豁免项在前,预算项按候选顺序取前 N 条。
     final picked = selectWithinBudget([
       cand(AttachmentOrigin.worldbook, 'wb:1'),
       cand(AttachmentOrigin.skill, 'skill:7'),

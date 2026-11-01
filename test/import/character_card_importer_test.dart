@@ -1,3 +1,5 @@
+// 角色卡导入测试:PNG chara/ccv3 文本块与 JSON 文本两路解析,V1/V2 信封
+// 与兼容形态的字段归一。
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/image_codec.dart';

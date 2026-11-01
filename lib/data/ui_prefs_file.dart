@@ -1,3 +1,9 @@
+/// 轻量 UI 偏好文件 `ui-prefs.json` 的读写。
+///
+/// 与数据库、配置文件同目录:独立成文件,避免被配置快照覆盖,也避免为
+/// 布局开关升级 schema。解析与写入一律 fail-safe。
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -8,15 +14,11 @@ import 'package:path_provider/path_provider.dart';
 import '../models/data_root.dart';
 import '../models/ui_prefs.dart';
 
-/// 轻量 UI 偏好文件(与数据库、`microscritt-config.json` 同目录):目前只存
-/// 角色列表布局。
+/// UI 偏好文件的访问入口;内存表示为 [UiPrefs]。
 ///
-/// 单独成文件的原因:`microscritt-config.json` 是用户名/LLM provider 的权威
-/// 快照,每次保存都按库重建,UI 偏好混进去会被反复覆盖;而 `app_settings`
-/// 加列会触发 schema 升级 —— 本项目升级会归档重建整个库,不值得为一个
-/// 布局开关丢聊天数据。
-///
-/// 解析一律 fail-safe:坏文件/未知值回落默认,启动不因偏好文件失败。
+/// 单独成文件的原因:`microscritt-config.json` 每次保存都按库重建,UI 偏好
+/// 混进去会被反复覆盖;而给 `app_settings` 加列意味着改 schema,本项目
+/// 的升级路径是归档重建整个库,不值得为一个布局开关丢聊天数据。
 class UiPrefsFile {
   static const String fileName = 'ui-prefs.json';
   static const int formatVersion = 1;
@@ -24,12 +26,14 @@ class UiPrefsFile {
   final String path;
   const UiPrefsFile(this.path);
 
+  /// 与数据库同目录:桌面端固定数据根优先,移动端回退应用私有 Documents。
   static Future<UiPrefsFile> openDefault() async {
     final fixed = DataRoot.desktopDir();
     final dir = fixed ?? (await getApplicationDocumentsDirectory()).path;
     return UiPrefsFile(p.join(dir, fileName));
   }
 
+  /// 读取偏好;文件缺失或解析失败回落默认值并打日志,启动不因此中断。
   Future<UiPrefs> read() async {
     try {
       final file = File(path);

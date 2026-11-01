@@ -1,3 +1,5 @@
+// replyViaTool 后端测试:回复经 output_reply 工具参数的 JSON content 输出,
+// 覆盖增量解码、代理对跨块、截断容忍与空回重试。
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -9,9 +11,6 @@ import 'package:microscritt/backend/upstream_error.dart';
 import 'package:microscritt/models/chat_message.dart';
 import 'package:microscritt/models/endpoint_compat.dart';
 
-/// 端点兼容选项 replyViaTool 的后端测试:回复经 output_reply 工具参数的
-/// JSON content 字符串输出 —— 增量解码、代理对跨块、截断容忍、空回自动
-/// 重试。SSE 线一律经 jsonEncode 构造,内嵌转义不再手工拼写。
 void main() {
   const replyConfig = BackendConfig(
     provider: BackendProvider.openai,

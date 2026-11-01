@@ -1,3 +1,4 @@
+// 测试用 SSE 服务:分片即时交付、写完继续保活,用于验证插件的提前截断。
 import 'dart:convert';
 import 'dart:io';
 

@@ -1,3 +1,4 @@
+// 会话变量模型测试:权限三档存储兜底、回收站与删除建议解码。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/variable.dart';
 

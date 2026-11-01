@@ -1,11 +1,11 @@
+// 灵动岛(聊天页顶部悬浮状态胶囊)的纯 widget 测试:直构 ChatState 驱动,
+// 覆盖模式优先级、闪示 TTL、展开明细与各动作回调,不触达 DB。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/background_status.dart';
 import 'package:microscritt/state/chat_controller.dart';
 import 'package:microscritt/ui/widgets/chat_island.dart';
 
-/// 直构 ChatState 驱动灵岛(无 DB):九类模式的优先级、闪示 TTL、展开明细与
-/// 各动作回调的纯 widget 级验证。
 void main() {
   // 灵岛文本多为 Text.rich(主文亮 + 后缀灰两段 span),统一带 findRichText。
   Finder rich(String s) => find.textContaining(s, findRichText: true);

@@ -1,3 +1,4 @@
+// 消息仓储:追加/分块读、压缩折叠、分页检索与进程内缓存。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/message_repository.dart';
@@ -269,8 +270,7 @@ void main() {
   test('append and insertSystemAndCompact under explicit transactions keep unique seq', () async {
     final charId = await characters.insert(const CharacterCard(name: 'A'));
     final sessionId = await sessions.create(charId, 's1');
-    // Interleave patterned appends with a compacted summary to exercise the
-    // seq computation inside both transactional paths.
+    // 交替执行追加与压缩摘要,覆盖两条事务路径里的 seq 计算。
     await messages.append(sessionId: sessionId, role: 'user', content: 'a');
     await messages.insertSystemAndCompact(sessionId: sessionId, content: 's', compactIds: const []);
     await messages.append(sessionId: sessionId, role: 'assistant', content: 'b');
@@ -377,10 +377,10 @@ void main() {
   });
 
   test('append returns the persisted row and extends the cached list without a re-read', () async {
-    // DS 批:append 返回落库后的完整行(id/seq 已定),并把轻量缓存替换为
-    // 追加后的新列表 —— 发送管线每轮「落库 → bySession」由整表重读变为缓存
-    // 命中。旧列表实例保持冻结(持有旧快照的调用方不受影响);轻量口径剥掉
-    // 图片字节只置标志;带图缓存条目失效,下次 includeImages 读库回填。
+    // append 返回落库后的完整行(id/seq 已定),并把轻量缓存替换为追加后的
+    // 新列表 —— 发送管线每轮「落库 → bySession」由整表重读变为缓存命中。
+    // 旧列表实例保持冻结(持有旧快照的调用方不受影响);轻量口径剥掉图片
+    // 字节只置标志;带图缓存条目失效,下次 includeImages 读库回填。
     final charId = await characters.insert(const CharacterCard(name: 'A'));
     final sessionId = await sessions.create(charId, 's1');
     await messages.append(sessionId: sessionId, role: 'user', content: 'a');
@@ -416,9 +416,9 @@ void main() {
   });
 
   test('cache evicts the oldest entries beyond the cap and re-reads them on demand', () async {
-    // DT 批:缓存容量从 64 收敛到 12 —— 缓存只服务"同轮交互的重复读",
-    // 不必为重度多会话使用常驻几十份全量消息列表。容量是实现细节,这里用
-    // 16 个会话(cap=12 时必然逐出最早的几个)验证 FIFO 逐出与按需重建。
+    // 缓存容量上限 12:缓存只服务"同轮交互的重复读",不必为重度多会话
+    // 使用常驻几十份全量消息列表。容量是实现细节,这里用 16 个会话(cap=12
+    // 时必然逐出最早的几个)验证 FIFO 逐出与按需重建。
     final charId = await characters.insert(const CharacterCard(name: 'A'));
     final ids = [for (var i = 0; i < 16; i++) await sessions.create(charId, 's$i')];
     await messages.append(sessionId: ids[0], role: 'user', content: 'm0');

@@ -1,22 +1,29 @@
+/// 角色世界书条目(`worldbook_entries` 表)的持久化。
+///
+/// 保存保持条目 id 稳定(附件去重账本依赖 `wb:<id>`);大列读取分块,
+/// 避免 Android CursorWindow 的单行 2MB 上限。
+library;
+
 import '../models/worldbook_entry.dart';
 import 'database.dart';
 
+/// 世界书条目仓储:按角色整组替换,单条内容按需分块读取。
 class WorldbookRepository {
   final AppDatabase db;
   WorldbookRepository(this.db);
 
-  // 历史遗留列:kind 曾区分「规则/技能」两类条目(v37 起永久退役,世界书
-  // 不再有类型之分)。列在库里保留(NOT NULL 无默认,增量迁移不删列),
-  // 写入恒为 'rule' 占位,代码侧不再读取。
+  // 历史遗留列:kind 曾区分「规则/技能」两类条目,该区分已退役。列在基线
+  // DDL 中保留(NOT NULL 无默认,删列需重建库),写入恒为 'rule' 占位,
+  // 代码侧不再读取。
   static const String _legacyKindColumnValue = 'rule';
 
   /// 整组写入某角色的世界书条目。
   ///
-  /// **保持条目 id 稳定**(2026-09-28 批):带 id 的条目走 UPDATE、无 id 的走
-  /// INSERT、不在新列表里的 DELETE —— 取代旧的「全删再全插」。
+  /// **保持条目 id 稳定**:带 id 的条目走 UPDATE、无 id 的走 INSERT、
+  /// 不在新列表里的 DELETE —— 不用「全删再全插」。
   ///
   /// 为什么必须稳定:附件去重账本以 `wb:<worldbook_entries.id>` 记账
-  /// ([AttachmentRef.worldbook])。id 一变,同一会话里既有的附件行就再也匹配
+  /// (`AttachmentRef.worldbook`)。id 一变,同一会话里既有的附件行就再也匹配
   /// 不上,条目会被当成"没注入过"重新注入 —— 而旧附件行仍留在活跃窗口里,
   /// 于是同一条目在上下文里并存多份,面板上的附件数远超条目数。旧实现每次
   /// 保存(哪怕只切换一个启用开关)都会让全表 id 前移。

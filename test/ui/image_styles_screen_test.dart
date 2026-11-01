@@ -1,3 +1,5 @@
+// 生图风格管理页:自定义风格列表与搜索、预填新建、小数 cfg 往返、
+// 内置预设重名拒绝、编辑与删除。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -89,7 +91,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    // 预填:设置页当前高级参数原样进表单(名称留空待用户起)。
+    // 预填:生图配置当前生效的风格参数原样进表单(名称留空待用户起)。
     expect(fieldText(tester, '画师串 (artist)'), 'soft lighting');
     expect(fieldText(tester, '采样器 (sampler)'), 'k_euler_ancestral');
     expect(fieldText(tester, '噪声调度 (noise_schedule)'), 'exponential');
@@ -160,7 +162,7 @@ void main() {
     await settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
 
-    // 拒绝并停留在编辑页,不落库。
+    // 内置预设是代码常量,撞名会让下拉里的套用语义分叉:拒绝且不落库。
     expect(find.text('名称与内置预设「清晰锐利」冲突'), findsOneWidget);
     expect(find.text('新建风格'), findsOneWidget);
     late int count;

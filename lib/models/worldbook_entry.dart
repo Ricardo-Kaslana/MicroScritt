@@ -1,12 +1,26 @@
+/// 世界书条目模型(`worldbook_entries` 表)与 ST 字段兼容序列化。
+///
+/// 条目按关键词/常驻规则触发,进入主写上下文的附件段;未建模的 ST 专有
+/// 字段保存在 [WorldbookEntry.extra] 中原样透传,导出时重建。
+library;
+
 import 'dart:convert';
 
+/// 一条世界书条目(不可变)。
 class WorldbookEntry {
+  /// 库内自增 id;null 表示尚未落库。
   final int? id;
+
+  /// 所属角色 id。
   final int characterId;
 
   /// 显示名(ST `comment` 映射;空时 UI 回退首关键词)。不参与触发。
   final String name;
+
+  /// 主关键词列表;空列表且非常驻的条目永不触发。
   final List<String> keys;
+
+  /// 关键词是否按正则解释(Dart RegExp 语法)。
   final bool useRegex;
 
   /// 匹配是否区分大小写(ST 条目顶层 `case_sensitive`;默认不敏感)。
@@ -20,23 +34,33 @@ class WorldbookEntry {
 
   /// 次关键词(ST `secondary_keys`),仅 [selective] 为 true 时参与判定。
   final List<String> secondaryKeys;
+
+  /// 是否常驻:true 时无需关键词命中,每轮都进入上下文。
   final bool constant;
+
+  /// 条目正文;触发后以 `<system-reminder>` 附件行注入。
   final String content;
+
+  /// 组装/列表排序位(升序)。
   final int position;
+
+  /// 是否启用;停用后不参与触发。
   final bool enabled;
 
-  /// 是否进入后台agent 上下文锚定段(状态面板后台agent 区「后台世界书条目」
-  /// 选择,EU 批,对应库列 `background`)。EU 批起快状态轮(生图/面板)的
-  /// `<worldbook_background>` 锚定段改以此为准,不再按 [constant](常驻)判断;
-  /// v52 迁移用 constant 回填,保持升级前行为。初始化路径(记忆/生图指导
-  /// 生成)仍按常驻条目取数。
+  /// 是否进入后台agent 上下文锚定段(状态面板后台 agent 区「后台世界书条目」
+  /// 选择,对应库列 `background`)。
+  ///
+  /// 快状态轮的 `<worldbook_background>` 锚定段以此为准,不再按 [constant]
+  /// 判断;v52 迁移用 constant 回填,保持升级前行为。初始化路径(记忆/生图
+  /// 指导生成)仍按常驻条目取数。
   final bool background;
 
-  /// 原始条目里**未建模字段**的透传保真(EJ 批,对应库列 `extra`):ST 专有的
-  /// position/probability/useProbability/selectiveLogic/role/depth/递归标志/
-  /// group/automation_id,以及 `extensions` 里我们不认识的自定义键,都原样
-  /// 存这里;导出重建 `character_book` 时先铺 extra、建模字段覆盖 —— 第三方
-  /// 消费端(ST)拿回的字段不再凭空丢失。本端 UI 新建的条目为空。
+  /// 原始条目里**未建模字段**的透传保真(对应库列 `extra`)。
+  ///
+  /// ST 专有的 position/probability/useProbability/selectiveLogic/role/depth/
+  /// 递归标志/group/automation_id,以及 `extensions` 里我们不认识的自定义键,
+  /// 都原样存这里;导出重建 `character_book` 时先铺 extra、建模字段覆盖 ——
+  /// 第三方消费端拿回的字段不再凭空丢失。本端 UI 新建的条目为空。
   final Map<String, dynamic> extra;
 
   const WorldbookEntry({
@@ -57,13 +81,16 @@ class WorldbookEntry {
     this.extra = const {},
   });
 
+  /// 主关键词列的落库 JSON 文本。
   String get keysWire => jsonEncode(keys);
 
+  /// 次关键词列的落库 JSON 文本。
   String get secondaryKeysWire => jsonEncode(secondaryKeys);
 
   /// extra 列 wire:空对象存 ''(列 NOT NULL DEFAULT '' 的口径)。
   String get extraWire => extra.isEmpty ? '' : jsonEncode(extra);
 
+  /// 生成替换部分字段的新条目;列表与 map 字段按引用共享(调用方不就地修改)。
   WorldbookEntry copyWith({
     int? id,
     int? characterId,

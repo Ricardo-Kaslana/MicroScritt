@@ -1,3 +1,9 @@
+/// 设置页:外观、对话与后台、LLM/生图 provider、内容扩展与配置导入导出。
+///
+/// 文本配置文件(`microscritt-config.json`)含明文 API Key,导入会覆盖用户名
+/// 与全部 provider;列表项副标题必须保留这条警告。
+library;
+
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
@@ -26,6 +32,11 @@ import 'provider_edit_screen.dart';
 import 'skills_screen.dart';
 import 'user_screen.dart';
 
+/// 应用设置总入口,从角色列表右上角进入。
+///
+/// 本页偏好项(主题、聊天背景、压缩与后台轮次)直接落库并同步内存状态;
+/// provider 与生图配置跳独立编辑页。文本配置导入成功/失败都只回 SnackBar,
+/// 成功后重新水合用户/后端/设置快照。
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
@@ -40,8 +51,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     ref.read(appSettingsProvider.notifier).state = settings;
   }
 
-  /// 压缩/后台轮次设置统一落库(自动压缩为总开关,挡位是固定策略不入库)。
-  /// (CW 批起「慢变维护间隔」随逐轮记忆维护退役,不再可设。)
+  /// 压缩/后台轮次设置统一落库(自动压缩为总开关,三挡阈值是固定策略不入库)。
   Future<void> _setTurnSettings({
     bool? autoCompactEnabled,
     int? imageInterval,
@@ -59,7 +69,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   /// 「上下文自动压缩」的三挡详细说明弹层(设置页副标题只留一行短文案,
-  /// 细节经「查看说明」进入这里)。
+  /// 细节经标题旁的信息按钮进入这里)。
   void _showAutoCompactHelp(BuildContext context) {
     showDialog<void>(
       context: context,
@@ -112,7 +122,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  /// 导出当前用户名 + LLM 后端为纯文本配置文件(含明文 API Key,导出提示里说明)。
+  /// 导出当前用户名 + LLM 后端为纯文本配置文件;文件含明文 API Key,
+  /// 调用方(设置页列表项)负责提示用户妥善保管。
   Future<void> _exportConfig() async {
     final text = await AppConfigFile.snapshotText(ref.read(databaseProvider));
     if (!mounted) return;
@@ -168,7 +179,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // ── 用户 ─────────────────────────────────────────────
+          // ===== 用户 =====
           const SectionHeader('用户', icon: Icons.person_outline),
           GroupCard(
             children: [
@@ -185,7 +196,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
           const SizedBox(height: 16),
-          // ── 外观 ──────────────────────────────────────────────
+          // ===== 外观 =====
           const SectionHeader('外观', icon: Icons.palette_outlined),
           GroupCard(
             children: [
@@ -267,7 +278,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
           const SizedBox(height: 16),
-          // ── 对话与后台 ────────────────────────────────────────
+          // ===== 对话与后台 =====
           const SectionHeader('对话与后台', icon: Icons.tune_outlined),
           GroupCard(
             children: [
@@ -355,17 +366,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
           const SizedBox(height: 16),
-          // ── LLM 后端 ─────────────────────────────────────────
+          // ===== LLM 后端 =====
           const SectionHeader('LLM 后端', icon: Icons.dns_outlined),
           const _ProviderSection(),
           const SizedBox(height: 16),
-          // ── 生图 ─────────────────────────────────────────────
-          // 多行 provider 表(v60):列表管理多套配置,每套自带密钥;编辑在
-          // 独立页面,与上方「LLM 后端」同一套交互。
+          // ===== 生图 =====
+          // 生图配置是多行表:列表管理多套配置,每套自带密钥;编辑在独立
+          // 页面,与上方「LLM 后端」同一套交互。
           const SectionHeader('生图', icon: Icons.image_outlined),
           const _ImageProviderSection(),
           const SizedBox(height: 16),
-          // ── 内容与扩展 ───────────────────────────────────────
+          // ===== 内容与扩展 =====
           const SectionHeader('内容与扩展', icon: Icons.extension_outlined),
           GroupCard(
             children: [
@@ -412,7 +423,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
           const SizedBox(height: 16),
-          // ── 配置 ─────────────────────────────────────────────
+          // ===== 配置 =====
           // 用户名与 LLM 后端另存一份纯文本配置文件(启动读取、修改回写),
           // 这里提供手动导出/导入,方便换机与外部编辑。
           const SectionHeader('配置', icon: Icons.settings_outlined),
@@ -442,7 +453,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ]),
           const SizedBox(height: 16),
-          // ── 关于 ─────────────────────────────────────────────
+          // ===== 关于 =====
           const SectionHeader('关于', icon: Icons.info_outline),
           GroupCard(
             children: [
@@ -466,6 +477,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 }
 
 /// LLM 后端设置:按 provider 分组的配置列表。
+///
+/// 列表只显示名称;删除当前在用 provider 后重解析运行时配置并回写文本
+/// 配置文件,避免运行链路继续指向已删除的 provider。
 class _ProviderSection extends ConsumerWidget {
   const _ProviderSection();
 

@@ -1,3 +1,5 @@
+// 冷启动品牌动画:播放完原位揭示首屏(移除 overlay 不重建 child)、点击
+// 跳过且不穿透,以及关闭动画/Reduce Motion 时直接显示首屏。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/ui/startup_splash.dart';

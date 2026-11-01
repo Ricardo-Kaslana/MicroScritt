@@ -1,3 +1,4 @@
+// 「测试连接」探测测试:一次最小请求,失败时给出稳定分类与脱敏摘要。
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -5,7 +6,6 @@ import 'package:http/testing.dart';
 import 'package:microscritt/backend/backend_config.dart';
 import 'package:microscritt/backend/llm_probe.dart';
 
-/// 「测试连接」探测测试:一次最小请求,失败时给出稳定分类与脱敏摘要。
 void main() {
   const ssePong = 'data: {"choices":[{"delta":{"content":"pong"}}]}\n\ndata: [DONE]\n\n';
   const gatewayPolicy403 =

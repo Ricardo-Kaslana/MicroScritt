@@ -1,3 +1,4 @@
+// 生图 tag 规范文本测试:规格要点齐全且不含受限内容(开源红线)。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/image_prompt_guide.dart';
 

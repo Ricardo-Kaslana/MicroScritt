@@ -1,3 +1,5 @@
+// 消息气泡:图片渲染(base64/URL/磁盘缓存、解码帧复用、尺寸上限)与全屏查看器;
+// 另覆盖气泡宽度上限、{{user}} 替换、可折叠指令块与 @skill 记号染色。
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;

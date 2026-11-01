@@ -1,3 +1,4 @@
+// 生图插件目录:导入/替换/停用、被引用禁删与内置插件随启动刷新。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/image_config_repository.dart';

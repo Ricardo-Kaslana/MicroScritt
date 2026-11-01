@@ -1,3 +1,4 @@
+// Hook 执行引擎测试:触发点过滤、串行改写、畸形输出容错与 __ 内部键剥离。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/hook_runtime.dart';
 import 'package:microscritt/models/hook.dart';
@@ -70,7 +71,7 @@ void main() {
       context: const {},
     );
     expect(runtime.scripts.length, 1);
-    expect(runtime.scripts.single.contains('1'), isTrue); // hook 'a' only
+    expect(runtime.scripts.single.contains('1'), isTrue); // 只有 hook 'a' 被求值
   });
 
   test('strips __-prefixed internal markers from the returned context', () async {

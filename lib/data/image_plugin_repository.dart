@@ -1,3 +1,8 @@
+/// 生图插件(`image_plugins` 表)的持久化与内置插件刷新。
+///
+/// 插件行解析失败只跳过该行并打日志;仍被生图配置引用的插件禁止删除。
+library;
+
 import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 
@@ -5,6 +10,7 @@ import '../models/image_plugin.dart';
 import '../models/image_plugin_seeds.dart';
 import 'database.dart';
 
+/// 生图插件仓储:内置插件随启动刷新,用户导入插件走同一张表与同一条执行路径。
 class ImagePluginRepository {
   final AppDatabase db;
 
@@ -47,6 +53,8 @@ class ImagePluginRepository {
     }
   }
 
+  /// 全部插件,按显示名(不区分大小写)排序;单行解析失败跳过并打日志,
+  /// 不拖垮设置页。
   Future<List<ImagePlugin>> all() async {
     final rows = await db.db.query(
       'image_plugins',
@@ -63,6 +71,7 @@ class ImagePluginRepository {
     return plugins;
   }
 
+  /// 按 id 覆盖写入(导入/编辑保存)。
   Future<void> save(ImagePlugin plugin) async {
     await db.db.insert('image_plugins', {
       'id': plugin.id,
@@ -94,6 +103,7 @@ class ImagePluginRepository {
     return rows.isNotEmpty;
   }
 
+  /// 删除插件;仍被生图配置引用时抛 [StateError](UI 据文案提示先改配置)。
   Future<void> delete(String id) async {
     if (await isInUse(id)) throw StateError('该插件仍被生图配置使用，请先删除或更改相关配置');
     await db.db.delete('image_plugins', where: 'id = ?', whereArgs: [id]);

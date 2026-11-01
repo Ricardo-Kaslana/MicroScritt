@@ -1,3 +1,4 @@
+// 技能目录仓储:增删改、启停过滤与按名幂等导入。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/skill_repository.dart';

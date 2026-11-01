@@ -1,3 +1,4 @@
+// 显示层正则种子测试:斜体/加粗应用顺序、时间戳胶囊与默认启用状态。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/display_regex.dart';
 import 'package:microscritt/models/regex_script_seeds.dart';

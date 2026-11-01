@@ -1,3 +1,10 @@
+/// 角色列表首屏:导入/新建入口、列表与网格两种布局、角色操作菜单。
+///
+/// 头像经 `characterAvatarProvider` 按 id 惰性读取并降采样解码,大卡头像
+/// 不随列表行加载(Android CursorWindow 上限);导入/导出都带阶段进度,
+/// 取消即中止且不写库。
+library;
+
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -26,8 +33,10 @@ import 'sessions_screen.dart';
 import 'settings_screen.dart';
 import 'worldbook_screen.dart';
 
-/// 角色卡管理:卡片式列表,每张卡片带角色预览图(头像大图/渐变占位)。
-/// 点击进会话列表;右上角菜单提供编辑/世界书/导出/删除。
+/// 角色卡管理:首屏(`home`),卡片/网格两种布局,点击进入会话列表;
+/// 右上角进入设置页,底部「添加」提供导入 PNG/JSON 与新建角色。
+///
+/// 布局偏好写入独立的 `ui-prefs.json`,写失败只打日志,不回滚本次切换。
 class CharacterScreen extends ConsumerWidget {
   const CharacterScreen({super.key});
 
@@ -56,6 +65,9 @@ class CharacterScreen extends ConsumerWidget {
     return '读取文件 $readMb / $totalMb MB';
   }
 
+  /// 导入角色卡(带内嵌 JSON 的 PNG 或纯 JSON),分阶段进度覆盖读取、解析与
+  /// 缩图;头像/背景缩到安全尺寸后与世界书在同一事务写入。失败或取消都不
+  /// 留下半截角色/世界书。
   Future<void> _import(BuildContext context, WidgetRef ref) async {
     // withData: false —— Android 端 file_picker 会把大文件整读进原生 ByteArray,
     // OOM 后静默丢掉字节(桌面不受影响,这就是"大卡只有移动端导入失败"的根因之一);
@@ -118,8 +130,8 @@ class CharacterScreen extends ConsumerWidget {
 
           controller.report(message: '写入数据库…');
           await WidgetsBinding.instance.endOfFrame;
-          // Character + worldbook insert in one transaction (rollback keeps the
-          // card list consistent if the worldbook write fails).
+          // 角色与世界书在同一事务内写入:世界书写失败时整体回滚,列表不会
+          // 出现「有卡没书」的半截状态。
           await ref
               .read(characterRepositoryProvider)
               .insertWithWorldbook(card, entries);
@@ -172,6 +184,8 @@ class CharacterScreen extends ConsumerWidget {
     return (card, worldbook);
   }
 
+  /// 导出 JSON 卡:世界书以本端当前条目为准覆盖 `character_book`;读取失败
+  /// 给出明确提示,不生成空文件。
   Future<void> _export(
     BuildContext context,
     WidgetRef ref,
@@ -441,7 +455,7 @@ class CharacterScreen extends ConsumerWidget {
   }
 }
 
-/// 一张角色卡:顶部大预览图(头像/渐变占位)+ 名字/描述 + 操作。
+/// 一张角色卡:左侧竖版头像(惰性加载/渐变占位)+ 名字/描述 + 操作菜单。
 class _CharacterCardView extends StatelessWidget {
   final CharacterRecord record;
   final VoidCallback onOpen;
@@ -616,9 +630,9 @@ class _CharacterGridTile extends StatelessWidget {
   }
 }
 
-/// 角色卡列表头像预览:按 id 惰性读 base64(移动端 CursorWindow 排除了大 BLOB),
-/// 拿到后按 96 逻辑宽 × ~4x 密度降采样解码(cacheWidth: 384),大图不再全分辨率
-/// 解码占内存;读取失败/为空(超大历史行)回退名字首字占位,绝不再转圈。
+/// 角色卡头像预览:按 id 惰性读 base64(列表查询已排除大 BLOB),拿到后按
+/// 用途降采样解码(列表 384、网格 768),大图不再全分辨率解码占内存;
+/// 读取失败/为空(超大历史行)回退名字首字占位,绝不再转圈。
 ///
 /// 数据走 [characterAvatarProvider]:编辑保存后 invalidate 该 provider,
 /// 复用中的列表项也会拿到新头像(此前只按 id 重载,换头像要重导入才生效)。

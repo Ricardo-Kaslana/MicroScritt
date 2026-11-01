@@ -1,3 +1,8 @@
+// Provider 编辑页回归:modernParams 开关默认关闭并随保存持久化,
+// 以及有模型时「开始探测」入口可点。
+//
+// 真实 DB I/O 一律包 `tester.runAsync`;页面是懒加载 ListView,
+// 开关与保存按钮先 ensureVisible 或 scrollUntilVisible 再操作。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,11 +13,6 @@ import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/provider_edit_screen.dart';
 import '../support/test_database.dart';
 
-/// Provider 编辑页的「官方 OpenAI 参数风格」开关与「测试连接」入口回归:
-/// 开关往返持久化,探测入口在模型目录为空时禁用。
-///
-/// 测试内所有真实 DB I/O 一律包 `tester.runAsync`(character_edit_screen_test
-/// 同款);ListView 懒加载,断言下方条目前先 scrollUntilVisible。
 void main() {
   late AppDatabase db;
 

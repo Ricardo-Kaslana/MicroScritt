@@ -1,3 +1,4 @@
+// 技能模型测试:map 往返与历史行缺 description/enabled 列的兜底。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/skill.dart';
 

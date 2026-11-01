@@ -1,3 +1,10 @@
+/// 会话归档 writer:按 version 4 结构逐条流式写出会话 JSON。
+///
+/// 图片按 1MB 分块从 SQLite 读出、就地转义写入 sink(峰值内存≈一条消息),
+/// 不把整会话的图片拼成一个大字符串;[exportToFile] 失败或取消时删除
+/// 半成品文件。
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -12,18 +19,24 @@ import '../models/message.dart';
 import '../models/worldbook_entry.dart';
 import 'character_card_exporter.dart';
 
+/// 导出进度回调:`done` 为已写消息条数,`total` 为归档内消息总数。
 typedef SessionExportProgress = void Function(int done, int total);
 
-/// 导出被用户取消(UI 按"已取消"提示,不当作错误)。
+/// 导出被用户取消(UI 按「已取消」提示,不当作错误)。
 class SessionExportCancelled implements Exception {
   const SessionExportCancelled();
 }
 
-/// 会话归档 writer:归档结构仍是 version 4 的自明 JSON,但逐条消息写出。
+/// 会话归档 writer:归档是 version 4 的自明 JSON,逐条消息写出。
 ///
-/// 图片不再先经 `bySession(includeImages: true)` 汇总成整会话字符串,而是按
-/// 1MB 分块从 SQLite 读出、就地转义写入 [StringSink](文件峰值内存≈一条消息);
-/// [exportString] 仅保留给测试/小文件,UI 一律走 [exportToFile]。
+/// 消息图片不先汇总成整会话字符串,而是按 1MB 分块从 SQLite 读出、分块
+/// 转义写入 [StringSink](峰值内存≈一条消息);[exportString] 仅用于
+/// 测试/小会话,UI 一律走 [exportToFile]。
+///
+/// 归档字段:`version` / `session` / `character`(含世界书)/
+/// `characterBackgroundBase64` / `messages`(compactOf 翻译为数组内索引、
+/// 图片与 imageUrl、imagePrompt、附件行 kind/refId)/ `variables` /
+/// `variableAccess` / `memory`(取最新一条)。
 class SessionArchiveWriter {
   final AppDatabase db;
   SessionArchiveWriter(this.db);
@@ -31,13 +44,20 @@ class SessionArchiveWriter {
   /// 每写约 8MB 主动 flush 一次,避免 IOSink 内部缓冲堆积。
   static const int _drainThreshold = 8 * 1024 * 1024;
 
+  /// 把整份归档拼成字符串;只适合测试或小会话,大图历史会整份驻留内存。
   Future<String> exportString({required int sessionId}) async {
     final buffer = StringBuffer();
     await exportToSink(sessionId: sessionId, sink: buffer);
     return buffer.toString();
   }
 
-  /// 流式写入文件;失败/取消时删除半成品,不留截断归档。
+  /// 流式写入文件;失败或取消时删除半成品,不留截断归档。
+  ///
+  /// 桌面端 UI 传目标同目录的 `.part` 暂存路径,成功后自行 rename 到目标
+  /// 文件 —— 目标位置永远不会出现写了一半的归档。移动端 UI 先写临时文件,
+  /// 再交系统「保存到本地」或分享面板(原生侧按流复制)。`onProgress` 按
+  /// 消息条数回调,`isCancelled` 在每条消息前检查,取消抛
+  /// [SessionExportCancelled]。
   Future<File> exportToFile({
     required int sessionId,
     required File file,
@@ -68,6 +88,13 @@ class SessionArchiveWriter {
     }
   }
 
+  /// 流式写出整个归档到 [sink];[drain] 在累计约 8MB 时调用一次,供文件
+  /// sink 主动 flush。会话缺失时省略 `session` 键,角色卡按空处理,不抛错
+  /// (导出端不因单条坏数据中断;是否可导入由导入端校验决定)。
+  ///
+  /// 单条消息的图片按 1MB 分块读取并转义,内存峰值只与一条消息的图片
+  /// 大小相关;`isCancelled` 在每条消息前检查,为真时抛
+  /// [SessionExportCancelled],已写内容由调用方按失败处理。
   Future<void> exportToSink({
     required int sessionId,
     required StringSink sink,

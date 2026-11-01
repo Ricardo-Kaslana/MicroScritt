@@ -1,16 +1,12 @@
+/// 应用主题与间距刻度:亮/暗两套主题由同一套配色规则生成。
+///
+/// 页面只消费 [AppTheme.light]/[AppTheme.dark] 与 [AppSpacing],不在页面里
+/// 另立色值与圆角,避免亮暗两套观感漂移。
+library;
+
 import 'package:flutter/material.dart';
 
-/// MicroScritt 的统一设计语言 —— 现代简洁、iOS 风格。
-///
-/// 设计原则:
-/// 1. **清爽留白 + 组化平铺** —— 背景用大块灰调(iOS systemGroupedBackground),
-///    卡片与内容用纯白/本色小卡。层级靠「背景灰 vs 卡片白」的明度差表达,而不是
-///    阴影叠加,整体更轻盈。
-/// 2. **弱化渐变** —— 只用纯色 tonal 底;头像/占位不再用 LinearGradient。
-/// 3. **iOS 语言** —— 分组列表(inset grouped)、大写小型分组标题、胶囊主按钮、
-///    一致的圆角梯度(卡片 12 / 输入 pill 24 / 主按钮 22)、系统图标语义。
-/// 4. **主色** —— 用 System Blue 系做强调(后续可换),低饱和次级色补足,避免
-///    M3 默认那套大面积 `primaryContainer`/`surfaceContainerHighest` 的浓色调。
+/// 全局间距刻度(4 的倍数);布局留白从这里取,不写魔法数字。
 class AppSpacing {
   AppSpacing._();
   static const double xs = 4;
@@ -20,16 +16,32 @@ class AppSpacing {
   static const double xl = 24;
 }
 
+/// MicroScritt 的统一设计语言 —— 现代简洁、iOS 风格。
+///
+/// 设计原则:
+/// 1. **清爽留白 + 组化平铺** —— 背景用大块灰调(iOS systemGroupedBackground),
+///    卡片与内容用纯白/本色小卡。层级靠「背景灰 vs 卡片白」的明度差表达,而不是
+///    阴影叠加,整体更轻盈。
+/// 2. **弱化渐变** —— 底色一律用纯色 tonal;渐变只用于图片上的压暗蒙层
+///    (保证叠在上面的白字可读)。
+/// 3. **iOS 语言** —— 分组列表(inset grouped)、小型灰色分组标题、实底主按钮、
+///    一致的圆角梯度(输入 12 / 按钮 14 / 卡片 16 / 底单 20)、系统图标语义。
+/// 4. **主色** —— 用 System Blue 系做强调(seed),再把 M3 默认的重色调压下去,
+///    避免大面积 `primaryContainer`/`surfaceContainerHighest` 的浓色块。
 class AppTheme {
   AppTheme._();
 
-  // iOS 系统色(SF)参考:蓝色即 Apple Blue #0A84FF。
+  // 强调蓝(seed):取 System Blue 色相、略压亮度,避免 fromSeed 生成的
+  // 派生色过艳。
   static const Color _accent = Color(0xFF0A7CFF);
 
-  /// 页面整体主题:浅色 / 深色。
+  /// 浅色主题。
   static ThemeData light() => _build(Brightness.light);
+
+  /// 深色主题;与 [light] 共用 [_build],只有背景/表面覆盖色按亮度分支。
   static ThemeData dark() => _build(Brightness.dark);
 
+  /// 按亮度生成主题:配色规则只写在这里,亮暗差异集中在少数覆盖色上。
   static ThemeData _build(Brightness brightness) {
     final isDark = brightness == Brightness.dark;
     // iOS 分组背景:浅色 #F2F2F7 / 深色 #000000。卡片在浅色里是白、深色里是
@@ -51,7 +63,7 @@ class AppTheme {
     final textTheme = base.textTheme
         .apply(bodyColor: textColor, displayColor: textColor)
         .copyWith(
-          // 分组标题:小号、灰、全大写,语义为「区段锚点」而非正文。
+          // 分组标题:小号、灰、微字距,语义为「区段锚点」而非正文。
           titleSmall: base.textTheme.titleSmall?.copyWith(
             fontSize: 13,
             fontWeight: FontWeight.w600,
@@ -145,6 +157,8 @@ class AppTheme {
     );
   }
 
+  /// 输入框:内嵌灰底、无外描边;聚焦只加 1.4 宽的主色描边,错误态换成
+  /// `scheme.error`,不叠加红底,保证文字可读。
   static InputDecorationTheme _inputTheme(ColorScheme scheme, bool isDark) {
     // iOS 表单用内嵌灰输入框:无外描边,填一档与背景可区分的灰。浅色用比
     // 分组背景(#F2F2F7)略深一点的灰,深色用比 #000 背景略亮的 #2C2C2E,保证

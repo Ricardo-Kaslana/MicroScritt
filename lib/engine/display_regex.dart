@@ -1,21 +1,30 @@
+/// 显示层正则脚本的编译与应用,只影响气泡渲染文本。
+///
+/// 绝不改写落库正文,也不进入 LLM 上下文:关闭脚本后消息必须还原为原文。
+/// 编译失败或非法正则的脚本被静默跳过(编辑页有实时校验),不让一条坏脚本
+/// 拖垮整个气泡渲染。
+library;
+
 import '../models/regex_script.dart';
 
-/// 已编译的显示层正则脚本:编译失败的脚本被静默跳过(编辑页有实时校验,
-/// 这里不让一条坏脚本拖垮整个气泡渲染)。
+/// 已编译的显示层正则脚本:保留源脚本(替换串与元数据)与编译结果。
 class CompiledRegexScript {
+  /// 源脚本;替换串在 [applyDisplayScripts] 中展开。
   final RegexScript source;
+
+  /// 编译通过的匹配正则。
   final RegExp regex;
 
   const CompiledRegexScript(this.source, this.regex);
 }
 
-/// 编译显示层脚本:只取启用项,按 position/id 应用序;非法正则丢弃。
-/// 按输入列表**实例**记忆化 —— 聊天页流式期间每帧重取 Provider 值时列表
-/// 实例不变,直接复用上次编译结果(每次重建都重编 N 个 RegExp 会掉帧);
-/// 列表 reload 后实例变化,自然重编。
+// 按输入列表**实例**记忆化的缓存:聊天页流式期间每帧重取 Provider 值时
+// 列表实例不变,直接复用上次编译结果(每次重建都重编 N 个 RegExp 会掉帧);
+// 列表 reload 后实例变化,自然重编。
 List<RegexScript>? _lastInput;
 List<CompiledRegexScript>? _lastCompiled;
 
+/// 编译显示层脚本:只取启用项,按 position/id 应用序;非法正则丢弃。
 List<CompiledRegexScript> compileDisplayScripts(List<RegexScript> scripts) {
   if (identical(scripts, _lastInput)) return _lastCompiled!;
   final sorted = [...scripts]..sort((a, b) {
@@ -36,7 +45,9 @@ List<CompiledRegexScript> compileDisplayScripts(List<RegexScript> scripts) {
   return compiled;
 }
 
-/// 依序应用全部脚本。替换串支持 `$1`–`$9`、`$&`(整体匹配)与 `$$`(字面 `$`)。
+/// 依序应用全部脚本,返回仅用于渲染的文本(绝不落库)。
+///
+/// 替换串支持 `$1`–`$9`、`$&`(整体匹配)与 `$$`(字面 `$`)。
 String applyDisplayScripts(String text, List<CompiledRegexScript> scripts) {
   var out = text;
   for (final s in scripts) {

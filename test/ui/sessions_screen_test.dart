@@ -1,3 +1,4 @@
+// 会话列表页 widget 测试:条数与末条预览、文本/图片细分、检索、新建与删除会话。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

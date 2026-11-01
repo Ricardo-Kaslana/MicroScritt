@@ -1,8 +1,12 @@
+/// 全局技能目录(`skills` 表)的持久化。
+///
+/// 技能不归属会话,全 App 共享一份;启用中的技能经 @ 提及进入上下文。
+library;
+
 import '../models/skill.dart';
 import 'database.dart';
 
-/// 全局技能目录(v37 起):技能不再归属会话,全 App 共享一份;
-/// 启用中的技能在所有会话的上下文组装里全局生效。
+/// 全局技能仓库:管理页 CRUD 与上下文组装共用。
 class SkillRepository {
   final AppDatabase db;
   SkillRepository(this.db);
@@ -13,7 +17,7 @@ class SkillRepository {
     return rows.map(Skill.fromMap).toList();
   }
 
-  /// 启用中的技能(上下文组装用;全局生效)。
+  /// 启用中的技能(供 @ 提及解析;仅在用户 @技能名 时注入附件行)。
   Future<List<Skill>> allEnabled() async {
     final rows = await db.db.query('skills', where: 'enabled = 1', orderBy: 'id');
     return rows.map(Skill.fromMap).toList();

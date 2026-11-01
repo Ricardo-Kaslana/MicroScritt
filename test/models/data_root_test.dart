@@ -1,3 +1,4 @@
+// 数据根目录解析测试:overrideDir 优先与桌面固定目录名。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/data_root.dart';
 

@@ -1,3 +1,9 @@
+/// 模型选择条:当前模型 chip、上下文使用率圆环与推理等级入口。
+///
+/// 聊天页把 chip + 圆环内嵌在输入框右下角;独立条布局目前仅测试使用。
+/// 用量口径优先服务端上报的真实 token,字符估算(÷3.2)只作兜底。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/app_settings.dart';
@@ -8,8 +14,10 @@ import '../state/providers.dart';
 
 /// 输入区上方的"模型选择条":左侧是当前模型 chip(点击弹出模型选择器 +
 /// 推理等级),右侧是当前上下文使用率的圆环(点击/悬停显示具体数值)。
-/// 聊天页已把 chip + 圆环内嵌进输入框右下角;独立条仍保留(测试与其它布局复用)。
+/// 聊天页已把 chip + 圆环内嵌进输入框右下角;独立条当前仅测试引用,
+/// 聊天页布局以内嵌分支为准。
 class ModelSelectorBar extends ConsumerWidget {
+  /// 上下文 token 口径(估算值 + 可选真实锚点)。
   final ContextLink usage;
   const ModelSelectorBar({super.key, required this.usage});
 
@@ -87,6 +95,12 @@ class ModelSelectorChip extends ConsumerWidget {
     );
   }
 
+  /// 弹出模型选择器;选中后落库 active 标记、重载运行链路配置(`BackendConfig`
+  /// 写入 `backendConfigProvider`)、刷新 provider 列表并回写文本配置文件。
+  /// 关闭底单或未选中时不写入任何状态。
+  ///
+  /// 落库与重载分两步:重载失败(`loadBackendConfig` 返回 null)时保留当前
+  /// backendConfigProvider 旧值,用户可再选一次,不会把运行链路置空。
   Future<void> _openPicker(
     BuildContext context,
     WidgetRef ref,
@@ -132,6 +146,7 @@ class ContextLink {
 /// 鼠标悬停(Tooltip)显示精确数值;点击弹一个对话框显示精确明细。
 /// 从当前 active model 读取容量,聊天页内嵌进输入框时与独立条共用。
 class ContextUsageRing extends ConsumerWidget {
+  /// 上下文 token 口径(估算值 + 可选真实锚点)。
   final ContextLink usage;
   const ContextUsageRing({super.key, required this.usage});
 
@@ -248,9 +263,17 @@ class ContextUsageRing extends ConsumerWidget {
 }
 
 /// 模型选择器底单:列出所有 provider 及其模型(单选当前模型),并让用户设置
-/// 推理等级。选择模型后以 `(provider, model)` 记录返回。
+/// 推理等级。选择模型后以 `(provider, model)` 记录返回,落库由调用方完成。
+///
+/// 推理四档(关/低/中/高)只改设置、不关闭底单;后端各自映射为请求参数
+/// (OpenAI 兼容为 `reasoning_effort`,anthropic 为 thinking 预算),off 时
+/// 两者都不发送相关字段。列表行按需懒构建,模型较多的 provider 不会在
+/// 打开底单时一次性构建全部行。
 class ModelPickerSheet extends ConsumerStatefulWidget {
+  /// 可选 provider 目录快照;底单自身不刷新列表。
   final List<LlmProviderConfig> providers;
+
+  /// 打开时的推理等级;底单内的改动即时落库。
   final ReasoningLevel reasoning;
   const ModelPickerSheet({
     super.key,
@@ -271,6 +294,11 @@ class _ModelPickerSheetState extends ConsumerState<ModelPickerSheet> {
     _reasoning = widget.reasoning;
   }
 
+  /// 切换推理等级:同步 `appSettingsProvider` 与库(该设置不进文本配置文件,
+  /// 文件只承载用户名与 provider 目录);完成后刷新选中态。
+  ///
+  /// 持久化异常不在此吞掉;setState 只在完成后且仍挂载时执行 —— 弹层已关闭
+  /// 时不再触碰状态。
   Future<void> _saveReasoning(ReasoningLevel level) async {
     _reasoning = level;
     final settings = ref.read(appSettingsProvider);

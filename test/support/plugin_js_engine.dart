@@ -1,3 +1,5 @@
+// 生图插件求值引擎选择:QuickJS 优先,不可用时回落 Node;两者皆无则由
+// 调用方 markTestSkipped,禁止空转假绿。
 import 'package:microscritt/backend/plugin_image_backend.dart';
 import 'package:microscritt/engine/js_hook_runtime.dart';
 

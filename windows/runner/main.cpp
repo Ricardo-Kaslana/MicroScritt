@@ -1,3 +1,7 @@
+// Windows 桌面入口。
+//
+// 初始化 COM、加载 Dart 入口参数并创建主窗口;窗口标题固定为
+// MicroScritt,其余行为沿用 Flutter Windows runner 模板。
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
@@ -7,8 +11,8 @@
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
-  // Attach to console when present (e.g., 'flutter run') or create a
-  // new console when running with a debugger.
+  // 附加到调用方控制台(如 `flutter run`);调试器中则新建控制台。
+  // 以下模板注释沿用上游英文,避免与 flutter create 升级产生冲突。
   if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
     CreateAndAttachConsole();
   }

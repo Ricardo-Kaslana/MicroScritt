@@ -1,10 +1,10 @@
-/// 单轮附件注入预算与类型优先级(DG 批)。
+/// 单轮附件注入预算与来源优先级。
 ///
-/// 发送管线每轮可能产生多类附件候选(@技能、系统通知、世界书触发)。
-/// 技能是用户主动调用、通知是系统事件,二者豁免预算全量注入;世界书键命中
-/// 是自动行为、频率不可控,受全局设置的附件限额约束,
-/// 超出时按候选顺序丢弃尾部(即 `ContextAssembler.matchTriggered` 的返回
-/// 顺序:启用条目的库序)。
+/// 发送管线每轮可能产生多类附件候选(@技能、系统通知、世界书触发):
+/// 技能是用户主动调用、通知是系统事件,二者豁免预算全量注入;世界书键
+/// 命中是自动行为、频率不可控,受全局设置的附件限额约束,超出时按候选
+/// 顺序丢弃尾部(即 `ContextAssembler.matchTriggered` 的返回顺序:启用
+/// 条目的库序)。
 library;
 
 /// 附件来源类型,按优先级降序声明:技能(用户主动)> 通知(系统事件)>
@@ -20,8 +20,14 @@ enum AttachmentOrigin {
 
 /// 一条待落库的附件候选:来源类型 + ref 标识 + 线上内容。
 class AttachmentCandidate {
+  /// 来源类型,决定是否占用单轮预算名额。
   final AttachmentOrigin origin;
+
+  /// 附件行的去重标识(如 `skill:3` / `wb:12` / `notice:compact:<时刻>`),
+  /// 落库到 `messages.ref_id`,与组装侧的去重账本共用同一口径。
   final String refId;
+
+  /// 线上文本(`<system-reminder>` 包裹后的完整内容),落库时原样写入。
   final String content;
 
   const AttachmentCandidate({

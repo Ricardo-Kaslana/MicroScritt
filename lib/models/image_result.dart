@@ -1,5 +1,10 @@
-/// 一幅生成图:base64 内嵌数据 与 远程 URL 二选一。
-/// 本地/模拟 provider 产 base64;云端 provider 产 URL。
+/// 生图结果模型:插件返回的图片载体与聚合结果。
+///
+/// URL 结果由上层下载并本地化为 base64 后落库,`ImageResult` 本身不触网。
+library;
+
+/// 一幅生成图:base64 内嵌数据与远程 URL 二选一。
+/// 本地/模拟 provider 产 base64;云端插件可产 URL。
 class ImageEntry {
   final String? base64;
   final String? url;

@@ -1,3 +1,5 @@
+// 名词释义卡(点气泡内高亮词条弹出的底部卡)的布局回归:窄视口长标题
+// 不撑破 Row,点选链路与关闭按钮完整(真实 sqflite + 世界书)。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,7 +15,6 @@ import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/chat_screen.dart';
 import '../support/test_database.dart';
 
-/// 名词释义卡(点气泡内高亮词条弹出的底部卡)的布局回归。
 void main() {
   /// 等 ChatController.load 完成 + llmProviders/worldbook 就绪 —— 词条高亮
   /// 依赖世界书 FutureProvider 解析完成后气泡才带点选手势。
@@ -48,9 +49,9 @@ void main() {
       db = await openTestDb();
       charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
       sessionId = await SessionRepository(db).create(charId, 's');
-      // 填充两条普通消息:列表正常揭示后,顶部悬浮「灵动岛」会接管其悬浮区
-      // 内的点击(DX 批设计);词条若在首条消息(正处岛下)将点不到。垫高让
-      // 词条消息落在岛区之下的可点范围。
+      // 填充两条普通消息:列表揭示后顶部悬浮「灵动岛」会接管其悬浮区内的
+      // 点击;词条若落在首条消息(正处岛下)将点不到,垫高让词条消息位于
+      // 岛区之下的可点范围。
       await MessageRepository(db).append(sessionId: sessionId, role: 'assistant', content: '开场白一条。');
       await MessageRepository(db).append(sessionId: sessionId, role: 'user', content: '回应一句。');
       await MessageRepository(db).append(sessionId: sessionId, role: 'assistant', content: '魔力');

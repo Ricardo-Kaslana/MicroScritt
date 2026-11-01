@@ -1,3 +1,5 @@
+// 聊天页细节回归:圆角输入条、长按消息操作、错误提示可关闭、@技能插入与
+// 输入框内高亮。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,7 +16,7 @@ import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/chat_screen.dart';
 import '../support/test_database.dart';
 
-/// 只发错误事件的后端,用来驱动错误横幅。
+/// 只发错误事件的后端,用来驱动灵岛的错误警报粒。
 class _ErrorBackend implements LlmBackend {
   @override
   String get id => 'fake';
@@ -289,7 +291,7 @@ void main() {
     expect(children.any((s) => s.text == '试试' && s.style == null), isTrue);
     expect(children.any((s) => s.text == '看看' && s.style == null), isTrue);
 
-    // 未启用技能的普通 @ 词不染色。
+    // 高亮只命中已启用技能名:span 中不会出现其它 @ 片段(如 @别人)。
     final plainSpan = tester.widget<TextField>(find.byType(TextField)).controller!
         .buildTextSpan(context: element, style: null, withComposing: false);
     expect(plainSpan.children!.whereType<TextSpan>().where((s) => s.text == '@别人'), isEmpty);

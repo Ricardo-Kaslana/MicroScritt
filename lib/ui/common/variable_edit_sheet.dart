@@ -1,3 +1,9 @@
+/// 变量键值编辑底单(键/值/后台权限),新增与编辑共用。
+///
+/// 覆盖同名变量是用户的显式选择:命中 [existingKeys] 只做红字提示,不阻止
+/// 保存;键为空(或仅空白)时保存键置灰 —— 空键在 `variables` 表里没有意义。
+library;
+
 import 'package:flutter/material.dart';
 import '../../models/variable.dart';
 import 'copy_button.dart';
@@ -189,8 +195,8 @@ class _VariableEditSheetState extends State<_VariableEditSheet> {
                   ),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<VariableAccess>(
-                    // initialValue 只在首次构建生效:权限变化后换 key 重建,
-                    // 让底单始终显示当前选择。
+                    // key 随当前权限变化:切换后强制重建下拉,不依赖 FormField
+                    // 对 initialValue 的内部同步。
                     key: ValueKey('variable_access_${_access.name}'),
                     initialValue: _access,
                     isExpanded: true,

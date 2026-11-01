@@ -1,3 +1,4 @@
+// 角色卡仓储:CursorWindow 上限下的大卡读写、列表投影与级联删除。
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';

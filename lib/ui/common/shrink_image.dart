@@ -1,3 +1,9 @@
+/// 图片缩小与 base64 体积控制,目的是让单行永远塞得进 Android CursorWindow。
+///
+/// 缩图只为落库安全,不是必修步骤:解码失败/非 base64 一律回退原值或 null,
+/// 由调用方决定占位,不允许因瘦身失败而中断导入。
+library;
+
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' as ui;

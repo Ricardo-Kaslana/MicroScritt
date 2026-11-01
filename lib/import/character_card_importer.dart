@@ -1,8 +1,15 @@
+/// 角色卡导入:PNG 内嵌卡(chara/ccv3 文本块)与 JSON 文本两路解析。
+///
+/// PNG 卡的头像默认取图片本体;内嵌头像可能非常大,导入端需先缩图再落库,
+/// 否则单行 base64 会撑爆 Android SQLite 的 CursorWindow。
+library;
+
 import 'dart:convert';
 import 'dart:typed_data';
 import '../models/character_card.dart';
 import 'png_chunk_reader.dart';
 
+/// 角色卡导入入口;PNG 卡按 `ccv3` → `chara` → 任意文本块兜底查找载荷。
 class CharacterCardImporter {
   /// PNG 文件签名;导入 UI 据此决定"头像源是否就是原始文件字节"。
   static bool isPng(Uint8List bytes) {
@@ -14,6 +21,8 @@ class CharacterCardImporter {
     return true;
   }
 
+  /// 按文件类型分派:PNG 走 [fromPng],其余一律按 UTF-8 JSON 文本解析。
+  ///
   /// [includePngImageAsAvatar] 为 false 时不把整张 PNG base64 成头像 —— 导入
   /// UI 手里已有原始字节,直接走 `shrinkImageBytes` 能省掉一次 20MB 级
   /// base64 编码与随后的 base64 解码(两次大拷贝)。
@@ -45,6 +54,7 @@ class CharacterCardImporter {
         : card;
   }
 
+  /// 解析卡 JSON 文本;剥 UTF-8 BOM,不是合法卡对象时抛 [FormatException]。
   static CharacterCard fromJsonString(String jsonStr) {
     final text = jsonStr.startsWith('\uFEFF') ? jsonStr.substring(1) : jsonStr;
     final json = jsonDecode(text) as Map<String, dynamic>;
@@ -70,8 +80,8 @@ class CharacterCardImporter {
       jsonText = jsonText.startsWith('\uFEFF') ? jsonText.substring(1) : jsonText;
       return jsonText;
     }
-    // 兜底直连 JSON:基于剥过 data URI 前缀、trim 过的 cleaned —— 此前回退
-    // 原始 text,带前缀时 jsonDecode 必失败,把真实错误掩盖成无意义的
+    // 兜底直连 JSON:基于剥过 data URI 前缀、trim 过的 cleaned —— 回退原始
+    // text 时,带前缀会让 jsonDecode 必然失败,把真实错误掩盖成无意义的
     // "Unexpected character"。Dart 的 trim() 会连 BOM 一起剥,无需再处理。
     return cleaned;
   }
@@ -87,8 +97,9 @@ class CharacterCardImporter {
     }
   }
 
-  /// RP-Hub 兜底:`chara`/`ccv3` 之外,任意块值 trim 后 >50 字符且以 `{`(直接
-  /// JSON)或 `ey`(base64 编码的 `{"`)开头,即视为卡片数据。
+  /// `chara`/`ccv3` 之外的兜底:任意块值 trim 后 >50 字符且以 `{`(直接
+  /// JSON)或 `ey`(base64 编码的 `{"`)开头,即视为卡片数据(部分第三方
+  /// 工具用非标准关键字)。
   static String? _findFallback(List<PngTextChunk> chunks) {
     for (final c in chunks) {
       final t = c.text.trim();

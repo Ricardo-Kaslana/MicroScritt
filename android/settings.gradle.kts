@@ -1,3 +1,5 @@
+// Gradle 插件与仓库配置:从 local.properties 读取 Flutter SDK 路径并加载
+// Flutter Gradle 插件。
 pluginManagement {
     val flutterSdkPath =
         run {

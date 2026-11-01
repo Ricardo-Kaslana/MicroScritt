@@ -1,3 +1,4 @@
+// 消息模型测试:snake_case map 往返、图片提示词往返与视觉图判定。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/message.dart';
 

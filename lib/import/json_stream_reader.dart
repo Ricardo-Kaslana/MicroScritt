@@ -1,12 +1,18 @@
+/// 会话归档的流式 JSON 读取:按块增量扫描,不把整个文件解码成 String/Map。
+///
+/// 只有单个值会整体驻留内存(通常最坏是单条消息的图片);截断/坏结构在
+/// 扫描时抛 [FormatException],调用方据此在写库前失败。
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-/// 会话归档的流式 JSON 读取:不把整个文件解码成一个 String/Map,而是按
-/// 1MB 级块扫描,只让"单条消息"(其主体是图片 base64)完整进入内存。
-///
-/// 归档仍是普通 JSON。扫描器只做合法的词法切分(字符串/括号/标量),
+/// 会话归档的流式 JSON 读取:只做合法的词法切分(字符串/括号/标量),
 /// 值本身仍交给 `jsonDecode` 解码 —— 不做第二套 JSON 语义实现。
+///
+/// 缓冲随读随丢:已消费位置超过 64KB 时截掉前缀,内存占用与已扫描长度
+/// 无关,只与单个值的大小相关(通常最坏是单条消息的图片)。
 class JsonStreamScanner {
   final StreamIterator<String> _source;
   String _buf = '';
@@ -31,6 +37,7 @@ class JsonStreamScanner {
     return false;
   }
 
+  // 已消费前缀超过 64KB 时丢弃,否则缓冲区会随扫描进度无限增长。
   void _compactIfNeeded() {
     if (_pos > 64 * 1024) {
       _buf = _buf.substring(_pos);
@@ -61,6 +68,7 @@ class JsonStreamScanner {
     }
   }
 
+  /// 校验并消费顶层 `{`;容忍 UTF-8 BOM。非对象抛 [FormatException]。
   Future<void> beginObject() async {
     await _skipWhitespace();
     // UTF-8 BOM 会被解码成 \uFEFF。
@@ -100,6 +108,7 @@ class JsonStreamScanner {
     return key;
   }
 
+  /// 校验并消费数组开头的 `[`(messages 数组)。缺失抛 [FormatException]。
   Future<void> beginArray() async {
     await _skipWhitespace();
     if (await _readOrThrow() != 0x5B) {
@@ -128,6 +137,8 @@ class JsonStreamScanner {
     return collect ? raw : '';
   }
 
+  /// 读取并完整解码一个值(整体进内存);值语法错误抛 [FormatException]。
+  /// 用于头部字段,不要用它读 messages 数组。
   Future<Object?> readSmallValue() async {
     final raw = await _scanValue(collect: true);
     try {
@@ -137,14 +148,16 @@ class JsonStreamScanner {
     }
   }
 
+  /// 跳过一个完整值,不保留原文(用于未知顶层键)。
   Future<void> skipValue() => _scanValue(collect: false);
 
-  /// 顶层对象已结束后调用:除空白外不允许还有内容。
+  /// 顶层对象已结束后调用:除空白外不允许还有内容(拦截拼接的坏文件)。
   Future<void> endObjectAndVerifyEof() async {
     await _skipWhitespace();
     if (await _peek() != null) throw const FormatException('文件末尾存在多余内容');
   }
 
+  /// 取消底层流订阅;reader 在 finally 中调用,异常路径不泄漏文件句柄。
   Future<void> close() => _source.cancel();
 
   Future<String> _scanValue({required bool collect}) async {
@@ -282,21 +295,39 @@ class JsonStreamScanner {
   }
 }
 
-/// 第一遍扫描得到的归档头:结构校验、小字段与消息条数。
+/// 第一遍扫描得到的归档头:结构校验、头部字段与消息条数。
 ///
 /// `messages` 的重复键按 `jsonDecode` 的"后者覆盖"语义处理:
 /// [messagesArrays] 记录出现次数,[messageCount] 是最后一个数组的长度。
 class SessionArchiveHeader {
+  /// 归档版本;缺失/非整数为 0(按 v1 处理)。
   final int version;
+
+  /// 会话元数据与 token 用量;旧档可能缺失。
   final Map<String, dynamic>? session;
+
+  /// 角色卡 JSON;缺失表示不是有效会话归档。
   final Map<String, dynamic>? character;
+
+  /// 变量键值;旧档可能缺失。
   final Map<String, dynamic>? variables;
-  // v66 可选:变量键 → agent_access 字符串;旧档缺失为 null。
+
+  /// v66 可选:变量键 → agent_access 字符串;旧档缺失为 null。
   final Map<String, dynamic>? variableAccess;
+
+  /// v2 时代的会话级技能;v3 起不再写出。
   final List<dynamic>? skills;
+
+  /// 角色背景图 base64;可选键,旧档缺失为 null。
   final String? characterBackgroundBase64;
+
+  /// 会话记忆原文;缺失为 null。
   final String? memory;
+
+  /// 最后一个 `messages` 数组的长度。
   final int messageCount;
+
+  /// `messages` 键出现的次数(重复键按「后者覆盖」处理)。
   final int messagesArrays;
 
   const SessionArchiveHeader({
@@ -318,17 +349,23 @@ class ArchiveScanCancelled implements Exception {
   const ArchiveScanCancelled();
 }
 
-/// 会话归档的两遍读取:第一遍校验完整结构/读小字段(截断文件在任何写库前
-/// 报错),第二遍只重扫 `messages` 并逐条回调原文。两遍都走块级扫描,
-/// 单条消息(其主体是图片 base64)是唯一的内存上限。
+/// 会话归档的两遍读取:第一遍校验完整结构并读头部字段(截断文件在任何
+/// 写库前报错),第二遍只重扫 `messages` 并逐条回调原文。两遍都走块级
+/// 扫描,单条消息(主体是图片 base64)是内存占用的主要来源。
 class SessionArchiveReader {
   final File file;
   const SessionArchiveReader(this.file);
 
   JsonStreamScanner _open() => JsonStreamScanner(
+    // 非法 UTF-8 字节以替换字符读入,结构校验仍由扫描器负责;截断文件在
+    // 扫描层报错,不会静默丢字节。
     file.openRead().transform(const Utf8Decoder(allowMalformed: true)),
   );
 
+  /// 第一遍扫描:校验顶层结构与 EOF,读取头部字段与消息条数。
+  ///
+  /// 缺少 `messages` 或结构损坏抛 [FormatException];读到 EOF 才返回,
+  /// 截断文件在这里就被拦下,调用方不会写半截数据。
   Future<SessionArchiveHeader> readHeader() async {
     final scanner = _open();
     try {

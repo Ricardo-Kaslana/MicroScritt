@@ -1,3 +1,4 @@
+// 角色卡模型测试:ST V1/V2/V3 字段兼容、三种序列化口径与气泡样式扩展。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/bubble_style.dart';
 import 'package:microscritt/models/character_card.dart';

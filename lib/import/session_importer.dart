@@ -1,3 +1,9 @@
+/// 会话归档导入:整串入口(小文件)与两遍流式文件入口(大会话)。
+///
+/// 归档结构兼容 version 1–4;截断/坏文件在写库前报错,文件入口失败或
+/// 取消时回滚本次新建的会话与角色。
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -24,7 +30,7 @@ class SessionImportResult {
   const SessionImportResult(this.sessionId, this.characterId, this.reusedCharacter);
 }
 
-/// 导入 [SessionExporter] 产出的会话归档(version 1–4 均可;旧版本缺失的
+/// 导入 `SessionExporter` 产出的会话归档(version 1–4 均可;旧版本缺失的
 /// session/variables/memory/skills 节按空处理)。
 ///
 /// 角色策略:同名角色**复用既有角色**(不动其卡与世界书 —— 用户可能已在本地
@@ -45,8 +51,14 @@ class SessionImporter {
     Future<String?> Function(String?)? avatarShrinker,
   }) => importText(db, utf8.decode(bytes, allowMalformed: true), avatarShrinker: avatarShrinker);
 
-  /// [avatarShrinker] 可选:把内嵌头像 base64 缩到安全尺寸(Android CursorWindow
-  /// ~2MB,大图不缩会 Row too big);UI 层传入 shrinkBase64Image,测试可省略。
+  /// 整串入口(测试/小文件):整体 `jsonDecode` 后按序写库。
+  ///
+  /// 结构或角色卡校验失败在任何写库前抛 [FormatException];写库中途失败
+  /// **不自动回滚**(文件与大会话请走 [importFile],它按会话回滚)。
+  ///
+  /// [avatarShrinker] 可选:把内嵌头像 base64 缩到安全尺寸(Android
+  /// CursorWindow ~2MB,大图不缩会 Row too big);UI 层传入
+  /// shrinkBase64Image,测试可省略。
   static Future<SessionImportResult> importText(
     AppDatabase db,
     String text, {
@@ -80,9 +92,9 @@ class SessionImporter {
         final shrunk = await avatarShrinker(card.avatarBase64);
         if (shrunk != null) card = card.replacingAvatar(shrunk);
       }
-      // 背景图(EF 批):归档可选键(characterBackgroundBase64)。背景列与
-      // 头像同存于 characters 行,同样过缩图管线防 CursorWindow 爆窗;旧归档
-      // 或无背景时缺键,按无背景处理。复用既有角色时不覆盖其背景(同卡策略)。
+      // 背景图:归档可选键(characterBackgroundBase64)。背景列与头像同存于
+      // characters 行,同样过缩图管线防 CursorWindow 爆窗;旧归档或无背景时
+      // 缺键,按无背景处理。复用既有角色时不覆盖其背景(同卡策略)。
       final rawBackground = decoded['characterBackgroundBase64'];
       if (rawBackground is String && rawBackground.isNotEmpty) {
         final shrunk = avatarShrinker == null ? rawBackground : await avatarShrinker(rawBackground);
@@ -161,8 +173,8 @@ class SessionImporter {
     return SessionImportResult(sessionId, characterId, reused);
   }
 
-  /// 文件入口(内存受限):两遍流式扫描 —— 第一遍校验结构并读小字段,
-  /// 第二遍逐条消息解码、每 8 条分块落库。图片只在单条消息内进内存,
+  /// 文件入口(内存受限):两遍流式扫描 —— 第一遍校验结构并读头部字段,
+  /// 第二遍逐条消息解码、每 8 条分块事务落库。图片只在单条消息内进内存,
   /// 几百 MB 的归档也能导入;失败/取消会删除本会话与本次新建的角色。
   static Future<SessionImportResult> importFile(
     AppDatabase db,
@@ -342,9 +354,9 @@ class SessionImporter {
   /// 归一化消息 Map:isCompacted 兼容 v1 的 int 0/1 与 v2 的 bool,统一为
   /// DB 列形态 int(Message.fromMap 按列类型解析);剔除空图片串。
   /// [compactAsIndex]:v4+ 归档的 compactOf 是消息数组内索引,原样透传给
-  /// importMessages 换算;v1–v3 的 compactOf 是原库行 id,不可迁移,置 null。
+  /// 落库层换算;v1–v3 的 compactOf 是原库行 id,不可迁移,置 null。
   static Map<String, Object?> _normalizedMessage(Map<String, dynamic> m, {required bool compactAsIndex}) => {
-        'session_id': 0, // 占位;落库时由 importMessages 按目标会话写入。
+        'session_id': 0, // 占位;落库时由仓库按目标会话写入。
         'role': (m['role'] ?? 'user').toString(),
         'content': (m['content'] ?? '').toString(),
         'seq': m['seq'] is int ? m['seq'] as int : 0,

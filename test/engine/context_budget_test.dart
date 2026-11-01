@@ -1,3 +1,4 @@
+// 上下文预算测试:占用率挡位阈值、请求 token 估算与保留条数规划。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/context_budget.dart';
 import 'package:microscritt/models/chat_message.dart';

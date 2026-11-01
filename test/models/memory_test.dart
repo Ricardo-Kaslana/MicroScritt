@@ -1,3 +1,4 @@
+// 会话记忆模型的 map 往返测试。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/memory.dart';
 

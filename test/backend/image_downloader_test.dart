@@ -1,3 +1,4 @@
+// 远程图片下载测试:超时重试一次、确定性失败不重试与 base64 本地化。
 import 'dart:async';
 import 'dart:convert';
 

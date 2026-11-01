@@ -1,3 +1,4 @@
+// 用户档案仓储:单行语义、超大头像分块读与未保存时的空档案。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/user_repository.dart';
 import 'package:microscritt/models/user.dart';
@@ -23,7 +24,7 @@ void main() {
     expect(loaded.name, '小明');
     expect(loaded.avatarBase64, 'aGVsbG8=');
 
-    // Single-row semantics: a second save replaces, not appends.
+    // 单行语义:第二次 save 是整体替换,不是追加。
     await repo.save(const UserProfile(name: '小红', avatarBase64: null));
     final reloaded = await repo.load();
     expect(reloaded.name, '小红');

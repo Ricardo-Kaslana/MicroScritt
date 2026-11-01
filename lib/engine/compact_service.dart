@@ -1,3 +1,10 @@
+/// 会话压缩服务:把较早的活跃对话折叠为一条 LLM 摘要(合并式单一摘要)。
+///
+/// 被压缩的原文保留 `is_compacted=1`(不删除);摘要作为 `system` 角色行
+/// 写入,由 `ContextAssembler` 渲染进系统提示。压缩由调用方内联执行
+/// (回复落库后的软挡、发送前的硬挡或手动命令),不进后台任务队列。
+library;
+
 import 'dart:async';
 
 import '../backend/llm_backend.dart';
@@ -17,31 +24,34 @@ class _CompactInterrupted implements Exception {
 typedef _CompactPlan = ({List<Message> toCompact, List<Message> prevSummaries});
 
 /// 压缩会话较早的活跃对话为一条 LLM 摘要。
+///
 /// 被压缩的原文保留 `is_compacted=1`(不删除);摘要作为 `system` 角色行写入,
-/// 由 ContextAssembler 渲染进系统提示。压缩在发送管线内联执行(P2;P3 后台
-/// 引擎完成后仍保持内联)。
+/// 由 `ContextAssembler` 渲染进系统提示。压缩在调用方的异步流程内联执行,
+/// 不进后台任务队列。
 ///
 /// 合并式单一摘要:每次压缩把会话当前的未折叠摘要行作为「早期背景」一并
 /// 送入模型,产出的新摘要自足、可完全替代旧摘要;旧摘要行与新摘要落库同
 /// 一事务被折叠(`is_compacted=1`、`compact_of` 指向新摘要行)。因此线上
 /// 摘要段永远只有一份最新版本 —— 不随压缩次数堆叠膨胀,也不出现新旧状态
-/// 互相矛盾。组装器只渲染未折叠 system 行(见 ContextAssembler)。
+/// 互相矛盾。组装器只渲染未折叠 system 行。
 class CompactService {
+  /// 摘要调用使用的 LLM 后端。
   final LlmBackend backend;
+
+  /// 消息仓库;摘要写入与原文折叠走其事务方法。
   final MessageRepository messages;
   CompactService(this.backend, this.messages);
 
-  /// Summarizes all but the most recent [keep] live messages. Returns true if
-  /// compaction happened, false if there was nothing to do (or summarization
-  /// produced no text)。
+  /// 压缩除最新 [keep] 条活跃消息外的历史为一条摘要;发生压缩返回 true,
+  /// 无事可做或摘要无产出返回 false。
   ///
-  /// [minChunk]:仅有 [minChunk] 条以上消息掉出窗口才压缩(默认 1 保持旧行为)。
+  /// [minChunk]:掉出窗口的对话达到该条数才压缩(默认 1 保持旧行为)。
   /// [maxSummarizeAttempts]:摘要调用的总尝试次数(默认 1 = 失败不重试;
-  /// 自动路径传 4 = 首次 + 3 次失败重试)。每次失败(ErrorEvent/异常/空输出)
-  /// 都完整重试一遍摘要调用。
-  /// [onUsage] 在摘要调用结束时回调其 token 用量(D2:压缩调用单独记账)。
-  /// [stripSkillNames]:摘要转录里剥掉的 @技能名 记号(DA 批:记号只在转录
-  /// 里保留供气泡/编辑,任何 LLM 出口都剥离)。
+  /// 自动路径传 4 = 首次 + 3 次失败重试)。每次失败(ErrorEvent/流错误/
+  /// 空输出)都完整重试一遍摘要调用。
+  /// [onUsage] 在摘要调用结束时回调其 token 用量;压缩调用单独记账。
+  /// [stripSkillNames]:摘要转录里剥掉的 @技能名 记号(记号只在转录里保留
+  /// 供气泡/编辑,任何 LLM 出口都剥离)。
   /// [cancelSignal]:可选的用户中断信号 —— 触发即放弃本次压缩(取消底层
   /// LLM 请求、不重试、不落库),返回 false。硬挡压缩内联在发送管线里且
   /// 发生在流式开始之前,不设防时网络黑洞会让用户"连停止键都没有"。
@@ -117,10 +127,10 @@ class CompactService {
     required String content,
     required _CompactPlan plan,
   }) async {
-    // Summary insert + originals marked compacted happen in ONE transaction so
-    // a failure cannot leave an orphan summary (or unmarked originals).
-    // 既有摘要行与原文同事务折叠(compact_of 指向新摘要行)—— 合并式单一摘要
-    // 的不变量:落库成功后,会话里未折叠的 system 行恰好只有这一条新摘要。
+    // 摘要写入与原文标记折叠在同一事务内完成:失败不会留下孤儿摘要
+    // (也不会留下未标记的原文)。既有摘要行与原文同事务折叠(compact_of
+    // 指向新摘要行)—— 合并式单一摘要的不变量:落库成功后,会话里未折叠
+    // 的 system 行恰好只有这一条新摘要。
     await messages.insertSystemAndCompact(
       sessionId: sessionId,
       content: content,
@@ -211,7 +221,7 @@ class CompactService {
 }
 
 /// 压缩摘要的结构化提示词 —— 为「本应用的主写模型据此续写同一角色、同一剧情」
-/// 这一读取场景专门设计(合并式单一摘要,2026-09 批):
+/// 这一读取场景专门设计(合并式单一摘要):
 /// - 【定位】摘要是"剧情状态文档"而非"对话日志" —— 按故事时间线记录事件、
 ///   人物现场状态,不复述谁说了什么;
 /// - 【七分段】主线/现场/角色关系/信息边界/既定设定/伏笔承诺/叙事风格,逐段
@@ -243,7 +253,7 @@ const String _summarySystemPrompt = '''
 ''';
 
 /// 剥离 `<analysis>` 草稿与 XML 标签,返回可供落库的纯文本摘要。
-/// 若模型未按标签输出(宽松回退),则原样返回去掉首尾空白的内容。
+/// 若模型未按标签输出(宽松回退),返回剥离草稿与首尾空白后的原文。
 String formatCompactSummary(String summary) {
   var s = summary.trim();
 

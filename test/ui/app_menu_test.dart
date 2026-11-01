@@ -1,10 +1,10 @@
+// 菜单公共组件与主题令牌的回归:三点菜单排版/危险项红色、底部操作弹层
+// 返回值语义、主题层菜单外观(圆角/白面)。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/ui/common/app_menu.dart';
 import 'package:microscritt/ui/theme/app_theme.dart';
 
-/// 菜单公共组件与主题令牌的回归:三点菜单排版/危险项红色、底部操作弹层
-/// 返回值语义、主题层菜单外观(圆角/白面)。
 void main() {
   Widget harness(Widget child) => MaterialApp(theme: AppTheme.light(), home: Scaffold(body: child));
 

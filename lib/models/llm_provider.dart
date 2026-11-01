@@ -30,7 +30,9 @@ enum LlmProtocol {
   }
 }
 
+/// [LlmProtocol] 的落库字面值与界面标签。
 extension LlmProtocolX on LlmProtocol {
+  /// 落库/传输用字面值;openaiCompat 存为 `openai`(历史值)。
   String get wire => switch (this) {
     LlmProtocol.openaiCompat => 'openai',
     LlmProtocol.anthropic => 'anthropic',
@@ -45,14 +47,31 @@ extension LlmProtocolX on LlmProtocol {
 
 /// 一个 provider 下的模型条目(模型目录中的一项)。
 class LlmModelEntry {
+  /// 库内自增 id;0 表示尚未落库。
   final int id;
+
+  /// 所属 provider 的库内 id。
   final int providerId;
-  final String modelId; // 发送给 API 的模型标识
-  final String displayName; // 展示名
-  final int contextCapacity; // 上下文容量(单位 tokens)
-  final int? maxOutput; // 最大输出 tokens,空表示用后端默认
-  final double? temperature; // 采样温度(0-2),空表示用主写引擎默认(0.7)
-  final bool isActive; // 是否为该 provider 当前选中的模型
+
+  /// 发送给 API 的模型标识(如 `deepseek-chat`)。
+  final String modelId;
+
+  /// 设置页展示名;空时回退 [modelId]。
+  final String displayName;
+
+  /// 上下文容量(tokens),用于压缩阈值与用量占比。
+  final int contextCapacity;
+
+  /// 最大输出 tokens;空表示用后端/协议默认值。
+  final int? maxOutput;
+
+  /// 采样温度(0–2);空表示用主写引擎默认值(0.7)。
+  final double? temperature;
+
+  /// 是否为该 provider 当前选中的模型。
+  final bool isActive;
+
+  /// 模型目录排序位(升序)。
   final int position;
 
   const LlmModelEntry({
@@ -92,16 +111,36 @@ class LlmModelEntry {
 
 /// 一个 LLM provider(带其模型目录)。
 class LlmProviderConfig {
+  /// 库内自增 id;0 表示尚未落库。
   final int id;
-  final String providerId; // 逻辑/路由标识(内置 "openai"/"anthropic",自定义任意,须唯一)
-  final String displayName; // 显示名
-  final String baseUrl; // API 地址(不含路径后缀)
-  final LlmProtocol protocol; // API 协议
+
+  /// 逻辑/路由标识,同一库内唯一(如 `deepseek`、`my-proxy`)。
+  final String providerId;
+
+  /// 设置页显示名。
+  final String displayName;
+
+  /// API 根地址(不含 `/chat/completions` 等路径后缀)。
+  final String baseUrl;
+
+  /// API 协议,决定请求/响应编码与鉴权头。
+  final LlmProtocol protocol;
+
+  /// API Key;明文保存在库与配置文件中,不做加密。
   final String apiKey;
-  final bool isActive; // 是否当前在用 provider
+
+  /// 是否当前在用的 provider;同一时刻至多一行为 true。
+  final bool isActive;
+
+  /// 列表排序位(升序)。
   final int position;
-  final List<LlmModelEntry> models; // 模型目录(有序)
-  final Map<String, String> extraHeaders; // 随请求附加的自定义头(键已归一化小写)
+
+  /// 模型目录(有序);空目录时无法发起请求。
+  final List<LlmModelEntry> models;
+
+  /// 随请求附加的自定义头(键已归一化小写)。
+  /// 用于少数网关要求 Origin/Referer/User-Agent 等放行头的场景。
+  final Map<String, String> extraHeaders;
 
   /// 官方 OpenAI 参数风格(v47):开启后 OpenAI 兼容后端改发
   /// `max_completion_tokens`(o 系列等推理模型只认它,`max_tokens` 直接 400)

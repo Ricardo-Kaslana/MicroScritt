@@ -1,3 +1,4 @@
+// Hook 仓储:触发点过滤、增删改往返与默认 main/jump 种子。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/hook_repository.dart';
 import 'package:microscritt/models/hook.dart';

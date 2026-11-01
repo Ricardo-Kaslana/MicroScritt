@@ -1,3 +1,5 @@
+// 斜杠命令文本解析:完整命令名精确匹配、大小写不敏感、参数仅 trim;
+// 前缀补全在输入空格后停止,已移除的 /draw 不得复活。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/state/slash_commands.dart';
 

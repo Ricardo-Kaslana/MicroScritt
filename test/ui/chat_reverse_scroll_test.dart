@@ -1,3 +1,5 @@
+// reverse 消息列表不变量:进入、发送、图片改高与补页都不得移动视口,
+// 贴底恒为 offset 0。
 import 'dart:convert';
 import 'dart:ui' as ui;
 

@@ -1,8 +1,13 @@
+/// 用户档案(`user_profile` 单行表)的持久化。
+///
+/// 头像列可能极大,加载只投影轻量列,头像按 id 分块读取。
+library;
+
 import 'package:sqflite/sqflite.dart';
 import '../models/user.dart';
 import 'database.dart';
 
-/// 用户档案仓储(单行表,id 恒为 1)。未保存过时 load 返回空档案。
+/// 用户档案仓储(单行表,id 恒为 1)。未保存过时 [load] 返回空档案。
 class UserRepository {
   final AppDatabase db;
   UserRepository(this.db);
@@ -68,6 +73,7 @@ class UserRepository {
     return buffer.toString();
   }
 
+  /// 整行 upsert(id 恒为 1),原样写入头像列。
   Future<void> save(UserProfile p) async {
     await db.db.insert('user_profile', {
       'id': 1,

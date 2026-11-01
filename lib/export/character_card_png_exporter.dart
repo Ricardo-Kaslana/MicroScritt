@@ -1,3 +1,10 @@
+/// 角色卡导出为 ST 生态通用的 PNG 卡:图片本体即头像,卡 JSON 以 base64
+/// 写入 `chara`(V3 卡另写 `ccv3`)文本块。
+///
+/// 卡 JSON 剥掉 avatar 字段(PNG 本身就是头像);无头像或解码失败时生成
+/// 占位图。图片复用/重编码与 PNG 块写入都在本文件完成。
+library;
+
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -15,6 +22,7 @@ import 'character_card_exporter.dart';
 /// 写入的是**去掉 avatar 字段**的导出 JSON —— PNG 自己就是头像,再内嵌一份
 /// base64 只会让文件近乎翻倍;导入方(含本应用)会以这张 PNG 作为头像。
 class CharacterCardPngExporter {
+  /// 导出 PNG 卡;世界书随卡写入 `character_book`,头像不可解码时用占位图。
   static Future<Uint8List> export(
     CharacterCard card, {
     List<WorldbookEntry>? worldbook,
@@ -183,8 +191,8 @@ class CharacterCardPngExporter {
     return builder.takeBytes();
   }
 
-  /// tEXt 块直接写进目标缓冲区。旧实现把 27MB 级 base64 展开成 `List<int>`
-  /// 再多次 spread/复制(每份元素约 8 字节),大卡 PNG 导出会瞬时吃掉数百 MB;
+  /// tEXt 块直接写进目标缓冲区。把 27MB 级 base64 展开成 `List<int>` 再
+  /// 多次 spread/复制(每份元素约 8 字节),大卡 PNG 导出会瞬时吃掉数百 MB;
   /// 现在只有最终块这一份字节,CRC 原地遍历。
   static Uint8List _textChunk(String keyword, String text) {
     final type = ascii.encode('tEXt');

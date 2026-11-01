@@ -1,30 +1,35 @@
-/// 后台agent 在一轮对话后的运行状态。
+/// 后台维护任务在一轮对话后的运行状态(随会话状态展示)。
 ///
-/// 后台agent = 主回复落库后由 Orchestrator 驱动的 BackgroundEngine(状态维护),
-/// 独立记账 token(spec §6)。UI 依据此状态展示运行中/成功/跳过/失败/已禁用。
+/// 后台维护指主回复落库后由 `Orchestrator` 驱动的 `BackgroundEngine`,
+/// 只维护变量与生图;其 token 用量与主写分开记账。UI 依据此状态展示
+/// 运行中/成功/跳过/失败/已禁用。
+library;
+
+/// 后台维护的运行状态。
 enum BackgroundStatus {
   /// 本会话尚未触发过后台维护(还没发过消息 / 刚打开)。
   idle,
 
-  /// 后台agent 正在运行(主回复已出,正在维护 skills/变量/memory/面板/生图)。
+  /// 后台维护正在运行(主回复已出,正在维护变量/生图)。
   running,
 
   /// 本轮后台维护成功完成(有有效结果并应用)。
   succeeded,
 
-  /// 主回复为空(无产出)→ 后台维护被跳过。
+  /// 本轮无需维护(无有效回复、无对话或无新增等良性原因)。
   skipped,
 
   /// 后台调用出错或返回解析失败,按 best-effort 跳过。
   failed,
 
-  /// 后台agent 被用户中断(本轮运行被丢弃)。
+  /// 后台维护被用户中断(本轮运行被丢弃)。
   interrupted,
 
-  /// 后台agent 被用户全局关闭,本轮不运行。
+  /// 后台维护被用户关闭或未选中任何维护功能,本轮不运行。
   disabled,
 }
 
+/// 从持久化名称恢复状态;null/未知名称回落 [BackgroundStatus.idle]。
 BackgroundStatus backgroundStatusFromName(String? name) =>
     BackgroundStatus.values.where((s) => s.name == name).firstOrNull ??
     BackgroundStatus.idle;

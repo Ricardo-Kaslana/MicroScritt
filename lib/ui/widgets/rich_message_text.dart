@@ -1,47 +1,33 @@
+/// 消息正文的显示层富文本管线:宏替换、显示层正则与标记解析。
+///
+/// 所有改写只作用于气泡显示,落库正文与发给 LLM 的内容保持原文;最终输出
+/// `TextSpan` 由 Flutter 原生渲染,不解析 HTML,没有注入面。
+library;
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../../engine/display_regex.dart';
 import '../../engine/glossary.dart';
 
-/// 消息正文富文本渲染管线(第二期):宏替换 → 显示层正则脚本 → 富文本解析。
+/// 剥离正文里 `<system-reminder>…</system-reminder>` 段所用的正则。
 ///
-/// 对应 RP-Hub 的"模板字符串 + 正则 + 浏览器渲染"思路:占位符与文本改写
-/// 都发生在字符串层,最后一步不用 HTML,而是解析成 `TextSpan` 由 Flutter
-/// 原生渲染 —— 无注入面、无 webview 开销。
-///
-/// 支持的**样式标记**(可由正则脚本的替换串输出,也可直接写在角色卡文案里):
-/// - `<i>…</i>` 斜体、`<b>…</b>` 加粗、`<u>…</u>` 下划线、`<s>…</s>` 删除线
-/// - `<c=RRGGBB>…</c>` 指定颜色(`#` 前缀可选)
-/// - `<mark>…</mark>` 高亮底色
-/// 未闭合的标记在段末自动容忍(流式期间常见),不匹配的闭合标记被忽略。
-///
-/// **名词高亮**(第三期):传入 [glossary] 后,命中的世界书词条以点状下划线
-/// 标出;[onTermTap] 非空时词条可点击(交给上层弹释义卡)。
-///
-/// **块级胶囊标记 `<chip>…</chip>`**(BV 批):内容独占一行,渲染为**居中的
-/// 小胶囊**(叙事内时间戳/场景横幅等;由正则脚本把模型输出的 `[2024年·秋]`
-/// 之类文本打标)。可出现任意次、按出现顺序排列;流式中途未闭合的 `<chip>`
-/// 也即时按胶囊渲染(闭合前的尾段视为内容),不存在"先看到裸标记再变胶囊"
-/// 的闪烁。无 chip 时输出仍是单个 `Text.rich`(布局路径零变化)。
-///
-/// 所有替换都仅作用于**显示层**:落库与发给 LLM 的内容保持占位符/原文原样
-/// (与 `{{user}}` 在 schema v17 的既定决策一致)。
-
-/// 剥离正文里的 `<system-reminder>…</system-reminder>` 段(CW 批):
-/// system-reminder 是给模型的旁路注入(附件/通知),**不在气泡中渲染显示**。
-/// 附件行已被消息列表整体过滤,这里是第二道防线 —— 消息正文万一混入该标签
-/// (hook 改写、旧数据导入等),渲染层也不露出内部注入文本。流式期间未闭合的
-/// 尾段同样吞掉。公共助手:超长流式草稿的纯文本降级路径(DT 批)同样必须
-/// 先过这一步,内部注入在任何渲染路径下都不得露出。
+/// system-reminder 是给模型的旁路注入(附件/通知),不能在气泡中渲染。附件行
+/// 已由消息列表整体过滤,这里是第二道防线:正文若混入该标签(hook 改写、
+/// 旧数据导入等)也不露出内部注入文本;流式期间未闭合的尾段一并吞掉。
 final RegExp _systemReminderPattern = RegExp(
   r'<system-reminder>[\s\S]*?(?:</system-reminder>|$)',
 );
 
+/// 剥掉正文里的 system-reminder 段(含流式中未闭合的尾段)。
+///
+/// 任何渲染路径都必须先过这一步 —— 超长流式草稿的纯文本降级路径同样如此,
+/// 内部注入在任何情况下都不得露出。
 String stripSystemReminders(String text) => text.replaceAll(_systemReminderPattern, '');
 
 /// 显示层宏替换:把正文里的 `{{user}}` / `{{char}}` 替换为实际名字。
-/// 名字为空或 null 时保留占位符原样。
+///
+/// 仅改显示,不回写落库内容;名字为空或 null 时保留占位符原样。
 String expandDisplayMacros(String text, {String? userName, String? charName}) {
   var out = text;
   if (userName != null && userName.isNotEmpty && out.contains('{{user}}')) {
@@ -53,8 +39,10 @@ String expandDisplayMacros(String text, {String? userName, String? charName}) {
   return out;
 }
 
-/// 单遍扫描的主正则:样式标记(开/闭)| 三种引号的台词。
-/// 交替分支按序尝试;台词分支不允许跨引号(`“…”` 内无 `”`)。
+/// 单遍扫描的主正则:样式标记(开/闭)与三种引号的台词。
+///
+/// 交替分支按序尝试,台词分支不允许跨引号(`“…”` 内无 `”`)。台词一旦命中
+/// 就整段输出,内部的标记不再解析 —— 引号里的 `<b>` 按原文显示。
 final RegExp _masterPattern = RegExp(
   r'</?(?:i|b|u|s|mark|c)(?:=#?[0-9a-fA-F]{6})?>|“[^”]*”|「[^」]*」|"[^"]*"',
 );
@@ -69,17 +57,21 @@ final RegExp _chipPattern = RegExp(r'<chip>(.*?)</chip>|<chip>(.*?)$', dotAll: t
 /// 拆分结果的一块:普通正文段(走行内富文本)或胶囊段(独占一行居中)。
 sealed class _RichPart {}
 
+/// 普通正文段,内容继续交给 [buildRichSpanTree] 解析行内标记。
 class _RichTextPart extends _RichPart {
   final String text;
   _RichTextPart(this.text);
 }
 
+/// 胶囊段:内容已去掉标记并 trim,渲染为居中胶囊。
 class _RichChipPart extends _RichPart {
   final String label;
   _RichChipPart(this.label);
 }
 
 /// 把(宏替换 + 正则脚本之后的)显示文本按 `<chip>` 标记拆成块序列。
+///
+/// 标签内容为空的胶囊直接丢弃;纯空白正文段由渲染侧跳过。
 List<_RichPart> _splitChips(String text) {
   if (!text.contains('<chip>')) {
     return [_RichTextPart(text)];
@@ -128,6 +120,9 @@ Color _dialogueAccent(Color base, ColorScheme scheme) {
 }
 
 /// 把当前标记栈合成为样式。
+///
+/// 按入栈顺序叠加,后入栈的同类覆盖先入栈;`decoration` 只有一个槽位,
+/// 删除线会顶掉下划线(两者嵌套时以更内层为准)。
 TextStyle _composeStyle(TextStyle base, List<_OpenTag> stack, Color highlightColor) {
   var s = base;
   for (final t in stack) {
@@ -159,10 +154,21 @@ TextStyle _termStyle(TextStyle style) => style.copyWith(
       decorationColor: style.color?.withValues(alpha: 0.55),
     );
 
+/// 支持的样式标记(可由正则脚本的替换串输出,也可直接写在正文里):
+/// `<i>` / `<b>` / `<u>` / `<s>` / `<mark>` 与 `<c=RRGGBB>…</c>`;三种引号
+/// (`“…”` / `「…」` / `"…"`)内的台词按斜体强调渲染(受 [highlightDialogue]
+/// 开关控制)。未闭合的标记在段末自动容忍(流式期间常见),错配的闭合标记
+/// 被忽略。
+///
 /// 解析为富文本 spans:普通文本随当前标记栈取样式;台词段叠斜体与强调色
 /// (`<c>` 栈里有颜色时尊重之);标记本身不产生文本。词典命中段在 emit 时
-/// 二次拆分为可点击词条 span;`@技能名` 记号(skillTokenPattern 非空时)
+/// 二次拆分为可点击词条 span;`@技能名` 记号([skillTokenPattern] 非空时)
 /// 同样在 emit 时二次拆分,命中段染 [skillTokenColor]。
+///
+/// 文本既不含 `<`/引号字符、也没有启用词典或记号高亮时,直接输出纯文本
+/// span,不对长文本做正则扫描。新建的 [TapGestureRecognizer] 追加到
+/// [recognizerSink],所有权归调用方:
+/// 重建或销毁时必须逐个 dispose,否则 recognizer 会随流式重建累积泄漏。
 TextSpan buildRichSpanTree(
   String text,
   TextStyle base,
@@ -290,6 +296,7 @@ TextSpan buildRichSpanTree(
   return TextSpan(style: base, children: spans);
 }
 
+/// 标记栈查找用的小扩展(仅本文件可见),避免为一次查找引入依赖。
 extension<T> on List<T> {
   /// lastWhere 的空安全版:找不到返回 null 而不是抛错。
   T? lastWhereOrNull(bool Function(T) test) {
@@ -300,12 +307,14 @@ extension<T> on List<T> {
   }
 }
 
-/// 消息气泡正文:接收**原始正文**(未做任何替换),内部跑完整显示管线
-/// —— 宏替换 → 正则脚本 → 富文本解析。样式基准由气泡侧传入(用户白字/
-/// 助手黑字各自随底)。可见文本为空时返回零尺寸占位。
+/// 消息气泡正文:接收**原始正文**(未做任何替换),内部跑完整显示管线 ——
+/// 剥 system-reminder → 宏替换 → 显示层正则脚本 → 胶囊拆分 → 富文本解析。
+/// 样式基准由气泡侧传入(用户白字/助手黑字各自随底),可见文本为空时返回
+/// 零尺寸占位;`<chip>` 段独占一行渲染为居中胶囊。
 ///
 /// StatefulWidget:词条的 TapGestureRecognizer 由 State 统一持有,
-/// 重建/销毁时释放(挂在 TextSpan 上的 recognizer 不 dispose 会泄漏)。
+/// 重建/销毁时释放(挂在 TextSpan 上的 recognizer 不 dispose 会泄漏);
+/// 入参不变时直接复用缓存的子树,流式重建不重跑管线。
 class RichMessageText extends StatefulWidget {
   /// 原始正文(含 `{{user}}`/`{{char}}` 占位符与脚本目标文本)。
   final String text;
@@ -313,8 +322,10 @@ class RichMessageText extends StatefulWidget {
   /// 基准样式(颜色/字号/字重随气泡)。
   final TextStyle style;
 
-  /// 宏替换用的用户名/角色名;null 或空时保留占位符。
+  /// 宏替换用的用户名(替换 `{{user}}`);null 或空时保留占位符。
   final String? userName;
+
+  /// 宏替换用的角色名(替换 `{{char}}`);null 或空时保留占位符。
   final String? charName;
 
   /// 显示层正则脚本(已编译;null/空 = 跳过该步)。
@@ -332,6 +343,8 @@ class RichMessageText extends StatefulWidget {
   /// `@技能名` 记号高亮(仅用户气泡传入,与 [skillTokenColor] 成对):正文里
   /// 命中的记号段染 [skillTokenColor]。两者任一为 null 即不启用。
   final RegExp? skillTokenPattern;
+
+  /// 记号高亮色;与 [skillTokenPattern] 成对,单独给出不生效。
   final Color? skillTokenColor;
 
   const RichMessageText({
@@ -378,7 +391,7 @@ class _RichMessageTextState extends State<RichMessageText> {
     super.dispose();
   }
 
-  /// 释放上一批 recognizer:每次 build 都会生成新的词条手势,旧的不释放
+  /// 释放上一轮 recognizer:每次 build 都会生成新的词条手势,旧的不释放
   /// 会随流式重建累积泄漏(先释放再构建,旧 span 在本次 build 后即被替换)。
   void _releaseRecognizers() {
     for (final r in _recognizers) {

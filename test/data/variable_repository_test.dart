@@ -1,3 +1,4 @@
+// 变量仓储:快照 + revision 乐观并发、三档权限、回收站与删除确认。
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -114,6 +115,7 @@ void main() {
       charId = await CharacterRepository(db).insert(const CharacterCard(name: 'A'));
       sessionId = await sessions.create(charId, 's');
       vars = VariableRepository(db);
+      // 包装同一底层连接:revision 按 Database 对象共享,模拟另一个调用方。
       other = VariableRepository(AppDatabase(db.db));
     });
 
@@ -316,6 +318,7 @@ void main() {
     });
 
     test('different database objects do not share session revisions', () async {
+      // 用 noIsolate factory 另开一个独立内存库:revision 不跨 Database 对象共享。
       final separateDb = await AppDatabase.open(
         factory: createDatabaseFactoryFfi(noIsolate: true),
         path: inMemoryDatabasePath,

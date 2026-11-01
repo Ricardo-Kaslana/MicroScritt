@@ -1,3 +1,9 @@
+/// LLM provider 编辑屏:身份、地址、协议、密钥、模型目录与自定义请求头。
+///
+/// 端点兼容选项与「官方 OpenAI 参数风格」只对 OpenAI 兼容协议显示;保存后
+/// 同步文本配置文件,若编辑的是当前 provider 还会重解析运行时配置。
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../backend/backend_config.dart';
@@ -13,11 +19,19 @@ import 'common/info_button.dart';
 import 'common/section_header.dart';
 
 /// 新建/编辑一个 LLM provider(Provider ID / 显示名 / API 地址 / 协议 / 密钥 +
-/// 模型目录)。
+/// 模型目录),从设置页「LLM 后端」的添加或编辑动作进入。
 ///
-/// - [existing] 为空表示新建自定义 provider;否则编辑已有 provider(内置与自定义都可编辑)。
+/// - [existing] 为空表示新建自定义 provider;否则编辑已有 provider
+///   (内置与自定义都可编辑)。
 /// - 保存时把整份 provider(含模型目录)经 [LlmProviderRepository] 持久化。
-///   "当前在用 provider/模型"的选择移到了对话输入框里的模型选择器,不再在这里设置。
+///   当前在用 provider/模型的选择在对话输入框的模型选择器里,不在这里设置。
+/// - 协议切到 Anthropic 时隐藏兼容选项与官方参数风格;这些开关本来也只被
+///   OpenAI 兼容后端消费。
+///
+/// 端点兼容选项是通用请求整形,按端点怪癖声明式开启、默认全关:
+/// `replyViaTool` 让回复经工具参数输出(正文流会被截断的端点),`noncePrefix`
+/// 在 system 头部加随机前缀使每轮请求字节不同;普通端点请保持全关 ——
+/// `replyViaTool` 会让部分端点因未知 `tools` 字段回 400。
 class ProviderEditScreen extends ConsumerStatefulWidget {
   final LlmProviderConfig? existing;
   const ProviderEditScreen({super.key, this.existing});
@@ -35,7 +49,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
   late List<LlmModelEntry> _models;
   late final List<_HeaderRow> _headerRows;
 
-  /// 官方 OpenAI 参数风格(v47):max_completion_tokens + stream_options 用量。
+  /// 官方 OpenAI 参数风格:max_completion_tokens + stream_options 用量。
   late bool _modernParams;
 
   /// 端点兼容选项:replyViaTool / noncePrefix 两个开关。
@@ -45,9 +59,6 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
   bool _probing = false;
   LlmProbeReport? _probeReport;
   String? _probeError;
-
-  /// 最近一次上游失败快照(2026-09-28 诊断批):进入页面与每次探测后刷新,
-  /// 供复制被拒请求体/响应体定位上游拦截原因。
 
   bool get _isNew => widget.existing == null;
 
@@ -84,6 +95,9 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
     super.dispose();
   }
 
+  /// 保存 provider:必填 Provider ID/显示名/API 地址与至少一个模型;是否在用
+  /// 沿用原状态(由聊天页模型选择器决定)。写库后刷新列表、回写文本配置并
+  /// 关闭页面。
   Future<void> _save() async {
     final providerId = _providerId.text.trim();
     final displayName = _displayName.text.trim();
@@ -191,7 +205,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
   }
 
   /// 「官方 OpenAI 参数风格」的详细说明弹层(表单行只留一行短文案,细节
-  /// 经「查看说明」进入这里)。
+  /// 经标题旁的信息按钮进入这里)。
   void _showModernParamsHelp(BuildContext context) {
     showDialog<void>(
       context: context,

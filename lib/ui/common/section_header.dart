@@ -1,9 +1,15 @@
+/// iOS 分组表单的区段标题与两种卡片容器([GroupCard]/[SurfaceCard])。
+///
+/// 层级靠灰底与卡片白面的明度差加 hairline 描边表达,不用阴影,保证亮暗
+/// 主题下观感一致。
+library;
+
 import 'package:flutter/material.dart';
 
-/// iOS 风格的分组标题:小号、半灰、全大写,作为区段锚点。
+/// iOS 风格的分组标题:小号、半灰,作为区段锚点。
 ///
-/// 与 Settings/Status 等屏的 `_SectionTitle` 语义一致,但样式更贴近 iOS 分组
-/// 表格 —— 不再加粗,减小字号、提高字距,搭灰色小图标提示区段内容。
+/// 样式统一走全局 `titleSmall`(13 / w600 / `onSurfaceVariant`),可选前缀
+/// 图标用主色;各页不要再自绘区段标题,避免字号与颜色漂移。
 class SectionHeader extends StatelessWidget {
   final String text;
   final IconData? icon;
@@ -30,10 +36,10 @@ class SectionHeader extends StatelessWidget {
 }
 
 /// iOS inset-grouped 风格的分组卡片:一段连续的分组,内部用 hairline 分隔条目,
-/// 整体一张白卡、圆角,贴紧左右留白。
+/// 整体一张白卡、14 圆角,宽度随父级。
 ///
-/// 传入子组件应为同一竖向分组内的 `ListTile`(或自定义行)。卡片自带左右边距与
-/// 8 圆角 —— 与系统「设置」的分组一致。
+/// 传入子组件应为同一竖向分组内的 `ListTile`(或自定义行);卡片只带纵向
+/// 外边距,左右留白由页面提供。
 class GroupCard extends StatelessWidget {
   final List<Widget> children;
   final EdgeInsetsGeometry margin;
@@ -80,7 +86,7 @@ class GroupCard extends StatelessWidget {
   }
 }
 
-/// 一张无需外部边距的圆角卡片(继承全局 CardThemeData 的圆角/无阴影)。
+/// 无外部边距的圆角卡片:16 圆角 + hairline 描边 + 内边距。
 /// 常用于在灰底上承载独立成块的内容(如 token 用量卡)。
 class SurfaceCard extends StatelessWidget {
   final Widget child;

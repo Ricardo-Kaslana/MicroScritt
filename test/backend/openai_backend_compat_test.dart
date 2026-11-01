@@ -1,3 +1,5 @@
+// 端点兼容选项(noncePrefix)与错误分类的后端测试。
+// replyViaTool 的工具通道行为见 openai_backend_reply_channel_test.dart。
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -9,8 +11,6 @@ import 'package:microscritt/backend/upstream_error.dart';
 import 'package:microscritt/models/chat_message.dart';
 import 'package:microscritt/models/endpoint_compat.dart';
 
-/// 端点兼容选项(noncePrefix)与错误分类的后端测试。
-/// replyViaTool 的工具通道行为见 openai_backend_reply_channel_test.dart。
 void main() {
   const plainConfig = BackendConfig(provider: BackendProvider.openai, baseUrl: 'https://x', apiKey: 'k', model: 'm');
   const request = LlmRequest(

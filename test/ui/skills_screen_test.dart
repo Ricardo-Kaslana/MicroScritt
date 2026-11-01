@@ -1,3 +1,5 @@
+// 技能管理页与世界书导入:空态、列表启停、删除/新建,以及导入选择器
+// 的勾选/全选与条目查看弹层。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,6 +15,8 @@ import 'package:microscritt/ui/skills_screen.dart';
 import '../support/test_database.dart';
 
 void main() {
+  // 页面数据来自真实 sqflite:建库/查询都在 runAsync 窗口推进,开页后留
+  // 100ms 给 provider 首轮查询落定再 pump,避免没渲染出数据就断言。
   late AppDatabase db;
 
   Widget harness() => ProviderScope(
@@ -125,6 +129,7 @@ void main() {
     await tester.runAsync(() async {
       await tester.tap(find.widgetWithText(TextButton, '保存'));
       final container = ProviderScope.containerOf(tester.element(find.byType(SkillsScreen, skipOffstage: false)));
+      // 保存走真实写库 + provider 失效,完成时机不稳定,按条件轮询。
       for (var i = 0; i < 80; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
         await tester.pump();
@@ -272,7 +277,7 @@ void main() {
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 250)));
     await tester.pump();
 
-    // 点条目行 → 底部弹层显示完整内容(条目列表本身不再截断展示内容)。
+    // 点条目行 → 底部弹层显示完整内容(列表行只显示名称)。
     await tester.tap(find.text('王都'));
     await tester.pumpAndSettle();
 
