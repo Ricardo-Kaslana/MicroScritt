@@ -1,0 +1,49 @@
+# 行尾与二进制属性。
+#
+# 文本文件在仓库内统一以 LF 存储,并在所有平台检出为 LF;仅 Windows 原生
+# 工具链需要的文件声明 CRLF。二进制资产禁止行尾转换与文本 diff。
+* text=auto eol=lf
+
+# Windows 脚本与工程文件:保留 CRLF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.rc text eol=crlf
+*.sln text eol=crlf
+*.vcxproj text eol=crlf
+*.vcxproj.filters text eol=crlf
+*.vcxproj.user text eol=crlf
+
+# POSIX 脚本:强制 LF。
+*.sh text eol=lf
+gradlew text eol=lf
+
+# 二进制资产:不做文本转换与 diff。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.7z binary
+*.jar binary
+*.apk binary
+*.aab binary
+*.ipa binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.keystore binary
+*.jks binary

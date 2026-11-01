@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+### 变更
+
+- 新增 `.gitattributes`:文本文件统一以 LF 存储与检出,Windows 原生 rc/脚本/
+  工程文件保留 CRLF,图片等二进制资产显式标记,消除跨平台行尾漂移。
+
 ### 文档
 
 - 完成全仓库注释规范化:在 `CONTRIBUTING.md` 新增文件头、公共 API、实现注释、

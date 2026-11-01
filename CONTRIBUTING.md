@@ -25,6 +25,10 @@ flutter test
 `PUB_HOSTED_URL=https://pub.dev flutter pub get` 重新生成 `pubspec.lock`,再提交;
 锁文件中的依赖地址必须指向 pub.dev,CI 会做检查。
 
+行尾由 `.gitattributes` 统一:文本文件一律 LF,仅 Windows 原生 rc/脚本/工程
+文件使用 CRLF;新增二进制资产请在同一文件声明类型,不要依赖本机
+`core.autocrlf`。
+
 ## 分支与提交
 
 - 主分支 `main` 保持可用;功能开发请切出分支(如 `feat/worldbook-search`)。
