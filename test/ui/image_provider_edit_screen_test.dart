@@ -132,6 +132,24 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('切换插件后仍为默认名的配置跟随新插件名', (tester) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await openEditor(tester, plugins: const [chatPlugin, openaiPlugin]);
+    expect(fieldText(tester, '配置名称'), chatPlugin.name);
+
+    await tester.tap(
+      find.byKey(const ValueKey('image_plugin_microscritt.chat-completions')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(openaiPlugin.name).last);
+    await tester.pumpAndSettle();
+
+    expect(fieldText(tester, '配置名称'), openaiPlugin.name);
+    await tester.runAsync(() => db.db.close());
+  });
+
   testWidgets('保存:kind=plugin、pluginId 与核心字段落库,首条自动活跃', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();

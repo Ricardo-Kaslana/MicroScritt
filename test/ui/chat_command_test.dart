@@ -17,7 +17,7 @@ import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/chat_screen.dart';
 import 'package:microscritt/ui/model_selector_bar.dart';
 import 'package:microscritt/ui/widgets/message_list.dart';
-import 'package:microscritt/backend/backend_config.dart';
+import 'package:microscritt/models/backend_config.dart';
 import 'dart:async';
 import '../support/test_database.dart';
 

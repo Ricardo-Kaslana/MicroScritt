@@ -2,10 +2,10 @@
 /// 维护入口。
 ///
 /// 变量只供后台请求使用,不进主写上下文,所以这里的变量写操作只失效变量
-/// 相关 provider,绝不调用 `refreshContext()`;记忆以冻结副本占据上下文
-/// 第 0 条,手工编辑后需点「应用到上下文」才整体换新。变量删除一律先进
-/// 回收站;严格模式(`background_deletion_confirm`)下后台的删除提议只写
-/// 待确认建议,由本页确认后才移入回收站。
+/// 相关 provider;记忆以冻结副本占据上下文第 0 条,手工编辑/清空后只更新
+/// 库与列表,需点「应用到上下文」才整体换新(因此也不重算上下文快照)。
+/// 变量删除一律先进回收站;严格模式(`background_deletion_confirm`)下后台
+/// 的删除提议只写待确认建议,由本页确认后才移入回收站。
 library;
 
 import 'package:flutter/material.dart';
@@ -40,9 +40,10 @@ class StatusScreen extends ConsumerWidget {
   final int sessionId;
   const StatusScreen({super.key, required this.sessionId});
 
-  /// 清空会话记忆:确认后删库并失效列表缓存,再重算一次上下文快照。
-  /// 第 0 条记忆取自冻结副本,清库不会立刻改变上下文 —— 差异由「待应用」
-  /// 入口暴露,用户应用后才整体换新。
+  /// 清空会话记忆:确认后删库并失效列表缓存。
+  ///
+  /// 不重算上下文:第 0 条记忆取自冻结副本,清库不会立刻改变提示前缀 ——
+  /// 差异由「待应用」入口暴露,用户点应用后才整体换新。
   Future<void> _clearMemory(BuildContext context, WidgetRef ref) async {
     final confirmed = await showConfirmDialog(
       context,
@@ -53,9 +54,6 @@ class StatusScreen extends ConsumerWidget {
     if (!confirmed) return;
     await ref.read(memoryRepositoryProvider).clear(sessionId);
     ref.invalidate(memoriesProvider(sessionId));
-    // 快照重算仍以冻结副本作第 0 条,清库不会立刻改变上下文;是否整体换新
-    // 交给「待应用」入口,避免静默改写提示前缀。
-    await ref.read(chatControllerProvider.notifier).refreshContext();
   }
 
   /// 手动填写记忆:不调用 LLM,空表时也能从零创建(与 AI 初始化解耦)。
@@ -72,7 +70,6 @@ class StatusScreen extends ConsumerWidget {
     if (saved == null) return;
     await ref.read(memoryRepositoryProvider).set(sessionId, saved);
     ref.invalidate(memoriesProvider(sessionId));
-    await ref.read(chatControllerProvider.notifier).refreshContext();
   }
 
   /// 编辑记忆:底部编辑区改写后落库。记忆以冻结副本进上下文 —— 落库后下一次
@@ -94,7 +91,6 @@ class StatusScreen extends ConsumerWidget {
     if (saved == null || saved == m.content) return;
     await ref.read(memoryRepositoryProvider).update(m.id!, saved);
     ref.invalidate(memoriesProvider(sessionId));
-    await ref.read(chatControllerProvider.notifier).refreshContext();
   }
 
   /// 「应用到上下文」入口:记忆有未应用修改时整行上底色并挂「待应用」徽标,

@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:microscritt/backend/backend_config.dart';
+import 'package:microscritt/models/backend_config.dart';
 import 'package:microscritt/backend/llm_probe.dart';
 
 void main() {

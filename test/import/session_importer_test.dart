@@ -317,6 +317,48 @@ void main() {
     expect(await VariableRepository(db).bySession(result.sessionId), isEmpty);
   });
 
+  test('importText rolls back the new session and character on a mid-write failure', () async {
+    // 独立文件库:内存库在 ffi 下会被同文件其他用例共享,无法断言整表为空。
+    final dir = Directory.systemTemp.createTempSync('session_import_rollback');
+    final db = await AppDatabase.open(
+      factory: databaseFactoryFfi,
+      path: p.join(dir.path, 'rollback.db'),
+    );
+    addTearDown(() async {
+      await db.db.close();
+      dir.deleteSync(recursive: true);
+    });
+    // 触发点放在最后一步(技能导入):此前会话、消息、变量、记忆都已写入,
+    // 用触发器确认失败后它们连同新建角色被一起清掉。
+    await db.db.execute(
+      'CREATE TRIGGER fail_skill_import BEFORE INSERT ON skills '
+      "BEGIN SELECT RAISE(ABORT, 'skill import failed'); END;",
+    );
+    final archive = jsonEncode({
+      'version': 4,
+      'session': {'title': '回滚会话'},
+      'character': {'name': 'Rollback'},
+      'messages': [
+        {'role': 'user', 'content': 'hi'},
+      ],
+      'variables': {'hp': '10'},
+      'memory': '会回滚的记忆',
+      'skills': [
+        {'name': 'rollback-skill', 'content': 'x'},
+      ],
+    });
+
+    await expectLater(
+      SessionImporter.importText(db, archive),
+      throwsA(anything),
+    );
+
+    expect(await CharacterRepository(db).all(), isEmpty);
+    for (final table in ['sessions', 'messages', 'variables', 'memories', 'skills']) {
+      expect(await db.db.query(table), isEmpty, reason: '$table 应随回滚清空');
+    }
+  });
+
   test('rejects files that are not session archives', () async {
     final db = await openTestDb();
     expect(() => SessionImporter.importText(db, 'not json'), throwsFormatException);

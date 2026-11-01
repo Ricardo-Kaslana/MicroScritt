@@ -143,6 +143,84 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('exactly 200 results are not reported as truncated', (tester) async {
+    late AppDatabase db;
+    late int sessionId;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      final charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's');
+      final messages = MessageRepository(db);
+      for (var i = 0; i < 201; i++) {
+        await messages.append(
+          sessionId: sessionId,
+          role: i.isEven ? 'user' : 'assistant',
+          content: '边界词 目标 $i',
+        );
+      }
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => ChatSearchScreen(
+                        sessionId: sessionId,
+                        characterName: 'Alice',
+                      ),
+                    ),
+                  ),
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    // 201 条命中断言会显示 200 条 + 截断提示。
+    await tester.enterText(find.byType(TextField), '边界词');
+    await tester.pump(const Duration(milliseconds: 300));
+    await _pumpUntil(
+      tester,
+      () => find.text('仅显示最新 200 条').evaluate().isNotEmpty,
+    );
+    expect(find.text('200 条结果'), findsOneWidget);
+    expect(find.text('仅显示最新 200 条'), findsOneWidget);
+
+    // 删掉一条后恰好 200 条:是完整结果,不得再显示截断提示。
+    await tester.runAsync(() async {
+      await db.db.delete(
+        'messages',
+        where: 'content = ?',
+        whereArgs: ['边界词 目标 0'],
+      );
+    });
+    await tester.enterText(find.byType(TextField), '目标');
+    await tester.pump(const Duration(milliseconds: 300));
+    await _pumpUntil(
+      tester,
+      () =>
+          find.text('200 条结果').evaluate().isNotEmpty &&
+          find.text('仅显示最新 200 条').evaluate().isEmpty,
+    );
+    expect(find.text('仅显示最新 200 条'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() => db.db.close());
+  });
+
   testWidgets('search shows an empty state before and after no matches', (
     tester,
   ) async {

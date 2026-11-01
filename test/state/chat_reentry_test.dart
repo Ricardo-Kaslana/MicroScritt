@@ -2,7 +2,7 @@
 // lastSentInputTokens 只在历史被整体重写时失效,网关静默时沿用上次真实锚点。
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:microscritt/backend/backend_config.dart';
+import 'package:microscritt/models/backend_config.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';

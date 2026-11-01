@@ -158,16 +158,16 @@ class _ImageProviderEditScreenState
   }
 
   void _onPluginChanged(String? id) {
+    final plugins = ref.read(imagePluginsProvider);
+    // 必须在改 `_pluginId` 之前取旧名:否则拿到的是新插件的名字,用户
+    // 未自定义的默认名永远不会跟随切换。
+    final previousName = _pluginById(plugins, _pluginId)?.name;
+    final plugin = _pluginById(plugins, id);
     setState(() {
       _pluginId = id;
       _fetchedImageModels = const [];
-      final plugin = _pluginById(ref.read(imagePluginsProvider), id);
       _initializePluginFields(plugin);
       // 名字仍是插件默认名(用户没自定义过)则跟随更新。
-      final previousName = _pluginById(
-        ref.read(imagePluginsProvider),
-        _pluginId,
-      )?.name;
       if (plugin != null &&
           (_displayName.text.trim().isEmpty ||
               _displayName.text.trim() == previousName ||

@@ -4,7 +4,7 @@
 /// 模型行按 id upsert,保住被 `app_settings.background_model_id` 引用的 id。
 library;
 
-import '../backend/backend_config.dart';
+import '../models/backend_config.dart';
 import '../models/endpoint_compat.dart';
 import '../models/llm_provider.dart';
 import 'database.dart';

@@ -6,7 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../backend/backend_config.dart';
+import '../models/backend_config.dart';
 import '../backend/llm_probe.dart';
 import '../data/llm_provider_repository.dart';
 import '../models/endpoint_compat.dart';

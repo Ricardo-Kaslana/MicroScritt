@@ -9,7 +9,7 @@ import 'dart:async';
 import 'package:http/http.dart' as http;
 import '../models/chat_message.dart';
 import 'anthropic_backend.dart';
-import 'backend_config.dart';
+import '../models/backend_config.dart';
 import 'llm_backend.dart';
 import 'openai_backend.dart';
 import 'upstream_error.dart';

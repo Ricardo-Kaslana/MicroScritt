@@ -9,7 +9,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/app_settings.dart';
 import '../models/token_usage.dart';
-import 'backend_config.dart';
+import '../models/backend_config.dart';
 import 'llm_backend.dart';
 import 'sse_parser.dart';
 import 'stream_timeout.dart';

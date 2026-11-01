@@ -111,6 +111,28 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 
+  testWidgets('empty imageBase64 falls back to imageUrl', (tester) async {
+    // 历史导入/轻量查询可能留下空串 base64;它不能挡住 URL 回退。
+    const msg = Message(
+      sessionId: 1,
+      role: 'assistant',
+      content: '',
+      seq: 0,
+      imageBase64: '',
+      imageUrl: 'https://img.example.com/api/images/img_x/content',
+    );
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: MessageBubble(message: msg)),
+      ),
+    );
+    await _pumpUntil(
+      tester,
+      () => find.byIcon(Icons.broken_image_outlined).evaluate().isNotEmpty,
+    );
+    expect(find.byIcon(Icons.broken_image_outlined), findsOneWidget);
+  });
+
   testWidgets('URL bubble renders from the disk cache without hitting the network', (tester) async {
     // 回归防护「气泡与其全屏查看器状态不一致」:URL-only 消息磁盘缓存命中时必须
     // 从本地字节解码出帧 —— 测试环境网络一律 400,若误走 NetworkImage 则无帧可显。

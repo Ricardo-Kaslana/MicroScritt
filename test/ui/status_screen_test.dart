@@ -125,6 +125,16 @@ void main() {
     await tester.pump();
     expect(find.textContaining('会被清掉的记忆'), findsOneWidget);
 
+    // 模拟控制器已装载本会话:上下文冻结着清理前的记忆。
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(StatusScreen)),
+    );
+    container.read(chatControllerProvider.notifier).state = ChatState(
+      sessionId: sessionId,
+      frozenMemory: '会被清掉的记忆',
+    );
+    await tester.pump();
+
     // 清空入口收进了标题行菜单:先开菜单再点「清空」。
     await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
@@ -134,9 +144,6 @@ void main() {
 
     await tester.runAsync(() async {
       await tester.tap(find.text('清空').last);
-      final container = ProviderScope.containerOf(
-        tester.element(find.byType(StatusScreen)),
-      );
       for (var i = 0; i < 80; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
         await tester.pump();
@@ -148,6 +155,12 @@ void main() {
 
     expect(find.textContaining('会被清掉的记忆'), findsNothing);
     expect(find.textContaining('尚无记忆'), findsOneWidget);
+    // 清库不重算冻结副本:上下文仍保留旧版本,由「应用到上下文」显式换新。
+    expect(find.text('记忆已清空,上下文仍保留旧版本'), findsOneWidget);
+    expect(
+      container.read(chatControllerProvider).frozenMemory,
+      '会被清掉的记忆',
+    );
     await tester.runAsync(() => db.db.close());
   });
 

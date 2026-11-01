@@ -1,7 +1,7 @@
 /// 会话归档导入:整串入口(小文件)与两遍流式文件入口(大会话)。
 ///
-/// 归档结构兼容 version 1–4;截断/坏文件在写库前报错,文件入口失败或
-/// 取消时回滚本次新建的会话与角色。
+/// 归档结构兼容 version 1–4;截断/坏文件在写库前报错;整串与文件入口在
+/// 写库失败时都会回滚本次新建的会话与角色(文件入口同时支持取消)。
 library;
 
 import 'dart:convert';
@@ -53,8 +53,8 @@ class SessionImporter {
 
   /// 整串入口(测试/小文件):整体 `jsonDecode` 后按序写库。
   ///
-  /// 结构或角色卡校验失败在任何写库前抛 [FormatException];写库中途失败
-  /// **不自动回滚**(文件与大会话请走 [importFile],它按会话回滚)。
+  /// 结构或角色卡校验失败在任何写库前抛 [FormatException];写库中途失败会
+  /// 删除本次新建的会话与角色,与 [importFile] 保持同一回滚语义。
   ///
   /// [avatarShrinker] 可选:把内嵌头像 base64 缩到安全尺寸(Android
   /// CursorWindow ~2MB,大图不缩会 Row too big);UI 层传入
@@ -108,69 +108,76 @@ class SessionImporter {
     final title = sessionJson is Map<String, dynamic> && (sessionJson['title'] as String? ?? '').trim().isNotEmpty
         ? sessionJson['title'] as String
         : '${card.name} · 导入';
-    final sessionId = await SessionRepository(db).create(characterId, title);
+    int? sessionId;
+    try {
+      sessionId = await SessionRepository(db).create(characterId, title);
 
-    // 消息:按文件顺序重排连续 seq。v4 起 compactOf 是"消息数组内索引",
-    // 由 importMessages 换算回新库行 id;v1–v3 归档里是**原库行 id**,
-    // 换设备后无从对应(旧实现的 seq 偏移换算在 id≠seq 的库上指向错误行),
-    // 一律丢弃 —— 引擎只消费 isCompacted,丢指向无行为影响。
-    final archiveVersion = decoded['version'] is int ? decoded['version'] as int : 0;
-    final messages = <Message>[];
-    for (final m in rawMessages) {
-      if (m is Map<String, dynamic>) {
-        messages.add(Message.fromMap(_normalizedMessage(m, compactAsIndex: archiveVersion >= 4)));
-      }
-    }
-    await MessageRepository(db).importMessages(sessionId: sessionId, messages: messages);
-
-    // 会话级状态与 token 用量(v1 无这些节,按空处理)。
-    final variables = decoded['variables'];
-    final variableAccess = decoded['variableAccess'];
-    await _restoreVariables(
-      db,
-      sessionId,
-      variables is Map<String, dynamic> ? variables : null,
-      variableAccess is Map<String, dynamic> ? variableAccess : null,
-    );
-    final memory = decoded['memory'];
-    if (memory is String && memory.trim().isNotEmpty) {
-      await MemoryRepository(db).set(sessionId, memory);
-    }
-    // v2 归档的会话级技能:迁入全局技能目录(按 name 幂等,停用状态导入)。
-    // v3 归档不再携带该节。
-    final skills = decoded['skills'];
-    if (skills is List) {
-      for (final s in skills) {
-        if (s is Map<String, dynamic> && (s['name'] as String? ?? '').trim().isNotEmpty) {
-          await SkillRepository(db).importAll([
-            Skill(
-              name: (s['name'] as String).trim(),
-              description: (s['description'] ?? '').toString(),
-              content: (s['content'] ?? '').toString(),
-            ),
-          ], enabled: false);
+      // 消息:按文件顺序重排连续 seq。v4 起 compactOf 是"消息数组内索引",
+      // 由 importMessages 换算回新库行 id;v1–v3 归档里是**原库行 id**,
+      // 换设备后无从对应(旧实现的 seq 偏移换算在 id≠seq 的库上指向错误行),
+      // 一律丢弃 —— 引擎只消费 isCompacted,丢指向无行为影响。
+      final archiveVersion = decoded['version'] is int ? decoded['version'] as int : 0;
+      final messages = <Message>[];
+      for (final m in rawMessages) {
+        if (m is Map<String, dynamic>) {
+          messages.add(Message.fromMap(_normalizedMessage(m, compactAsIndex: archiveVersion >= 4)));
         }
       }
-    }
-    if (sessionJson is Map<String, dynamic>) {
-      final usage = sessionJson['usage'];
-      if (usage is Map<String, dynamic>) {
-        await SessionRepository(db).updateTokenUsage(
-          sessionId: sessionId,
-          inputTokens: _int(usage, 'inputTokens'),
-          outputTokens: _int(usage, 'outputTokens'),
-          cachedInputTokens: _int(usage, 'cachedInputTokens'),
-          backgroundInputTokens: _int(usage, 'backgroundInputTokens'),
-          backgroundOutputTokens: _int(usage, 'backgroundOutputTokens'),
-          backgroundCachedInputTokens: _int(usage, 'backgroundCachedInputTokens'),
-          compactInputTokens: _int(usage, 'compactInputTokens'),
-          compactOutputTokens: _int(usage, 'compactOutputTokens'),
-          compactCachedInputTokens: _int(usage, 'compactCachedInputTokens'),
-        );
-      }
-    }
+      await MessageRepository(db).importMessages(sessionId: sessionId, messages: messages);
 
-    return SessionImportResult(sessionId, characterId, reused);
+      // 会话级状态与 token 用量(v1 无这些节,按空处理)。
+      final variables = decoded['variables'];
+      final variableAccess = decoded['variableAccess'];
+      await _restoreVariables(
+        db,
+        sessionId,
+        variables is Map<String, dynamic> ? variables : null,
+        variableAccess is Map<String, dynamic> ? variableAccess : null,
+      );
+      final memory = decoded['memory'];
+      if (memory is String && memory.trim().isNotEmpty) {
+        await MemoryRepository(db).set(sessionId, memory);
+      }
+      // v2 归档的会话级技能:迁入全局技能目录(按 name 幂等,停用状态导入)。
+      // v3 归档不再携带该节。
+      final skills = decoded['skills'];
+      if (skills is List) {
+        for (final s in skills) {
+          if (s is Map<String, dynamic> && (s['name'] as String? ?? '').trim().isNotEmpty) {
+            await SkillRepository(db).importAll([
+              Skill(
+                name: (s['name'] as String).trim(),
+                description: (s['description'] ?? '').toString(),
+                content: (s['content'] ?? '').toString(),
+              ),
+            ], enabled: false);
+          }
+        }
+      }
+      if (sessionJson is Map<String, dynamic>) {
+        final usage = sessionJson['usage'];
+        if (usage is Map<String, dynamic>) {
+          await SessionRepository(db).updateTokenUsage(
+            sessionId: sessionId,
+            inputTokens: _int(usage, 'inputTokens'),
+            outputTokens: _int(usage, 'outputTokens'),
+            cachedInputTokens: _int(usage, 'cachedInputTokens'),
+            backgroundInputTokens: _int(usage, 'backgroundInputTokens'),
+            backgroundOutputTokens: _int(usage, 'backgroundOutputTokens'),
+            backgroundCachedInputTokens: _int(usage, 'backgroundCachedInputTokens'),
+            compactInputTokens: _int(usage, 'compactInputTokens'),
+            compactOutputTokens: _int(usage, 'compactOutputTokens'),
+            compactCachedInputTokens: _int(usage, 'compactCachedInputTokens'),
+          );
+        }
+      }
+
+      return SessionImportResult(sessionId, characterId, reused);
+    } catch (e) {
+      if (sessionId != null) await SessionRepository(db).deleteWithCascade(sessionId);
+      if (!reused) await CharacterRepository(db).deleteWithCascade(characterId);
+      rethrow;
+    }
   }
 
   /// 文件入口(内存受限):两遍流式扫描 —— 第一遍校验结构并读头部字段,

@@ -345,7 +345,8 @@ class MessageBubble extends StatelessWidget {
             children: [
               // base64 优先:本地持久化的图(生成时已下载落库)绝不走网络,
               // 对话中/重启后都不会重新加载;URL 仅作为无本地字节时的回退。
-              if (message.imageBase64 != null)
+              // 空串是历史导入/轻量查询的残留,不能当成"有本地图"。
+              if (message.imageBase64?.isNotEmpty == true)
                 ClipRRect(
                   borderRadius: BorderRadius.circular(10),
                   child: _withImageProgress(
@@ -372,7 +373,7 @@ class MessageBubble extends StatelessWidget {
                     ),
                   ),
                 )
-              else if (imageUrl != null)
+              else if (imageUrl != null && imageUrl.isNotEmpty)
                 ClipRRect(
                   borderRadius: BorderRadius.circular(10),
                   child: _withImageProgress(

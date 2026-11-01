@@ -3,7 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:microscritt/backend/backend_config.dart';
+import 'package:microscritt/models/backend_config.dart';
 import 'package:microscritt/data/app_settings_repository.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/llm_provider_repository.dart';
@@ -13,11 +13,28 @@ import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/model_selector_bar.dart';
 import '../support/test_database.dart';
 
+/// 设置写库恒失败,用于验证推理档位的"先落库、后改内存"顺序。
+class _FailingSettingsRepository extends AppSettingsRepository {
+  _FailingSettingsRepository(super.db);
+
+  @override
+  Future<void> save(AppSettings settings) async {
+    throw StateError('settings write failed');
+  }
+}
+
 void main() {
   late AppDatabase db;
 
-  Widget harness() => ProviderScope(
-    overrides: [databaseProvider.overrideWithValue(db)],
+  Widget harness({AppSettingsRepository? settingsRepository}) => ProviderScope(
+    // 每个用例强制新建容器:同类型根 widget 会被复用,Riverpod 状态与
+    // override 会跨用例泄漏。
+    key: UniqueKey(),
+    overrides: [
+      databaseProvider.overrideWithValue(db),
+      if (settingsRepository != null)
+        appSettingsRepositoryProvider.overrideWithValue(settingsRepository),
+    ],
     child: const MaterialApp(
       home: Scaffold(body: ModelSelectorBar(usage: ContextLink(estimateTokens: 20000))),
     ),
@@ -125,8 +142,46 @@ void main() {
       }
     });
     expect(persisted, ReasoningLevel.high);
+    // 落库成功后才更新 provider/重建 chip,补一帧让提示上树。
+    await tester.pumpAndSettle();
     // 芯片旁出现"推理 高"的提示。
     expect(find.text('推理 高'), findsOneWidget);
+
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('reasoning save failure keeps the old value and reports', (tester) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      await seedProvider();
+    });
+    await tester.pumpWidget(
+      harness(settingsRepository: _FailingSettingsRepository(db)),
+    );
+    await settle(tester);
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ModelSelectorBar)),
+    );
+    await tester.tap(find.byKey(const ValueKey('model_selector')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('高'));
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 20));
+      if (find.text('保存推理等级失败,请重试').evaluate().isNotEmpty) break;
+    }
+
+    // 写库失败:内存里的设置不切换,并给出可见提示。
+    expect(
+      container.read(appSettingsProvider).reasoningLevel,
+      ReasoningLevel.off,
+    );
+    expect(find.text('保存推理等级失败,请重试'), findsOneWidget);
+    late ReasoningLevel persisted;
+    await tester.runAsync(() async {
+      persisted = (await AppSettingsRepository(db).load()).reasoningLevel;
+    });
+    expect(persisted, ReasoningLevel.off);
 
     await tester.runAsync(() => db.db.close());
   });

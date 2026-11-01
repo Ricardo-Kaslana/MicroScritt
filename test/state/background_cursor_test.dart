@@ -2,7 +2,7 @@
 // 陈旧游标不得让下一轮后台以「无新对话可维护」跳过。
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:microscritt/backend/backend_config.dart';
+import 'package:microscritt/models/backend_config.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';

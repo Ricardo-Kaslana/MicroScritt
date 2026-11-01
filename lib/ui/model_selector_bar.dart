@@ -294,22 +294,28 @@ class _ModelPickerSheetState extends ConsumerState<ModelPickerSheet> {
     _reasoning = widget.reasoning;
   }
 
-  /// 切换推理等级:同步 `appSettingsProvider` 与库(该设置不进文本配置文件,
-  /// 文件只承载用户名与 provider 目录);完成后刷新选中态。
+  /// 切换推理等级:先落库,成功后才更新 provider 与弹层选中态(该设置不进
+  /// 文本配置文件,文件只承载用户名与 provider 目录)。
   ///
-  /// 持久化异常不在此吞掉;setState 只在完成后且仍挂载时执行 —— 弹层已关闭
-  /// 时不再触碰状态。
+  /// 写库失败时保留原值并提示,不留下"界面已切换、重启后又变回去"的假成功。
   Future<void> _saveReasoning(ReasoningLevel level) async {
-    _reasoning = level;
     final settings = ref.read(appSettingsProvider);
-    await persistReasoningLevel(
-      level: level,
-      appSettingsSetter: (s) =>
-          ref.read(appSettingsProvider.notifier).state = s,
-      repo: ref.read(appSettingsRepositoryProvider),
-      current: settings,
-    );
-    if (mounted) setState(() {});
+    try {
+      await persistReasoningLevel(
+        level: level,
+        appSettingsSetter: (s) =>
+            ref.read(appSettingsProvider.notifier).state = s,
+        repo: ref.read(appSettingsRepositoryProvider),
+        current: settings,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('保存推理等级失败,请重试')),
+      );
+      return;
+    }
+    if (mounted) setState(() => _reasoning = level);
   }
 
   @override

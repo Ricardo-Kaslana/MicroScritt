@@ -7,7 +7,7 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
-import '../backend/backend_config.dart';
+import '../models/backend_config.dart';
 import '../backend/backend_factory.dart';
 import '../backend/image_backend.dart';
 import '../backend/llm_backend.dart';
@@ -254,15 +254,19 @@ Future<void> persistBackgroundEnabled({
   await repo.save(current.copyWith(backgroundEnabled: enabled));
 }
 
-/// 更新推理等级并落库。与后台开关同理:同步 appSettingsProvider 与库。
+/// 更新推理等级并落库。
+///
+/// **先落库、成功后再同步内存**:写库失败时 `appSettingsProvider` 保持旧值,
+/// 不会出现"界面已切换、重启后又变回去"的假成功。
 Future<void> persistReasoningLevel({
   required ReasoningLevel level,
   required void Function(AppSettings) appSettingsSetter,
   required AppSettingsRepository repo,
   required AppSettings current,
 }) async {
-  appSettingsSetter(current.copyWith(reasoningLevel: level));
-  await repo.save(current.copyWith(reasoningLevel: level));
+  final updated = current.copyWith(reasoningLevel: level);
+  await repo.save(updated);
+  appSettingsSetter(updated);
 }
 
 /// 后台 agent 启用的子功能选择,随 appSettingsProvider 派生。

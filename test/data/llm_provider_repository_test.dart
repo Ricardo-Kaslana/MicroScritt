@@ -1,6 +1,6 @@
 // LLM provider/模型仓储:目录往返、活跃切换、兼容选项与模型 id 稳定。
 import 'package:flutter_test/flutter_test.dart';
-import 'package:microscritt/backend/backend_config.dart';
+import 'package:microscritt/models/backend_config.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/llm_provider_repository.dart';
 import 'package:microscritt/models/llm_provider.dart';

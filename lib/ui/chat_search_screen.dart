@@ -91,13 +91,17 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
       _error = null;
     });
     try {
+      // 多取一条只用于判断"是否还有更旧结果":恰好 200 条是完整结果,
+      // 不能按 `>= 200` 误报截断。
       final raw = await ref
           .read(messageRepositoryProvider)
-          .searchInSession(widget.sessionId, query, limit: _limit);
+          .searchInSession(widget.sessionId, query, limit: _limit + 1);
       if (!mounted || request != _request) return;
+      final truncated = raw.length > _limit;
+      final visible = truncated ? raw.take(_limit) : raw;
       final lower = query.toLowerCase();
       final hits = <_DisplayHit>[];
-      for (final hit in raw) {
+      for (final hit in visible) {
         // SQL 在原始正文上匹配;展示口径会剥掉内部注入/样式标记。命中若只落在
         // 被剥离的文本里(用户看不见),不作为结果返回。
         final display = _displayText(hit.content);
@@ -114,7 +118,7 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
       }
       setState(() {
         _hits = hits;
-        _truncated = raw.length >= _limit;
+        _truncated = truncated;
         _loading = false;
         _searched = true;
       });

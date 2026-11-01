@@ -2,9 +2,11 @@
 ///
 /// 由 provider 配置映射而来(取当前 provider 的当前模型),只描述一次
 /// 请求需要的协议、地址、凭据与参数;不感知 provider 目录的多行管理。
+/// 放在 models 层,让持久化层(`lib/data`)与后端层(`lib/backend`)共用
+/// 同一份中立类型而不互相 import。
 library;
 
-import '../models/endpoint_compat.dart';
+import 'endpoint_compat.dart';
 
 /// API 协议;决定工厂创建哪个后端实现。
 enum BackendProvider { openai, anthropic }
