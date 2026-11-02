@@ -132,7 +132,9 @@ jobs:
 
   windows:
     needs: prepare
-    runs-on: windows-latest
+    # windows-latest 已切到 VS 2026;Flutter 3.35.5 只识别 VS 2022,
+    # 固定 windows-2022 避免回落到 VS 2019 生成器。
+    runs-on: windows-2022
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

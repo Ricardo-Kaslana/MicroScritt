@@ -22,6 +22,8 @@
 
 ### 修复
 
+- 修复 Windows Release 构建在 `windows-latest` 上因 VS 2026 与 Flutter
+  3.35.5 不兼容而失败;发布构建固定使用 `windows-2022`。
 - 修复持久化层直接 import 后端配置的分层违规:把 `BackendConfig` /
   `BackendProvider` 迁入 `lib/models`,并新增分层守卫测试。
 - 修复消息气泡在 `imageBase64` 为空串时挡住 URL / 惰性回退、显示破图占位。
