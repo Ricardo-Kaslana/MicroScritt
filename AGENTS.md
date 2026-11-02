@@ -39,6 +39,8 @@ Data(sqflite)→ Backend(LLM 抽象 + 生图抽象)→ Context(组装管线)→ 
 - 静态检查:`flutter analyze`(要求零告警)
 - 锁文件:若本地设置了 `PUB_HOSTED_URL` 镜像,提交前执行
   `PUB_HOSTED_URL=https://pub.dev flutter pub get`,确保 `pubspec.lock` 只含 pub.dev 地址;CI 会拒绝镜像 URL。
+- 发布:推送与 `pubspec.yaml` 版本一致的 `v*` tag 触发 `.github/workflows/release.yml`;Android 签名密钥只存 GitHub Secrets,流程见 `CONTRIBUTING.md`「发布」。
+- 发布签名初始化:`tool/setup_android_signing.sh`(`gh` 已登录,密码交互输入)。
 
 ## 文档
 

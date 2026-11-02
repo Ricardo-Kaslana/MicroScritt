@@ -1,0 +1,196 @@
+# 发布构建:推送 v* tag 时构建 Android APK 与 Windows x64 便携包并创建
+# GitHub Release;手动触发只构建并上传 workflow artifact,用于发版前检查。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    # 仅上游公开仓库发布;私有备份仓库与 fork 推送 tag 时跳过。
+    if: github.repository == 'Ricardo-Kaslana/MicroScritt'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_release: ${{ steps.version.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify lockfile uses pub.dev
+        run: |
+          if grep -n "mirrors\." pubspec.lock; then
+            echo "::error::pubspec.lock contains a package mirror URL"
+            exit 1
+          fi
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version:[[:space:]]*\([^+]*\).*/\1/p' pubspec.yaml)"
+          if [ -z "$version" ]; then
+            echo "::error::Cannot read version from pubspec.yaml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match pubspec version v$version"
+              exit 1
+            fi
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  android:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.5'
+          cache: true
+
+      - name: Verify signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=""
+          [ -n "$KEYSTORE_BASE64" ] || missing="$missing ANDROID_KEYSTORE_BASE64"
+          [ -n "$STORE_PASSWORD" ] || missing="$missing ANDROID_KEYSTORE_PASSWORD"
+          [ -n "$KEY_ALIAS" ] || missing="$missing ANDROID_KEY_ALIAS"
+          [ -n "$KEY_PASSWORD" ] || missing="$missing ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing release signing secrets:$missing"
+            exit 1
+          fi
+
+      - name: Restore release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/release.jks
+          {
+            printf 'storePassword=%s\n' "$STORE_PASSWORD"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'storeFile=release.jks\n'
+          } > android/key.properties
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build signed APK
+        run: flutter build apk --release
+
+      - name: Verify APK is release-signed
+        run: |
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          apksigner="$(find "$sdk/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          apk="build/app/outputs/flutter-apk/app-release.apk"
+          "$apksigner" verify --print-certs "$apk" 2>&1 | tee /tmp/apk-certs.txt
+          if grep -q "CN=Android Debug" /tmp/apk-certs.txt; then
+            echo "::error::APK was signed with the Android debug key"
+            exit 1
+          fi
+
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk "microscritt-${{ needs.prepare.outputs.version }}-android.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: microscritt-*-android.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.5'
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build/windows -Recurse -Filter microscritt.exe | Select-Object -First 1
+          if (-not $exe) { throw "microscritt.exe not found under build/windows" }
+          $package = "microscritt-${{ needs.prepare.outputs.version }}-windows-x64.zip"
+          Compress-Archive -Path (Join-Path $exe.Directory.FullName '*') -DestinationPath $package
+          Write-Output "Packed $package"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: microscritt-*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: [prepare, android, windows]
+    if: needs.prepare.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          TITLE: MicroScritt ${{ needs.prepare.outputs.version }}
+        run: |
+          ls -lh artifacts
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" artifacts/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --generate-notes \
+              --verify-tag
+          fi

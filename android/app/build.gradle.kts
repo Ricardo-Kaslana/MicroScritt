@@ -1,12 +1,22 @@
 // Android 应用模块:应用标识、SDK 版本与 release 签名策略。
 //
-// 开源仓库不内置签名密钥;发布构建请在本地配置 keystore,并保持
-// applicationId 与 iOS bundle id 一致。
+// 开源仓库不内置签名密钥:发布构建从 android/key.properties 读取 keystore
+// (CI 由 GitHub Secrets 还原),本地未配置时回落到 debug 签名。
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+val hasReleaseKeystore = keystorePropertiesFile.exists()
+if (hasReleaseKeystore) {
+    FileInputStream(keystorePropertiesFile).use { keystoreProperties.load(it) }
 }
 
 android {
@@ -34,12 +44,26 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // No signing key is bundled with the repository. Configure your own
-            // release keystore before distributing builds; debug signing keeps
-            // `flutter build apk --release` usable for local verification.
-            signingConfig = signingConfigs.getByName("debug")
+            // 有 android/key.properties 时使用正式 keystore;没有时回落到 debug
+            // 签名,保证本地 `flutter build apk --release` 仍可用于验证。
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

@@ -18,7 +18,7 @@
 
 移动端优先的极简 AI 角色扮演(RP)聊天应用。纯客户端 Flutter,无后端服务:对话、生图、Hook 脚本执行与数据存储全部在本地完成。
 
-> 当前版本 **2.3.0** · 数据库 schema **v66** · Android / Windows 可用;iOS 源码存在,但 JS runtime 尚未接线,生图在这些平台不可用。
+> 当前版本 **2.3.1** · 数据库 schema **v66** · Android / Windows 可用;iOS 源码存在,但 JS runtime 尚未接线,生图在这些平台不可用。
 
 ### 功能
 
@@ -41,6 +41,20 @@
 
 移动端「保存到本地」与系统分享面板已在真机验证。最低工具链:Flutter 3.35 / Dart 3.9。
 
+### 下载
+
+正式构建发布在 [GitHub Releases](https://github.com/Ricardo-Kaslana/MicroScritt/releases):
+
+- **Android**:下载 `microscritt-<版本>-android.apk`,允许安装未知来源应用后侧载;
+  APK 使用项目固定的 release keystore 签名,可直接覆盖升级。
+- **Windows**:下载 `microscritt-<版本>-windows-x64.zip`,解压后运行
+  `microscritt.exe`;未做代码签名,首次运行可能触发 SmartScreen 提示。系统需已
+  安装 Visual C++ 2015-2022 运行库(多数设备已有)。
+- **iOS**:GitHub 不提供可直接安装的包,需自行配置签名后通过 TestFlight
+  或 Xcode 安装。
+
+自己构建的步骤见下方「快速开始」。
+
 ### 快速开始
 
 ```bash
@@ -53,7 +67,9 @@ flutter build apk --release        # Android
 flutter build windows --release    # Windows
 ```
 
-仓库不内置发布签名密钥;Android release 默认使用 debug 签名,分发前请配置自己的 keystore。
+仓库不内置发布签名密钥;本地未配置 `android/key.properties` 时 release 构建回落到
+debug 签名。CI 发布时从 GitHub Secrets 还原正式 keystore,详见
+[CONTRIBUTING.md](CONTRIBUTING.md) 的「发布」。
 
 ### 配置
 
@@ -110,7 +126,7 @@ Data(sqflite) → Backend(LLM/生图抽象) → Context(组装管线)
 
 A minimal, mobile-first AI roleplay (RP) chat app. Pure client-side Flutter — no backend service: chat, image generation, hook scripts and storage all happen locally on your device.
 
-> Version **2.3.0** · database schema **v66** · Android and Windows are usable; iOS sources exist but the JS runtime is not wired yet, so image generation is unavailable there.
+> Version **2.3.1** · database schema **v66** · Android and Windows are usable; iOS sources exist but the JS runtime is not wired yet, so image generation is unavailable there.
 
 ### Features
 

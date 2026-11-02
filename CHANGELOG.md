@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-11-02
+
+### 新增
+
+- 新增 GitHub Actions 发布工作流:推送与 `pubspec.yaml` 版本一致的 `v*` tag
+  时,构建经正式 keystore 签名的 Android APK 与 Windows x64 便携包并创建
+  GitHub Release,用户可从 Releases 页直接下载;手动触发只构建并保留
+  workflow artifact,用于发版前验证。
+- Android release 签名支持 `android/key.properties`;本地未配置时仍回落到
+  debug 签名,CI 发布则从 GitHub Secrets 还原正式 keystore。
+- 新增 `tool/setup_android_signing.sh`:一键生成/复用 Android release
+  keystore,并写入 4 个 GitHub Actions Secrets;支持指定仓库、keystore 路径与
+  alias,密码交互输入且不落盘。
+
 ### 修复
 
 - 修复持久化层直接 import 后端配置的分层违规:把 `BackendConfig` /
@@ -26,6 +40,7 @@
 
 ### 变更
 
+- 版本号升为 `2.3.1+4`,作为首个 GitHub Release 构建。
 - 新增 `.gitattributes`:文本文件统一以 LF 存储与检出,Windows 原生 rc/脚本/
   工程文件保留 CRLF,图片等二进制资产显式标记,消除跨平台行尾漂移。
 - 清理未使用的 API 参数与过宽可见性:`IslandHub.push` 的 `icon`、
@@ -39,6 +54,8 @@
   `test/` 132 个测试文件补齐覆盖目标文件头,Android/iOS/Windows 入口与
   runner 模板补充来源说明;同时清理内部批次代号、第三方项目指涉与已移除
   功能描述。仅调整注释,不改变运行行为。
+- README 新增「下载」入口与签名说明;CONTRIBUTING 新增「发布」流程,
+  记录 keystore 生成、GitHub Secrets 与 tag 发版步骤。
 
 ## 2.3.0 - 2026-11-01
 

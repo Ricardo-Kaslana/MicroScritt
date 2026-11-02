@@ -127,6 +127,43 @@ flutter test
   引擎确实不可用时用 `markTestSkipped`。QuickJS 不可用时 hook 求值测试会
   自动跳过,这是预期行为。
 
+## 发布
+
+发布工作流为 `.github/workflows/release.yml`:推送 `v<版本>` tag 时构建并创建
+GitHub Release;手动触发只构建并上传 artifact,用于发版前检查。tag 必须与
+`pubspec.yaml` 的版本一致(如 `2.3.1+4` 对应 `v2.3.1`)。
+
+Android 发布包必须用正式 keystore 签名,密钥只存于 GitHub Secrets。首次配置运行:
+
+```bash
+tool/setup_android_signing.sh
+```
+
+脚本在 Git Bash / macOS / Linux 下运行。默认操作 `Ricardo-Kaslana/MicroScritt`,
+在仓库外 `~/.microscritt-signing/release.jks` 生成或复用 keystore,并写入
+`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、
+`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 四个 Secrets。可用
+`-r owner/repo`、`-k /path/to/release.jks`、`-a alias` 覆盖;已有 keystore
+时必须用 `-k` 传入。脚本依赖 `gh`(已登录)、`keytool` 与 `base64`,密码交互
+输入,不落盘;结束时可选择立即触发一次手动验证构建。
+
+keystore 与 `key.properties` 已被 `.gitignore` 忽略,不得提交;请立即离线备份
+keystore 与密码,丢失后无法为已安装用户提供覆盖升级。
+
+触发发布:
+
+```bash
+git tag -a v2.3.1 -m "v2.3.1"
+git push origin v2.3.1
+```
+
+打 tag 前确认目标提交已在 `main` 上通过 CI。
+
+产物为 `microscritt-<版本>-android.apk` 与
+`microscritt-<版本>-windows-x64.zip`。Windows 包未做代码签名,首次运行可能
+触发 SmartScreen 提示。fork 若要发布,需把工作流 `prepare` 任务里的仓库判断
+改为自己的仓库,并配置同样的 Secrets。
+
 ## 文档
 
 - 用户可见的行为变更同步进 `CHANGELOG.md`(Keep a Changelog 格式)。
