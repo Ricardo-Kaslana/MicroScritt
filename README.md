@@ -18,7 +18,7 @@
 
 移动端优先的极简 AI 角色扮演(RP)聊天应用。纯客户端 Flutter,无后端服务:对话、生图、Hook 脚本执行与数据存储全部在本地完成。
 
-> 当前版本 **2.3.1** · 数据库 schema **v66** · Android / Windows 可用;iOS 源码存在,但 JS runtime 尚未接线,生图在这些平台不可用。
+> 当前版本 **2.3.2** · 数据库 schema **v68** · Android / Windows 可用;iOS 源码存在,但 JS runtime 尚未接线,生图在这些平台不可用。
 
 ### 功能
 
@@ -126,7 +126,7 @@ Data(sqflite) → Backend(LLM/生图抽象) → Context(组装管线)
 
 A minimal, mobile-first AI roleplay (RP) chat app. Pure client-side Flutter — no backend service: chat, image generation, hook scripts and storage all happen locally on your device.
 
-> Version **2.3.1** · database schema **v66** · Android and Windows are usable; iOS sources exist but the JS runtime is not wired yet, so image generation is unavailable there.
+> Version **2.3.2** · database schema **v68** · Android and Windows are usable; iOS sources exist but the JS runtime is not wired yet, so image generation is unavailable there.
 
 ### Features
 

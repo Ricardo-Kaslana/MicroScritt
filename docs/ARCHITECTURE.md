@@ -1,6 +1,6 @@
 # MicroScritt 架构与开发说明
 
-> 更新:2026-11-15 · 版本 **2.3.1+4** · schema **v67(单一基线)** · `flutter analyze` 零告警
+> 更新:2026-11-16 · 版本 **2.3.2+5** · schema **v68(单一基线)** · `flutter analyze` 零告警
 >
 > 本文档描述当前架构、核心不变量与已知局限。变更记录见 `CHANGELOG.md`;面向 AI 编码代理的速查见 `AGENTS.md`。若本文与代码不一致,**以代码为准**。
 
@@ -12,7 +12,7 @@
 
 ```
 lib/
-├── data/        # sqflite 持久化 + repository(schema v67 单一基线,20 张表;database.dart 主文件 + schema/seeds 两个 part 文件;旧版本库启动时自动归档重建;桌面端数据根固定 ~/.microscritt(models/DataRoot),首启自动从 Documents 搬迁;app_config_file.dart 维护同目录的 microscritt-config.json,ui_prefs_file.dart 维护同目录的 ui-prefs.json:UI 偏好独立小文件、坏文件 fail-safe)
+├── data/        # sqflite 持久化 + repository(schema v68 单一基线,20 张表;database.dart 主文件 + schema/seeds 两个 part 文件;旧版本库启动时自动归档重建;桌面端数据根固定 ~/.microscritt(models/DataRoot),首启自动从 Documents 搬迁;app_config_file.dart 维护同目录的 microscritt-config.json,ui_prefs_file.dart 维护同目录的 ui-prefs.json:UI 偏好独立小文件、坏文件 fail-safe)
 ├── backend/     # LlmBackend 抽象(OpenAI/Anthropic + SSE,provider 级「官方 OpenAI 参数风格」开关)+ 上游契约层(UpstreamErrorKind 七类错误分类 + LlmProbe 测试连接)+ ImageBackend 抽象(单一插件路径 PluginImageBackend:内置对话式网关/Nai2 亦为自带插件,同步 JS step 状态机 + Dart 受限 HTTP/sleep,支持 operation/params/url 结果/网络失败回传;运行链路只消费活跃配置)
 ├── context/     # ContextAssembler:纯文本 ContextSnapshot 组装;稳定段 <tag> 包裹,可变内容经 attachments 注入;attachment_budget 单轮注入限额
 ├── engine/      # ChatEngine(单写对话)+ BackgroundEngine/Orchestrator(变量严格校验/增量分批/版本条件写回/三档权限/显式删除/回收站/严格模式待确认;生图独立近期场景;失败不推进进度)+ Hook(QuickJS 沙箱)+ CompactService(合并式单一摘要,token 占用率驱动)
