@@ -106,6 +106,7 @@ void main() {
     await pumpScreen(tester);
     expect(find.text('暂无世界书条目'), findsOneWidget);
 
+    await openMenu(tester);
     await tapText(tester, '导入条目');
     await waitForText(tester, '已导入');
 
@@ -199,11 +200,12 @@ void main() {
     expect(list.map((e) => e.content).toList(), ['旧条目']);
   });
 
-  testWidgets('reports a failure when the picker returns nothing', (tester) async {
+  testWidgets('cancelling the picker reports a cancel, not a failure', (tester) async {
     FakeFilePicker.install(pickedPath: null); // 用户在原生对话框里取消
     await pumpScreen(tester);
+    await openMenu(tester);
     await tapText(tester, '导入条目');
-    await waitForText(tester, '导入失败:未读取到所选文件');
+    await waitForText(tester, '已取消导入');
 
     expect(await rows(tester), isEmpty);
   });
@@ -212,6 +214,7 @@ void main() {
     final file = writeJson('bad.json', 'not json at all');
     FakeFilePicker.install(pickedPath: file.path);
     await pumpScreen(tester);
+    await openMenu(tester);
     await tapText(tester, '导入条目');
     await waitForText(tester, '导入失败:文件不是有效的 JSON');
 
@@ -222,6 +225,7 @@ void main() {
     final file = writeJson('empty.json', jsonEncode({'hello': 'world'}));
     FakeFilePicker.install(pickedPath: file.path);
     await pumpScreen(tester);
+    await openMenu(tester);
     await tapText(tester, '导入条目');
     await waitForText(tester, '导入失败:未找到世界书条目');
 

@@ -23,6 +23,7 @@ import 'common/confirm_dialog.dart';
 import 'common/empty_state.dart';
 import 'common/form_field.dart';
 import 'common/section_header.dart';
+import 'common/sheet_header.dart';
 import 'common/text_edit_sheet.dart';
 import 'common/variable_edit_sheet.dart';
 import '../models/memory.dart';
@@ -130,12 +131,21 @@ class StatusScreen extends ConsumerWidget {
           ],
         ],
       ),
-      subtitle: pending
-          ? Text(
-              pendingHint,
-              style: TextStyle(fontSize: 12, color: scheme.primary),
-            )
-          : null,
+      // 禁用期间给出原因:置灰的按钮不说明"为什么点不了",用户只能反复点。
+      subtitle: enabled
+          ? (pending
+                ? Text(
+                    pendingHint,
+                    style: TextStyle(fontSize: 12, color: scheme.primary),
+                  )
+                : null)
+          : Text(
+              pending ? '$pendingHint · 后台运行中,结束后可应用' : '后台运行中,结束后可应用',
+              style: TextStyle(
+                fontSize: 12,
+                color: pending ? scheme.primary : scheme.onSurfaceVariant,
+              ),
+            ),
       enabled: enabled,
       onTap: enabled
           ? () => _confirmApplyMemory(context, ref, pending: pending)
@@ -513,8 +523,8 @@ class StatusScreen extends ConsumerWidget {
             summary: backgroundSummary,
             onToggle: (v) => _toggleBackground(ref, v),
           ),
-          // 状态卡与下方维护设置分开呼吸,避免两张白卡贴成一块。
-          const SizedBox(height: 12),
+          // 与页面各节统一的 16 间距,避免状态卡与设置卡贴成一块。
+          const SizedBox(height: 16),
           // 后台 agent 启用时:维护功能 / 请求参数 / 上下文锚定 归入一张设置卡,
           // 世界书条目选择也收进同卡的上下文节,避免多张卡堆叠。
           if (backgroundEnabled)
@@ -562,38 +572,48 @@ class StatusScreen extends ConsumerWidget {
               variableRows.maybeWhen(
                 data: (rows) => rows.isEmpty && trashCount == 0
                     ? const SizedBox.shrink()
-                    : _sectionMenu(
-                        scheme: scheme,
-                        tooltip: '变量操作',
-                        actions: [
-                          const MenuAction(
-                            value: 'add',
-                            label: '新增变量',
-                            icon: Icons.add,
-                          ),
+                    : Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // 回收站改为常驻入口(带数量角标):此前埋在三点菜单
+                          // 里,删除后想恢复的用户很难再找到。
                           if (trashCount > 0)
-                            MenuAction(
-                              value: 'trash',
-                              label: '已删除 ($trashCount)',
-                              icon: Icons.restore_from_trash_outlined,
+                            IconButton(
+                              tooltip: '已删除的变量($trashCount)',
+                              icon: Badge(
+                                label: Text('$trashCount'),
+                                child: const Icon(
+                                  Icons.restore_from_trash_outlined,
+                                ),
+                              ),
+                              onPressed: () => _showTrash(context),
                             ),
-                          if (rows.isNotEmpty)
-                            const MenuAction(
-                              value: 'clear',
-                              label: '清空',
-                              icon: Icons.delete_sweep_outlined,
-                              destructive: true,
-                            ),
+                          _sectionMenu(
+                            scheme: scheme,
+                            tooltip: '变量操作',
+                            actions: [
+                              const MenuAction(
+                                value: 'add',
+                                label: '新增变量',
+                                icon: Icons.add,
+                              ),
+                              if (rows.isNotEmpty)
+                                const MenuAction(
+                                  value: 'clear',
+                                  label: '清空',
+                                  icon: Icons.delete_sweep_outlined,
+                                  destructive: true,
+                                ),
+                            ],
+                            onSelected: (action) {
+                              if (action == 'add') {
+                                _addVariable(context, ref, rows);
+                              } else if (action == 'clear') {
+                                _clearVariables(context, ref);
+                              }
+                            },
+                          ),
                         ],
-                        onSelected: (action) {
-                          if (action == 'add') {
-                            _addVariable(context, ref, rows);
-                          } else if (action == 'trash') {
-                            _showTrash(context);
-                          } else if (action == 'clear') {
-                            _clearVariables(context, ref);
-                          }
-                        },
                       ),
                 orElse: () => const SizedBox.shrink(),
               ),
@@ -604,14 +624,30 @@ class StatusScreen extends ConsumerWidget {
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const _EmptyHint('后台引擎尚未写入变量。也可以手动新增,作为后台维护的起始状态。'),
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: FilledButton.tonalIcon(
-                          onPressed: () => _addVariable(context, ref, rows),
-                          icon: const Icon(Icons.add, size: 16),
-                          label: const Text('新增变量'),
-                        ),
+                      const EmptyState(
+                        compact: true,
+                        icon: Icons.data_object,
+                        title: '暂无变量',
+                        message: '后台引擎尚未写入变量。也可以手动新增,作为后台维护的起始状态。',
+                      ),
+                      const SizedBox(height: 4),
+                      // 与记忆/生图指导空态同一语言:动作作为卡内操作行,
+                      // 不再用独立按钮与卡片混排。
+                      GroupCard(
+                        children: [
+                          ListTile(
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                            ),
+                            leading: Icon(
+                              Icons.add,
+                              size: 20,
+                              color: scheme.primary,
+                            ),
+                            title: const Text('新增变量'),
+                            onTap: () => _addVariable(context, ref, rows),
+                          ),
+                        ],
                       ),
                     ],
                   )
@@ -673,11 +709,8 @@ class StatusScreen extends ConsumerWidget {
                         ),
                     ],
                   ),
-            error: (e, _) => _EmptyHint('$e'),
-            loading: () => const Padding(
-              padding: EdgeInsets.all(16),
-              child: Center(child: CircularProgressIndicator()),
-            ),
+            error: (e, _) => _EmptyHint('$e', isError: true),
+            loading: () => const _SectionSkeleton(),
           ),
           Padding(
             padding: const EdgeInsets.only(top: 8),
@@ -691,15 +724,35 @@ class StatusScreen extends ConsumerWidget {
                 child: SectionHeader('记忆', icon: Icons.psychology_outlined),
               ),
               // 记忆每会话仅一条(schema UNIQUE(session_id)):点内容行直接编辑,
-              // 清空收进标题行菜单;非空时另有「重生成/应用到上下文」内联按钮。
+              // 重生成与清空都收进标题行菜单;非空时卡内只留「应用到上下文」。
               memories.maybeWhen(
                 data: (list) => list.isEmpty
                     ? const SizedBox.shrink()
                     : _sectionMenu(
                         scheme: scheme,
                         tooltip: '记忆操作',
+                        actions: [
+                          MenuAction(
+                            value: 'regenerate',
+                            label: '重新生成',
+                            icon: Icons.auto_awesome,
+                            enabled: !running,
+                          ),
+                          const MenuAction(
+                            value: 'clear',
+                            label: '清空',
+                            icon: Icons.delete_sweep_outlined,
+                            destructive: true,
+                          ),
+                        ],
                         onSelected: (action) {
-                          if (action == 'clear') _clearMemory(context, ref);
+                          if (action == 'regenerate') {
+                            ref
+                                .read(chatControllerProvider.notifier)
+                                .regenerateMemory();
+                          } else if (action == 'clear') {
+                            _clearMemory(context, ref);
+                          }
                         },
                       ),
                 orElse: () => const SizedBox.shrink(),
@@ -711,8 +764,11 @@ class StatusScreen extends ConsumerWidget {
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const _EmptyHint(
-                        '尚无记忆。记忆是给主写模型的长期事实底本,可由 AI 依据角色卡生成,也可手动填写。',
+                      const EmptyState(
+                        compact: true,
+                        icon: Icons.psychology_outlined,
+                        title: '暂无记忆',
+                        message: '尚无记忆。记忆是给主写模型的长期事实底本,可由 AI 依据角色卡生成,也可手动填写。',
                       ),
                       const SizedBox(height: 4),
                       // 空态动作与卡内操作行同一种语言:生成/手动填写/待应用
@@ -770,36 +826,15 @@ class StatusScreen extends ConsumerWidget {
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 12,
                           ),
-                          // 记忆是状态面板里用户最常回看的长文本:给到 6 行,
+                          // 记忆是状态面板里用户最常回看的长文本:给到 10 行,
                           // 与生图指导同高,仍不足以撑爆面板。
                           title: Text(
                             m.content,
-                            maxLines: 6,
+                            maxLines: 10,
                             overflow: TextOverflow.ellipsis,
                           ),
                           onTap: () => _editMemoryEntry(context, ref, m),
                         ),
-                      // 主动维护动作:全量重生成(带全部上下文的请求)与
-                      // 应用到上下文(把库中最新记忆立即作为第 0 条消息冻结副本)。
-                      // 作为卡片内操作行而非独立按钮行:标签较长,窄屏不再换行错位;
-                      // 运行时禁用与按钮态一致。
-                      ListTile(
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                        ),
-                        leading: Icon(
-                          Icons.auto_awesome,
-                          size: 20,
-                          color: scheme.primary,
-                        ),
-                        title: const Text('依据全部对话重生成'),
-                        enabled: !running,
-                        onTap: running
-                            ? null
-                            : () => ref
-                                  .read(chatControllerProvider.notifier)
-                                  .regenerateMemory(),
-                      ),
                       // 未应用的记忆修改在这里持续高亮,直到应用或压缩换新。
                       _applyMemoryTile(
                         context,
@@ -809,11 +844,8 @@ class StatusScreen extends ConsumerWidget {
                       ),
                     ],
                   ),
-            error: (e, _) => _EmptyHint('$e'),
-            loading: () => const Padding(
-              padding: EdgeInsets.all(16),
-              child: Center(child: CircularProgressIndicator()),
-            ),
+            error: (e, _) => _EmptyHint('$e', isError: true),
+            loading: () => const _SectionSkeleton(),
           ),
           const SizedBox(height: 16),
           // ===== 生图指导(后台生图每轮携带) =====
@@ -841,8 +873,12 @@ class StatusScreen extends ConsumerWidget {
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const _EmptyHint(
-                        '尚无生图指导。指导固定角色外貌与画风,由后台生图每轮携带;可由 AI 生成,也可手动填写。',
+                      const EmptyState(
+                        compact: true,
+                        icon: Icons.palette_outlined,
+                        title: '暂无生图指导',
+                        message:
+                            '尚无生图指导。指导固定角色外貌与画风,由后台生图每轮携带;可由 AI 生成,也可手动填写。',
                       ),
                       const SizedBox(height: 4),
                       // 与记忆空态同一语言:两条动作排成卡内操作行。
@@ -875,8 +911,7 @@ class StatusScreen extends ConsumerWidget {
                               color: scheme.primary,
                             ),
                             title: const Text('手动填写指导'),
-                            onTap: () =>
-                                _editImageGuide(context, ref, null),
+                            onTap: () => _editImageGuide(context, ref, null),
                           ),
                         ],
                       ),
@@ -891,7 +926,7 @@ class StatusScreen extends ConsumerWidget {
                         ),
                         title: Text(
                           list.first.content,
-                          maxLines: 6,
+                          maxLines: 10,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             fontFamily: 'monospace',
@@ -903,11 +938,8 @@ class StatusScreen extends ConsumerWidget {
                       ),
                     ],
                   ),
-            error: (e, _) => _EmptyHint('$e'),
-            loading: () => const Padding(
-              padding: EdgeInsets.all(16),
-              child: Center(child: CircularProgressIndicator()),
-            ),
+            error: (e, _) => _EmptyHint('$e', isError: true),
+            loading: () => const _SectionSkeleton(),
           ),
           // 生图指导是页面末区块:额外留出底部间隙,不贴屏幕底边。
           const SizedBox(height: 24),
@@ -917,19 +949,62 @@ class StatusScreen extends ConsumerWidget {
   }
 }
 
-/// 面板内的空态提示行(变量 / 记忆 / 生图指导三区块共用)。
-class _EmptyHint extends StatelessWidget {
-  final String text;
-  const _EmptyHint(this.text);
+/// 区块加载骨架:固定三行灰条,数据到达时的高度变化远小于一颗居中转圈,
+/// 面板内三个区块加载时不再整体跳动。
+class _SectionSkeleton extends StatelessWidget {
+  const _SectionSkeleton();
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 8),
-    child: Text(
-      text,
-      style: TextStyle(color: Theme.of(context).colorScheme.outline),
-    ),
-  );
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    Widget bar(double widthFactor) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: FractionallySizedBox(
+          widthFactor: widthFactor,
+          child: Container(
+            height: 12,
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(6),
+            ),
+          ),
+        ),
+      ),
+    );
+    return GroupCard(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [bar(0.4), bar(0.85), bar(0.65)],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 面板内的错误提示行(变量 / 记忆 / 生图指导三区块共用)。
+/// 空态已统一为 [EmptyState] 紧凑档,这里只承担加载失败的红色提示。
+class _EmptyHint extends StatelessWidget {
+  final String text;
+  final bool isError;
+  const _EmptyHint(this.text, {this.isError = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Text(
+        text,
+        style: TextStyle(color: isError ? scheme.error : scheme.outline),
+      ),
+    );
+  }
 }
 
 /// 变量行的后台权限徽标:三档 `full` 可改可删 / `protected` 可改不可删 /
@@ -1202,30 +1277,7 @@ class _VariableListSheetState extends ConsumerState<_VariableListSheet> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 36,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: scheme.outlineVariant,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        '全部变量',
-                        style: text.titleMedium,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('关闭'),
-                    ),
-                  ],
-                ),
+                const SheetHeader(title: '全部变量'),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
                   child: Text(
@@ -1265,9 +1317,7 @@ class _VariableListSheetState extends ConsumerState<_VariableListSheet> {
                         itemCount: filtered.length,
                         separatorBuilder: (_, __) => Divider(
                           height: 1,
-                          color: scheme.outlineVariant.withValues(
-                            alpha: 0.5,
-                          ),
+                          color: scheme.outlineVariant.withValues(alpha: 0.5),
                         ),
                         itemBuilder: (_, i) {
                           final variable = filtered[i];
@@ -1305,18 +1355,11 @@ class _VariableListSheetState extends ConsumerState<_VariableListSheet> {
                                 size: 20,
                                 color: scheme.error,
                               ),
-                              onPressed: () => widget.onDelete(
-                                context,
-                                ref,
-                                variable.key,
-                              ),
+                              onPressed: () =>
+                                  widget.onDelete(context, ref, variable.key),
                             ),
-                            onTap: () => widget.onEdit(
-                              context,
-                              ref,
-                              rows,
-                              variable,
-                            ),
+                            onTap: () =>
+                                widget.onEdit(context, ref, rows, variable),
                           );
                         },
                       );
@@ -1438,24 +1481,9 @@ class _VariableTrashSheet extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 36,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: scheme.outlineVariant,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        '已删除的变量',
-                        style: text.titleMedium,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
+                SheetHeader(
+                  title: '已删除的变量',
+                  actions: [
                     if (count > 0)
                       IconButton(
                         tooltip: '清空回收站',
@@ -1467,10 +1495,6 @@ class _VariableTrashSheet extends ConsumerWidget {
                         ),
                         onPressed: () => _clearAll(context, ref, count),
                       ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('关闭'),
-                    ),
                   ],
                 ),
                 Padding(
@@ -1600,7 +1624,7 @@ class _BackgroundAgentCard extends StatelessWidget {
                   child: Row(
                     children: [
                       Text(
-                        '后台agent',
+                        '后台引擎',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                       const SizedBox(width: 8),
@@ -1657,16 +1681,10 @@ class _BackgroundSummaryText extends StatefulWidget {
 
 class _BackgroundSummaryTextState extends State<_BackgroundSummaryText> {
   static const int _collapsedLines = 3;
-  bool _expanded = false;
 
-  @override
-  void didUpdateWidget(covariant _BackgroundSummaryText oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.text != widget.text ||
-        oldWidget.collapsible != widget.collapsible) {
-      _expanded = false;
-    }
-  }
+  /// 用户展开/收起的选择保持到组件销毁:每轮后台完成后摘要文本都会刷新,
+  /// 旧实现在文本变化时强制收起,正在读长摘要的用户每次都被打断。
+  bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {

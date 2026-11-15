@@ -14,12 +14,29 @@ import '../models/message.dart';
 import '../models/prompt_item.dart';
 import '../models/worldbook_entry.dart';
 
+/// 带修改要求重写最新回复时的一次性上下文。
+///
+/// 只随当次请求注入 messages 尾部,**绝不落库**:修改要求与旧稿都不写
+/// messages 表,重写完成后的后续轮次看不到它们。
+class RewriteContext {
+  /// 用户填写的修改要求(调用方保证已 trim 且非空)。
+  final String instruction;
+
+  /// 被替换的上一版助手回复(改写底稿)。
+  final String previousReply;
+
+  const RewriteContext({
+    required this.instruction,
+    required this.previousReply,
+  });
+}
+
 /// 上下文组装器:产出主写请求的纯文本 system 与消息数组。
 ///
 /// 线上布局(一次请求的完整字节序):
 ///
 /// ```
-/// system:  preset / rules / character / post_history / 常驻世界书   ← 稳定段
+/// system:  preset / rules / character_system / character / 常驻世界书   ← 稳定段
 /// messages:
 ///   [0] 记忆(冻结副本,<system-reminder> 包裹,常驻首位)
 ///   [1] 压缩摘要(<summary> 标签块,无摘要时无此条)
@@ -27,12 +44,16 @@ import '../models/worldbook_entry.dart';
 ///        总在它所属的用户消息之前 —— 落库顺序保证,无需重排;通知类附件行
 ///        可能晚于所属用户消息落库(如发送中途的硬挡压缩),组装时经
 ///        [_correctNoticePositions] 校正到最新用户行之前)
-///   末条恒为用户实际输入或最近的真实消息 —— 注入内容绝不排在用户话语之后
+///   末条:历史后指令(<system-reminder> 包裹;卡片配置且存在历史时) ——
+///   它是常规注入里唯一允许排在用户话语之后的提醒,语义就是回复前最后读到的
+///   指令;按修改要求重写时,重写提醒(旧稿 + 修改要求)排在它之后,成为当次
+///   请求真正的末条临时指令。
 /// ```
 ///
 /// 缓存视角:system 稳定段、记忆第 0 条、历史(含附件行)一旦写入即字节
 /// 冻结(append-only),跨轮命中提示缓存;每轮新增的只有窗口尾部的新消息与
-/// 新附件行,变化区收敛于前缀最末端。通知附件行校正后的数组位置跨轮稳定
+/// 新附件行,变化区收敛于前缀最末端(历史后指令提醒字节稳定,随历史增长
+/// 整体后移,不破坏其前的公共前缀)。通知附件行校正后的数组位置跨轮稳定
 /// (始终在其所属用户行之前),不破坏前缀缓存。
 class ContextAssembler {
   /// 缓存优化:世界书键级匹配用的已编译 RegExp 缓存。
@@ -77,8 +98,8 @@ class ContextAssembler {
   // 一句话用途描述(与标签一一对应,改动任一处都属线上格式变更)。
   static const _descPreset = '这是全局预设提示词:定义本次对话的写作风格与基础指令';
   static const _descRules = '这是全局规则:模型在本会话中必须遵守的行为约束';
+  static const _descCharacterSystem = '这是当前角色卡专属的系统指令:角色作者为该角色设定的扮演要求与回复约束,与前述预设和规则共同生效';
   static const _descCharacter = '这是当前角色卡的设定资料:角色的姓名、描述、性格、场景与示例对话';
-  static const _descPostHistory = '这是剧情后注:角色卡携带的补充指令,与前述设定冲突时以其为准';
   static const _descWorldbookConstant = '这是常驻世界书:始终生效的世界观设定资料';
   static const _descSummary =
       '这是会话早期剧情的压缩摘要,非对话内容:其后是最近的真实对话,仅供衔接参考,回复时请勿提及或复述';
@@ -129,6 +150,24 @@ class ContextAssembler {
     return parts.join('\n');
   }
 
+  /// 历史后指令的线上形态:角色卡该字段的语义是「历史之后、生成之前的最后
+  /// 一段指令」,因此作为 messages 尾部的合成提醒发出,不留在 system 稳定段。
+  /// 与记忆第 0 条同款 `<system-reminder>` 包裹:模型把它当作系统注入而非
+  /// 用户发言,不会被当成对话内容复述。
+  static String postHistoryReminder(String instructions) =>
+      '<system-reminder>以下是角色卡携带的历史后指令,对本次回复生效;'
+      '与前述设定冲突时以其为准。非对话内容,勿在回复中提及或复述本段。\n'
+      '$instructions</system-reminder>';
+
+  /// 按要求重写的尾部提醒:旧稿作为改写底稿,修改要求放在最后(模型最后
+  /// 读到的内容,保持最高注意力)。非对话内容,只随本次请求发送。
+  static String rewriteReminder(String instruction, String previousReply) =>
+      '<system-reminder>用户要求重写你上一条回复。请以下方「上一版回复」为'
+      '改写底稿:保留仍然成立的剧情、语气与设定,只按「修改要求」调整,输出'
+      '完整的重写结果;不要解释修改过程,也不要提及重写、底稿或本提示。\n'
+      '上一版回复(改写底稿):\n$previousReply\n'
+      '修改要求(以此为准):\n$instruction</system-reminder>';
+
   /// 组装主写引擎的上下文快照(纯文本 system + messages)。
   ///
   /// - 技能不进 system:仅在用户以 @技能名 主动触发时经附件行注入;
@@ -136,6 +175,8 @@ class ContextAssembler {
   ///   去重记账由发送管线负责),组装时按 seq 原样进数组;
   /// - 记忆以 [frozenMemory] 的「第 0 条消息」发出(冻结副本,见
   ///   [memoryReminder])。
+  /// - [rewrite] 非空时(按修改要求重写最新回复),在全部历史与历史后指令
+  ///   之后追加一条尾部提醒:旧稿与修改要求只随本次请求发出,不落库。
   ///
   /// 压缩通知与记忆差异通知同样落库为附件行;晚于所属用户消息落库的通知
   /// 经 [_correctNoticePositions] 校正到最新用户行之前,线上字节与通知
@@ -151,6 +192,7 @@ class ContextAssembler {
     List<WorldbookEntry> worldbook = const [],
     String? frozenMemory,
     Set<String> stripSkillNames = const {},
+    RewriteContext? rewrite,
   }) {
     final segmentSources = <String, String>{};
     // 面板分段:严格按实际组装顺序,带细分条目(世界书/会话历史)。
@@ -210,10 +252,21 @@ class ContextAssembler {
           ChatMessage(_role(m.role), m.content),
     ];
 
+    final rewriteText = rewrite != null && rewrite.instruction.trim().isNotEmpty
+        ? rewriteReminder(rewrite.instruction, rewrite.previousReply)
+        : null;
+
     final messages = <ChatMessage>[
       if (leadingMemoryContent != null) ChatMessage(ChatRole.user, leadingMemoryContent),
       if (leadingSummaryContent != null) ChatMessage(ChatRole.user, leadingSummaryContent),
       ...recentMessages,
+      // 历史后指令:排在历史之后、生成之前(卡片字段的语义位置)。没有历史
+      // 就没有「之后」可言,不产生孤立提醒。
+      if (recentMessages.isNotEmpty && character.postHistoryInstructions.isNotEmpty)
+        ChatMessage(ChatRole.user, postHistoryReminder(character.postHistoryInstructions)),
+      // 按要求重写:旧稿与要求都是单轮临时内容,排在最后让修改要求成为模型
+      // 最后读到的指令。
+      if (rewriteText != null) ChatMessage(ChatRole.user, rewriteText),
     ];
 
     // 常驻世界书(constant)字节稳定,进 system 稳定段参与缓存;
@@ -221,14 +274,15 @@ class ContextAssembler {
     final constantEntries = worldbook.where((e) => e.enabled && e.constant).toList();
     final constantWorldbookText = constantEntries.map((e) => e.content).join('\n\n');
 
-    // 系统提示词只剩稳定段:preset/rules/character/post-history/常驻世界书。
-    // (技能、触发世界书、记忆全部移出 system,分别走附件行与第 0 条消息。)
+    // 系统提示词只剩稳定段:preset/rules/角色卡系统指令/character/常驻世界书。
+    // (历史后指令走 messages 尾部的合成提醒;技能、触发世界书、记忆同样移出
+    // system,分别走附件行与第 0 条消息。)
     final stableParts = <String>[
       if (preset.isNotEmpty) _wrap('preset', _descPreset, preset),
       if (rules.isNotEmpty) _wrap('rules', _descRules, rules),
+      if (character.systemPrompt.isNotEmpty)
+        _wrap('character_system', _descCharacterSystem, character.systemPrompt),
       if (characterText.isNotEmpty) _wrap('character', _descCharacter, characterText),
-      if (character.postHistoryInstructions.isNotEmpty)
-        _wrap('post_history_instructions', _descPostHistory, character.postHistoryInstructions),
       if (constantWorldbookText.isNotEmpty)
         _wrap('worldbook_constant', _descWorldbookConstant, constantWorldbookText),
     ];
@@ -260,8 +314,8 @@ class ContextAssembler {
           ContextSubEntry(item.name.isNotEmpty ? item.name : '规则 ${i + 1}', item.text),
       ],
     );
+    push('characterSystem', '角色系统提示词', character.systemPrompt);
     push('character', '角色卡', characterText);
-    push('postHistory', '剧情后注', character.postHistoryInstructions);
     push(
       'worldbookConstant',
       '世界书·常驻',
@@ -287,6 +341,21 @@ class ContextAssembler {
       attachmentRows.map((m) => m.content).join('\n\n'),
       sub: [for (final m in attachmentRows) ContextSubEntry(_attachmentLabel(m), m.content)],
     );
+    // 历史后指令是 messages 尾部的合成提醒,分段顺序排在全部历史之后。
+    if (recentMessages.isNotEmpty) {
+      push('postHistory', '历史后指令', character.postHistoryInstructions);
+    }
+    if (rewriteText != null) {
+      push(
+        'rewrite',
+        '重写要求',
+        rewriteText,
+        sub: [
+          ContextSubEntry('上一版回复', rewrite!.previousReply),
+          ContextSubEntry('修改要求', rewrite.instruction),
+        ],
+      );
+    }
 
     segmentSources['preset'] = preset;
     segmentSources['rules'] = rules;

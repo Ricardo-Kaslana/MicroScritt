@@ -71,6 +71,10 @@ class ChatState {
   /// 最近一次可展示的错误(错误横幅);null 表示无。
   final String? error;
 
+  /// 一次性瞬态通知:非错误的轻量状态提示(如自动压缩未完成),由 UI 在
+  /// 闪示后调用 `clearNotice()` 消费。null 表示无待展示通知。
+  final String? notice;
+
   /// 备用模型建议:生成失败且错误属于"换模型可能有用"
   /// (contentFlag/quota/gatewayPolicy)、当前 provider 目录还有其它模型时,
   /// 控制器在此放入备用模型的展示名 —— 灵动岛错误横幅随之给出「切换备用
@@ -161,6 +165,7 @@ class ChatState {
     this.worldbook = const [],
     this.streaming = false,
     this.error,
+    this.notice,
     this.fallbackModelHint,
     this.contractDriftWarning = false,
     this.inputTokens = 0,
@@ -198,6 +203,7 @@ class ChatState {
     List<WorldbookEntry>? worldbook,
     bool? streaming,
     Object? error = _unset,
+    Object? notice = _unset,
     Object? fallbackModelHint = _unset,
     bool? contractDriftWarning,
     int? inputTokens,
@@ -229,6 +235,7 @@ class ChatState {
     worldbook: worldbook ?? this.worldbook,
     streaming: streaming ?? this.streaming,
     error: identical(error, _unset) ? this.error : error as String?,
+    notice: identical(notice, _unset) ? this.notice : notice as String?,
     fallbackModelHint: identical(fallbackModelHint, _unset)
         ? this.fallbackModelHint
         : fallbackModelHint as String?,

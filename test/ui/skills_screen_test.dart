@@ -24,6 +24,14 @@ void main() {
     child: const MaterialApp(home: SkillsScreen()),
   );
 
+  /// 「从世界书导入」收在右上角三点菜单里,先开菜单再点动作。
+  Future<void> openWorldbookImport(WidgetTester tester) async {
+    await tester.tap(find.byTooltip('更多操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('从世界书导入'));
+    await tester.pump();
+  }
+
   testWidgets('empty state shows guidance', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -158,7 +166,7 @@ void main() {
     await tester.pump();
 
     // 打开导入入口 → 选择角色。(DB 查询需 runAsync 窗口驱动)
-    await tester.tap(find.byTooltip('从世界书导入'));
+    await openWorldbookImport(tester);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));
@@ -226,7 +234,7 @@ void main() {
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
     await tester.pump();
 
-    await tester.tap(find.byTooltip('从世界书导入'));
+    await openWorldbookImport(tester);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));
@@ -267,7 +275,7 @@ void main() {
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
     await tester.pump();
 
-    await tester.tap(find.byTooltip('从世界书导入'));
+    await openWorldbookImport(tester);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));

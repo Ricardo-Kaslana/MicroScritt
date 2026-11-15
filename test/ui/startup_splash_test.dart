@@ -51,33 +51,48 @@ void main() {
     expect(tester.state<_ProbeState>(find.byKey(probeKey)), same(stateBefore));
   });
 
-  testWidgets('tapping during playback skips it and does not reach the child', (
-    tester,
-  ) async {
-    var taps = 0;
-    await tester.pumpWidget(
-      _app(
-        home: Scaffold(
-          body: Center(
-            child: FilledButton(
-              onPressed: () => taps++,
-              child: const Text('target'),
+  testWidgets(
+    'tapping during playback fades out and does not reach the child',
+    (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(
+        _app(
+          home: Scaffold(
+            body: Center(
+              child: FilledButton(
+                onPressed: () => taps++,
+                child: const Text('target'),
+              ),
             ),
           ),
         ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(find.byKey(StartupSplash.overlayKey), findsOneWidget);
+      );
+      await tester.pump(const Duration(milliseconds: 900));
+      expect(find.byKey(StartupSplash.overlayKey), findsOneWidget);
+      expect(find.text('轻点任意处跳过'), findsOneWidget);
 
-    // 点击落在 child 的按钮位置,但应先被 overlay 拦截并视为跳过。
-    await tester.tap(find.text('target'), warnIfMissed: false);
-    await tester.pump();
-    expect(find.byKey(StartupSplash.overlayKey), findsNothing);
-    expect(taps, 0);
+      // 点击落在 child 的按钮位置,但应先被 overlay 拦截并视为跳过。
+      await tester.tap(find.text('target'), warnIfMissed: false);
+      await tester.pump();
+      // 跳过不再硬切:overlay 用 150ms 淡出,期间仍拦截点击。
+      expect(find.byKey(StartupSplash.overlayKey), findsOneWidget);
+      await tester.tap(find.text('target'), warnIfMissed: false);
+      await tester.pump(const Duration(milliseconds: 160));
+      await tester.pump();
+      expect(find.byKey(StartupSplash.overlayKey), findsNothing);
+      expect(taps, 0);
 
-    await tester.tap(find.text('target'));
-    expect(taps, 1);
+      await tester.tap(find.text('target'));
+      expect(taps, 1);
+    },
+  );
+
+  testWidgets('app name follows the system text scale', (tester) async {
+    await tester.pumpWidget(_app());
+    await tester.pump(const Duration(milliseconds: 1300));
+    final word = tester.widget<Text>(find.text('MicroScritt'));
+    // null = 跟随 MediaQuery;固定 noScaling 会让超大字号用户也看到小字。
+    expect(word.textScaler, isNull);
   });
 
   testWidgets('skips playback when the platform disables animations', (

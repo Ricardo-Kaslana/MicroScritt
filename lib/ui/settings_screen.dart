@@ -10,14 +10,18 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'common/confirm_dialog.dart';
+import 'common/empty_state.dart';
 import 'common/info_button.dart';
 import 'common/section_header.dart';
 import '../data/app_config_file.dart';
 import '../data/app_settings_repository.dart';
 import '../data/llm_provider_repository.dart';
 import '../data/user_repository.dart';
+import '../engine/context_budget.dart';
 import '../models/app_settings.dart';
 import '../models/image_config.dart';
+import '../models/image_style_preset.dart';
 import '../models/llm_provider.dart';
 import '../state/app_config_sync.dart';
 import '../state/providers.dart';
@@ -26,6 +30,7 @@ import 'common/pick_file_bytes.dart';
 import 'hooks_screen.dart';
 import 'image_provider_edit_screen.dart';
 import 'image_plugins_screen.dart';
+import 'image_styles_screen.dart';
 import 'regex_scripts_screen.dart';
 import 'prompt_items_screen.dart';
 import 'provider_edit_screen.dart';
@@ -45,15 +50,20 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  /// 触发线滑块的拖动草稿:拖动时只更新内存(即时反馈),松手才落库。
+  double? _compactThresholdDraft;
+
   Future<void> _setTheme(AppThemeMode mode) async {
     final settings = ref.read(appSettingsProvider).copyWith(themeMode: mode);
     await ref.read(appSettingsRepositoryProvider).save(settings);
     ref.read(appSettingsProvider.notifier).state = settings;
   }
 
-  /// 压缩/后台轮次设置统一落库(自动压缩为总开关,三挡阈值是固定策略不入库)。
+  /// 压缩/后台轮次设置统一落库(自动压缩总开关与触发线入库;目标挡与
+  /// 硬挡派生规则仍为固定策略)。
   Future<void> _setTurnSettings({
     bool? autoCompactEnabled,
+    double? autoCompactThreshold,
     int? imageInterval,
     int? maxAutoAttachments,
   }) async {
@@ -61,6 +71,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         .read(appSettingsProvider)
         .copyWith(
           autoCompactEnabled: autoCompactEnabled,
+          autoCompactThreshold: autoCompactThreshold == null
+              ? null
+              : AppSettings.clampAutoCompactThreshold(autoCompactThreshold),
           imageInterval: imageInterval,
           maxAutoAttachments: maxAutoAttachments,
         );
@@ -69,23 +82,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   /// 「上下文自动压缩」的三挡详细说明弹层(设置页副标题只留一行短文案,
-  /// 细节经标题旁的信息按钮进入这里)。
+  /// 细节经标题旁的信息按钮进入这里)。触发线与派生硬挡按当前配置展示。
   void _showAutoCompactHelp(BuildContext context) {
+    final threshold = ref.read(appSettingsProvider).autoCompactThreshold;
+    final softPct = (threshold * 100).round();
+    final hardPct = (ContextBudgetPolicy.hardFor(threshold) * 100).round();
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('上下文自动压缩 · 三挡说明'),
-        content: const Column(
+        content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('• 目标挡 20%:每次压缩把活跃历史压回约 20% 占用'),
+            const Text('• 目标挡 20%:每次压缩把活跃历史压回约 20% 占用'),
             SizedBox(height: 6),
-            Text('• 软挡 60%:回复落库后占用达 60%,自动摘要压缩'),
+            Text('• 自动触发线 $softPct%:回复落库后占用达 $softPct%,自动摘要压缩'
+                '(可在本页调整 30%–90%)'),
             SizedBox(height: 6),
-            Text('• 硬挡 80%:发送前预算检测(输入+输出预留)超容量 80%,先压缩再发'),
+            Text('• 发送前强制线 $hardPct%:发送前预算检测(输入+输出预留)'
+                '超容量 $hardPct%,先压缩再发'),
             SizedBox(height: 10),
-            Text('摘要失败自动重试 3 次;仍放不下时折叠最老的超限消息兜底(原文保留在会话存档)。关闭后仍可手动 /compact。'),
+            const Text('摘要失败自动重试 3 次;仍放不下时折叠最老的超限消息兜底(原文保留在会话存档)。关闭后仍可手动 /compact。'),
+            SizedBox(height: 6),
+            const Text('模型上下文容量未配置时按 16384 兜底估算,长上下文模型会因此提前压缩;建议在 Provider 设置中填写真实容量。'),
           ],
         ),
         actions: [
@@ -127,23 +147,61 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _exportConfig() async {
     final text = await AppConfigFile.snapshotText(ref.read(databaseProvider));
     if (!mounted) return;
-    await saveJsonFile(context, fileName: AppConfigFile.fileName, content: text);
+    await saveJsonFile(
+      context,
+      fileName: AppConfigFile.fileName,
+      content: text,
+    );
   }
 
   /// 手动导入配置文件:应用后覆盖固定配置文件,并刷新用户/后端/设置的内存快照。
   Future<void> _importConfig() async {
-    final picked = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['json']);
-    final bytes = await pickedFileBytes(picked?.files.single);
-    if (bytes == null) return;
+    final picked = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+    );
+    // 系统文件选择器的返回键是标准取消路径,取消不是失败。
+    if (picked == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..removeCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('已取消导入')));
+      return;
+    }
+    final bytes = await pickedFileBytes(picked.files.single);
+    if (bytes == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..removeCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('导入失败:未读取到所选文件')));
+      return;
+    }
+    if (!mounted) return;
+    // 导入是覆盖式写入(用户名 + 全部 provider),不确认就直接替换属于
+    // 不可逆的意外丢失;先让用户知道后果再动手。
+    final confirmed = await showConfirmDialog(
+      context,
+      title: '导入配置?',
+      message: '将覆盖当前用户名与全部 LLM Provider(含 API Key)。建议先导出备份。',
+      confirmLabel: '导入',
+    );
+    if (!confirmed || !mounted) return;
     final db = ref.read(databaseProvider);
     try {
-      final applied = await AppConfigFile.applyText(db, utf8.decode(bytes, allowMalformed: true));
+      final applied = await AppConfigFile.applyText(
+        db,
+        utf8.decode(bytes, allowMalformed: true),
+      );
       final file = ref.read(appConfigFileProvider);
       if (file != null) await file.writeSnapshot(db);
-      ref.read(userProfileProvider.notifier).state = await UserRepository(db).load();
+      ref.read(userProfileProvider.notifier).state = await UserRepository(
+        db,
+      ).load();
       ref.invalidate(llmProvidersProvider);
-      ref.read(backendConfigProvider.notifier).state = await LlmProviderRepository(db).loadBackendConfig();
-      ref.read(appSettingsProvider.notifier).state = await AppSettingsRepository(db).load();
+      ref.read(backendConfigProvider.notifier).state =
+          await LlmProviderRepository(db).loadBackendConfig();
+      ref.read(appSettingsProvider.notifier).state =
+          await AppSettingsRepository(db).load();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -155,23 +213,35 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       );
     } on FormatException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导入失败:${e.message}')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('导入失败:${e.message}')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导入失败:$e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('导入失败:$e')));
     }
   }
 
   Future<void> _copyConfigPath(String path) async {
     await Clipboard.setData(ClipboardData(text: path));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('配置文件路径已复制')));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('配置文件路径已复制')));
   }
 
   @override
   Widget build(BuildContext context) {
     final appSettings = ref.watch(appSettingsProvider);
     final backgroundBlur = ref.watch(chatBackgroundBlurProvider);
+    final compactThreshold = AppSettings.clampAutoCompactThreshold(
+      _compactThresholdDraft ?? appSettings.autoCompactThreshold,
+    );
+    final compactSoftPct = (compactThreshold * 100).round();
+    final compactHardPct = (ContextBudgetPolicy.hardFor(compactThreshold) * 100)
+        .round();
     final configFile = ref.watch(appConfigFileProvider);
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
@@ -255,6 +325,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                     Expanded(
                       child: Slider(
+                        key: const ValueKey('chatBackgroundBlurSlider'),
                         value: backgroundBlur,
                         min: 0,
                         max: 32,
@@ -295,9 +366,55 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     InfoButton(onTap: () => _showAutoCompactHelp(context)),
                   ],
                 ),
-                subtitle: const Text('按窗口占用率三挡自动压缩'),
+                subtitle: Text('按窗口占用率自动压缩 · 触发线 $compactSoftPct%'),
                 value: appSettings.autoCompactEnabled,
                 onChanged: (v) => _setTurnSettings(autoCompactEnabled: v),
+              ),
+              // 触发线行:关闭自动压缩时整段置灰;拖动只更新内存(即时反馈),
+              // 松手才落库。发送前强制线由触发线派生(≥80%,且晚 5 个百分点)。
+              ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 14),
+                leading: const SizedBox.shrink(),
+                title: const Text('自动压缩触发线'),
+                subtitle: Text(
+                  '窗口占用达 $compactSoftPct% 后,回复落库时自动摘要'
+                  ' · 发送前强制线 $compactHardPct%',
+                ),
+                trailing: Text(
+                  '$compactSoftPct%',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: appSettings.autoCompactEnabled
+                        ? Theme.of(context).colorScheme.onSurfaceVariant
+                        : Theme.of(context).colorScheme.onSurfaceVariant
+                              .withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+                child: Slider(
+                  key: const ValueKey('autoCompactThresholdSlider'),
+                  value: compactThreshold,
+                  min: AppSettings.minAutoCompactThreshold,
+                  max: AppSettings.maxAutoCompactThreshold,
+                  divisions: 12,
+                  label: '$compactSoftPct%',
+                  onChanged: appSettings.autoCompactEnabled
+                      ? (v) => setState(
+                          () => _compactThresholdDraft =
+                              AppSettings.clampAutoCompactThreshold(v),
+                        )
+                      : null,
+                  onChangeEnd: appSettings.autoCompactEnabled
+                      ? (v) {
+                          setState(() => _compactThresholdDraft = null);
+                          _setTurnSettings(
+                            autoCompactThreshold:
+                                AppSettings.clampAutoCompactThreshold(v),
+                          );
+                        }
+                      : null,
+                ),
               ),
               ListTile(
                 contentPadding: const EdgeInsets.symmetric(horizontal: 14),
@@ -427,31 +544,37 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           // 用户名与 LLM 后端另存一份纯文本配置文件(启动读取、修改回写),
           // 这里提供手动导出/导入,方便换机与外部编辑。
           const SectionHeader('配置', icon: Icons.settings_outlined),
-          GroupCard(children: [
-            ListTile(
-              leading: const Icon(Icons.file_download_outlined),
-              title: const Text('导出配置'),
-              subtitle: const Text('用户名与 LLM 后端(含 API Key,请妥善保管)'),
-              onTap: _exportConfig,
-            ),
-            ListTile(
-              leading: const Icon(Icons.file_upload_outlined),
-              title: const Text('导入配置'),
-              subtitle: const Text('从 JSON 文件恢复,覆盖当前用户名与 LLM 后端'),
-              onTap: _importConfig,
-            ),
-            ListTile(
-              leading: const Icon(Icons.folder_outlined),
-              title: const Text('配置文件'),
-              subtitle: Text(
-                configFile?.path ?? '未启用',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+          GroupCard(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.file_download_outlined),
+                title: const Text('导出配置'),
+                subtitle: const Text('用户名与 LLM 后端(含 API Key,请妥善保管)'),
+                onTap: _exportConfig,
               ),
-              trailing: configFile == null ? null : const Icon(Icons.copy, size: 18),
-              onTap: configFile == null ? null : () => _copyConfigPath(configFile.path),
-            ),
-          ]),
+              ListTile(
+                leading: const Icon(Icons.file_upload_outlined),
+                title: const Text('导入配置'),
+                subtitle: const Text('从 JSON 文件恢复,覆盖当前用户名与 LLM 后端'),
+                onTap: _importConfig,
+              ),
+              ListTile(
+                leading: const Icon(Icons.folder_outlined),
+                title: const Text('配置文件'),
+                subtitle: Text(
+                  configFile?.path ?? '未启用',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: configFile == null
+                    ? null
+                    : const Icon(Icons.copy, size: 18),
+                onTap: configFile == null
+                    ? null
+                    : () => _copyConfigPath(configFile.path),
+              ),
+            ],
+          ),
           const SizedBox(height: 16),
           // ===== 关于 =====
           const SectionHeader('关于', icon: Icons.info_outline),
@@ -488,24 +611,12 @@ class _ProviderSection extends ConsumerWidget {
     WidgetRef ref,
     LlmProviderConfig p,
   ) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('删除 Provider'),
-        content: Text('确认删除 "${p.displayName}" 及其全部模型?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: '删除 Provider?',
+      message: '「${p.displayName}」及其全部模型都会被删除。',
     );
-    if (confirmed != true || !context.mounted) return;
+    if (!confirmed || !context.mounted) return;
     final wasActive = p.isActive;
     await ref.read(llmProviderRepositoryProvider).deleteProvider(p.id);
     if (wasActive) {
@@ -522,7 +633,6 @@ class _ProviderSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final providersAsync = ref.watch(llmProvidersProvider);
-    final scheme = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -531,15 +641,25 @@ class _ProviderSection extends ConsumerWidget {
             padding: EdgeInsets.all(16),
             child: Center(child: CircularProgressIndicator()),
           ),
-          error: (e, _) =>
-              Text('加载失败:$e', style: TextStyle(color: scheme.error)),
+          error: (e, _) => EmptyState(
+            compact: true,
+            icon: Icons.error_outline,
+            title: '加载失败',
+            message: '$e',
+            action: FilledButton.tonalIcon(
+              onPressed: () => ref.invalidate(llmProvidersProvider),
+              icon: const Icon(Icons.refresh),
+              label: const Text('重试'),
+            ),
+          ),
           data: (providers) {
             if (providers.isEmpty) {
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(
-                  '还没有配置任何 LLM provider,点击"添加 Provider"开始。',
-                  style: TextStyle(color: scheme.outline),
+              return const SurfaceCard(
+                child: EmptyState(
+                  compact: true,
+                  icon: Icons.dns_outlined,
+                  title: '暂无 LLM Provider',
+                  message: '还没有配置任何 LLM provider,点击"添加 Provider"开始。',
                 ),
               );
             }
@@ -556,7 +676,7 @@ class _ProviderSection extends ConsumerWidget {
                     ).then((_) => ref.invalidate(llmProvidersProvider)),
                     onDelete: () => _deleteProvider(context, ref, p),
                   ),
-                  if (i != providers.length - 1) const Divider(height: 8),
+                  if (i != providers.length - 1) const SizedBox(height: 8),
                 ],
               ],
             );
@@ -629,24 +749,12 @@ class _ImageProviderSection extends ConsumerWidget {
     WidgetRef ref,
     ImageProviderRecord p,
   ) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('删除生图配置'),
-        content: Text('确认删除 "${p.displayName}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: '删除生图配置?',
+      message: '「${p.displayName}」及其连接参数都会被删除。',
     );
-    if (confirmed != true || !context.mounted) return;
+    if (!confirmed || !context.mounted) return;
     final repo = ref.read(imageConfigRepositoryProvider);
     await repo.deleteProvider(p.id);
     // 删掉的若是当前在用那套,repository 会顺位补一条为活跃 —— 重解析让运行
@@ -667,7 +775,17 @@ class _ImageProviderSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final providersAsync = ref.watch(imageProvidersProvider);
-    final scheme = Theme.of(context).colorScheme;
+    final activeConfig = ref.watch(imageConfigProvider);
+    // 新建自定义风格时用当前生效参数预填;未配置生图时给空初值。
+    final stylePrefill = ImageStylePreset(
+      name: '',
+      artist: activeConfig?.artist,
+      sampler: activeConfig?.sampler,
+      noiseSchedule: activeConfig?.noiseSchedule,
+      scale: activeConfig?.scale,
+      cfg: activeConfig?.cfg,
+      negative: activeConfig?.negative,
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -676,15 +794,25 @@ class _ImageProviderSection extends ConsumerWidget {
             padding: EdgeInsets.all(16),
             child: Center(child: CircularProgressIndicator()),
           ),
-          error: (e, _) =>
-              Text('加载失败:$e', style: TextStyle(color: scheme.error)),
+          error: (e, _) => EmptyState(
+            compact: true,
+            icon: Icons.error_outline,
+            title: '加载失败',
+            message: '$e',
+            action: FilledButton.tonalIcon(
+              onPressed: () => ref.invalidate(imageProvidersProvider),
+              icon: const Icon(Icons.refresh),
+              label: const Text('重试'),
+            ),
+          ),
           data: (providers) {
             if (providers.isEmpty) {
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(
-                  '还没有配置生图服务,点击"添加生图配置"开始。',
-                  style: TextStyle(color: scheme.outline),
+              return const SurfaceCard(
+                child: EmptyState(
+                  compact: true,
+                  icon: Icons.image_outlined,
+                  title: '暂无生图服务',
+                  message: '还没有配置生图服务,点击"添加生图配置"开始。',
                 ),
               );
             }
@@ -702,7 +830,7 @@ class _ImageProviderSection extends ConsumerWidget {
                     onDelete: () => _delete(context, ref, p),
                     onSetActive: () => _setActive(ref, p),
                   ),
-                  if (i != providers.length - 1) const Divider(height: 8),
+                  if (i != providers.length - 1) const SizedBox(height: 8),
                 ],
               ],
             );
@@ -725,6 +853,18 @@ class _ImageProviderSection extends ConsumerWidget {
           ),
           icon: const Icon(Icons.extension_outlined),
           label: const Text('管理生图插件'),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          // 风格此前只能从生图配置编辑页底部进入;设置页给出直达入口。
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ImageStylesScreen(prefill: stylePrefill),
+            ),
+          ),
+          icon: const Icon(Icons.palette_outlined),
+          label: const Text('管理自定义风格'),
         ),
       ],
     );

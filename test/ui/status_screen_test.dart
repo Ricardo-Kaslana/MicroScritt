@@ -101,9 +101,13 @@ void main() {
       expect(find.text('8/10'), findsOneWidget);
       expect(find.text('记忆'), findsOneWidget);
       expect(find.textContaining('玩家在酒馆救了 Alice'), findsOneWidget);
-      // 记忆的两项主动维护动作作为卡片内操作行展示(不再是与卡片分离的按钮行)。
-      expect(find.text('依据全部对话重生成'), findsOneWidget);
+      // 「应用到上下文」仍是卡内操作行;重生成收进标题行三点菜单。
       expect(find.text('应用到上下文'), findsOneWidget);
+      expect(find.text('重新生成'), findsNothing);
+      await tester.tap(find.byTooltip('记忆操作'));
+      await tester.pumpAndSettle();
+      expect(find.text('重新生成'), findsOneWidget);
+      expect(find.text('清空'), findsOneWidget);
       await tester.runAsync(() => db.db.close());
     },
   );
@@ -157,10 +161,7 @@ void main() {
     expect(find.textContaining('尚无记忆'), findsOneWidget);
     // 清库不重算冻结副本:上下文仍保留旧版本,由「应用到上下文」显式换新。
     expect(find.text('记忆已清空,上下文仍保留旧版本'), findsOneWidget);
-    expect(
-      container.read(chatControllerProvider).frozenMemory,
-      '会被清掉的记忆',
-    );
+    expect(container.read(chatControllerProvider).frozenMemory, '会被清掉的记忆');
     await tester.runAsync(() => db.db.close());
   });
 
@@ -604,7 +605,7 @@ void main() {
     await tester.pump();
 
     // 状态卡标题与默认启用的开关(后台卡的第一个 Switch)。
-    expect(find.text('后台agent'), findsOneWidget);
+    expect(find.text('后台引擎'), findsOneWidget);
     final switchWidget = tester.widget<Switch>(find.byType(Switch).first);
     expect(switchWidget.value, isTrue);
 
@@ -989,9 +990,9 @@ void main() {
 
     // 即使摘要很长,状态卡顶部的图标、标题、开关仍保持同一行(垂直居中)。
     final statusCard = find
-        .ancestor(of: find.text('后台agent'), matching: find.byType(Card))
+        .ancestor(of: find.text('后台引擎'), matching: find.byType(Card))
         .first;
-    final titleY = tester.getCenter(find.text('后台agent')).dy;
+    final titleY = tester.getCenter(find.text('后台引擎')).dy;
     final iconY = tester
         .getCenter(
           find.descendant(
@@ -1245,6 +1246,12 @@ void main() {
       () => find.textContaining('尚未写入变量').evaluate().isNotEmpty,
     );
 
+    // 空态动作与记忆/生图指导同一语言:卡内操作行而非独立按钮。
+    expect(
+      find.ancestor(of: find.text('新增变量'), matching: find.byType(GroupCard)),
+      findsOneWidget,
+    );
+
     await tester.tap(find.text('新增变量'));
     await tester.pumpAndSettle();
     // 底单的字段标签(空态按钮与底单标题同名,故用标签定位)。
@@ -1468,9 +1475,8 @@ void main() {
       () => find.byIcon(Icons.more_vert).evaluate().isNotEmpty,
     );
 
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('已删除 (1)'));
+    // 回收站改为区块标题行的常驻角标入口,不再进三点菜单。
+    await tester.tap(find.byTooltip('已删除的变量(1)'));
     await tester.pumpAndSettle();
     expect(find.text('已删除的变量'), findsOneWidget);
     await tester.tap(find.byTooltip('恢复变量'));
@@ -1501,9 +1507,7 @@ void main() {
       () => find.byIcon(Icons.more_vert).evaluate().isNotEmpty,
     );
 
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('已删除 (1)'));
+    await tester.tap(find.byTooltip('已删除的变量(1)'));
     await tester.pumpAndSettle();
     expect(find.text('已删除的变量'), findsOneWidget);
 
@@ -1537,9 +1541,7 @@ void main() {
       () => find.byIcon(Icons.more_vert).evaluate().isNotEmpty,
     );
 
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('已删除 (2)'));
+    await tester.tap(find.byTooltip('已删除的变量(2)'));
     await tester.pumpAndSettle();
     expect(find.text('已删除的变量'), findsOneWidget);
 
@@ -1617,10 +1619,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final sheet = find.byType(BottomSheet);
-    final search = find.descendant(
-      of: sheet,
-      matching: find.byType(TextField),
-    );
+    final search = find.descendant(of: sheet, matching: find.byType(TextField));
     // 行内容用 ListTile 定位:检索框自身也含输入文本,不能用裸 find.text。
     Finder row(String text) => find.descendant(
       of: sheet,

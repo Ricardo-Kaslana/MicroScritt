@@ -6,6 +6,7 @@ import 'package:microscritt/ui/common/app_search_field.dart';
 import 'package:microscritt/ui/common/confirm_dialog.dart';
 import 'package:microscritt/ui/common/empty_state.dart';
 import 'package:microscritt/ui/common/searchable_list.dart';
+import 'package:microscritt/ui/common/unsaved_changes_guard.dart';
 
 void main() {
   testWidgets('EmptyState renders icon, title, message and action', (
@@ -27,6 +28,88 @@ void main() {
     expect(find.text('暂无角色'), findsOneWidget);
     expect(find.text('导入一张角色卡开始'), findsOneWidget);
     expect(find.text('导入'), findsOneWidget);
+  });
+
+  testWidgets('SearchableList no-match state clears the query', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SearchableList<String>(
+            items: const ['alpha', 'beta'],
+            searchText: (s) => s,
+            itemBuilder: (context, s) => Text(s),
+          ),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), 'gamma');
+    await tester.pumpAndSettle();
+    expect(find.text('没有匹配项'), findsOneWidget);
+    expect(find.text('清除搜索'), findsOneWidget);
+
+    await tester.tap(find.text('清除搜索'));
+    await tester.pumpAndSettle();
+    expect(find.text('alpha'), findsOneWidget);
+    expect(find.text('beta'), findsOneWidget);
+  });
+
+  testWidgets('UnsavedChangesGuard asks before discarding changes', (
+    tester,
+  ) async {
+    final controller = TextEditingController(text: 'initial');
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: ElevatedButton(
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => UnsavedChangesGuard(
+                      hasChanges: () => controller.text != 'initial',
+                      changes: [controller],
+                      child: Scaffold(
+                        appBar: AppBar(),
+                        body: TextField(controller: controller),
+                      ),
+                    ),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    // 无修改:返回直接退出,不弹确认。
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(find.text('open'), findsOneWidget);
+
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+
+    expect(find.text('放弃未保存的修改?'), findsOneWidget);
+    // 取消:留在编辑页。
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsOneWidget);
+
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('放弃修改'));
+    await tester.pumpAndSettle();
+    expect(find.text('open'), findsOneWidget);
   });
 
   testWidgets('confirm dialog returns true when confirmed', (tester) async {

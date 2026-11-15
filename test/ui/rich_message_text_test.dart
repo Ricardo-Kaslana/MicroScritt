@@ -90,6 +90,57 @@ void main() {
       expect(children.length, 1);
       expect(children[0].style?.fontStyle, isNull);
     });
+
+    testWidgets('引号内的样式标记在台词内生效且不泄漏标签', (tester) async {
+      await tester.pumpWidget(wrap(const RichMessageText(
+        text: '她说“前<b>加粗</b>后”然后离开。',
+        style: TextStyle(color: Colors.black),
+      )));
+      final spanList = _childSpans(_firstText(tester));
+      expect(
+        spanList.map((s) => s.text).whereType<String>().join(),
+        '她说“前加粗后”然后离开。',
+      );
+      expect(spanList.any((s) => (s.text ?? '').contains('<')), isFalse);
+      final bold = spanList.firstWhere((s) => s.text == '加粗');
+      expect(bold.style?.fontWeight, FontWeight.bold);
+      // 台词内的加粗段仍保留对话的斜体强调。
+      expect(bold.style?.fontStyle, FontStyle.italic);
+    });
+
+    testWidgets('引号内未闭合标记在引号结束处收敛', (tester) async {
+      await tester.pumpWidget(wrap(const RichMessageText(
+        text: '“前<u>下</u>后<b>未闭”尾',
+        style: TextStyle(color: Colors.black),
+      )));
+      final spanList = _childSpans(_firstText(tester));
+      expect(
+        spanList.map((s) => s.text).whereType<String>().join(),
+        '“前下后未闭”尾',
+      );
+      expect(spanList.any((s) => (s.text ?? '').contains('<')), isFalse);
+      final tail = spanList.last;
+      expect(tail.text, '尾');
+      // 引号内未闭合的加粗不泄漏到引号外的叙述。
+      expect(tail.style?.fontWeight, isNull);
+      expect(tail.style?.fontStyle, isNull);
+    });
+
+    testWidgets('对话高亮关闭时引号内的标记仍解析', (tester) async {
+      await tester.pumpWidget(wrap(const RichMessageText(
+        text: '她说“<b>你好</b>”',
+        style: TextStyle(color: Colors.black),
+        highlightDialogue: false,
+      )));
+      final spanList = _childSpans(_firstText(tester));
+      expect(
+        spanList.map((s) => s.text).whereType<String>().join(),
+        '她说“你好”',
+      );
+      final bold = spanList.firstWhere((s) => s.text == '你好');
+      expect(bold.style?.fontWeight, FontWeight.bold);
+      expect(bold.style?.fontStyle, isNot(FontStyle.italic));
+    });
   });
 
   group('RichMessageText 样式标记', () {
@@ -204,6 +255,24 @@ void main() {
       expect(_childSpans(_firstText(tester)).single.style?.fontWeight, FontWeight.bold);
     });
 
+    testWidgets('加粗正则命中中文引号内的文本', (tester) async {
+      await tester.pumpWidget(wrap(RichMessageText(
+        text: '她说“**你好**”然后离开。',
+        style: const TextStyle(color: Colors.black),
+        scripts: compileDisplayScripts(const [
+          RegexScript(name: '加粗动作', findRegex: r'\*\*(.+?)\*\*', replace: r'<b>$1</b>'),
+        ]),
+      )));
+      final spanList = _childSpans(_firstText(tester));
+      expect(
+        spanList.map((s) => s.text).whereType<String>().join(),
+        '她说“你好”然后离开。',
+      );
+      expect(spanList.any((s) => (s.text ?? '').contains('<')), isFalse);
+      final bold = spanList.firstWhere((s) => s.text == '你好');
+      expect(bold.style?.fontWeight, FontWeight.bold);
+    });
+
     testWidgets('空正文返回零尺寸占位', (tester) async {
       await tester.pumpWidget(wrap(const RichMessageText(
         text: '',
@@ -316,6 +385,34 @@ void main() {
       )));
       expect(find.text('2024年·秋'), findsOneWidget);
       expect(find.textContaining('<chip>'), findsNothing);
+    });
+
+    testWidgets('引号内的 chip 不拆块,标记在台词内剥除', (tester) async {
+      await tester.pumpWidget(wrap(const RichMessageText(
+        text: '她说“<chip>时间</chip>你好”然后离开。',
+        style: TextStyle(color: Colors.black),
+      )));
+      // 台词保持整句:不出现居中胶囊块,也不出现半个引号。
+      expect(
+        find.descendant(of: find.byType(RichMessageText), matching: find.byType(Column)),
+        findsNothing,
+      );
+      final spanList = _childSpans(_firstText(tester));
+      expect(
+        spanList.map((s) => s.text).whereType<String>().join(),
+        '她说“时间你好”然后离开。',
+      );
+      expect(find.textContaining('<chip>'), findsNothing);
+    });
+
+    testWidgets('胶囊标签里的样式标记按字面剥除', (tester) async {
+      await tester.pumpWidget(wrap(const RichMessageText(
+        text: '<chip><b>时间</b></chip>正文',
+        style: TextStyle(color: Colors.black),
+      )));
+      expect(find.text('时间'), findsOneWidget);
+      expect(find.text('正文'), findsOneWidget);
+      expect(find.textContaining('<b>'), findsNothing);
     });
 
     testWidgets('无 chip 时维持单 Text 路径(不引入块布局)', (tester) async {

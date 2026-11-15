@@ -22,17 +22,22 @@ class _ErrorBackend implements LlmBackend {
   String get id => 'fake';
 
   @override
-  Stream<LlmEvent> generate(LlmRequest request) => Stream.fromIterable(const [ErrorEvent('boom'), DoneEvent()]);
+  Stream<LlmEvent> generate(LlmRequest request) =>
+      Stream.fromIterable(const [ErrorEvent('boom'), DoneEvent()]);
 }
 
 void main() {
-  testWidgets('renders rounded input bar with hint and send button', (tester) async {
+  testWidgets('renders rounded input bar with hint and send button', (
+    tester,
+  ) async {
     late final AppDatabase db;
     late final int sessionId;
     late final int charId;
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       sessionId = await SessionRepository(db).create(charId, 's');
     });
     await tester.pumpWidget(
@@ -58,15 +63,76 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('long-press on a message opens the copy/delete sheet', (tester) async {
+  testWidgets(
+    'send button enables only after non-whitespace input; field starts single-line',
+    (tester) async {
+      // 重写后的输入区:消息框默认一行高,发送键随有效输入启用(纯空白不启用,
+      // 与发送端 trim 后拒发的判据一致)。
+      late final AppDatabase db;
+      late final int sessionId;
+      late final int charId;
+      await tester.runAsync(() async {
+        db = await openTestDb();
+        charId = await CharacterRepository(
+          db,
+        ).insert(const CharacterCard(name: 'Alice'));
+        sessionId = await SessionRepository(db).create(charId, 's');
+      });
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [databaseProvider.overrideWithValue(db)],
+          child: MaterialApp(
+            home: ChatScreen(
+              sessionId: sessionId,
+              characterId: charId,
+              character: const CharacterCard(name: 'Alice'),
+            ),
+          ),
+        ),
+      );
+      await tester.runAsync(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pump();
+
+      IconButton sendButton() => tester.widget<IconButton>(
+        find.widgetWithIcon(IconButton, Icons.arrow_upward_rounded),
+      );
+
+      expect(sendButton().onPressed, isNull, reason: '空输入时发送键禁用');
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).minLines,
+        1,
+        reason: '消息框默认一行高',
+      );
+
+      await tester.enterText(find.byType(TextField), '   ');
+      await tester.pump();
+      expect(sendButton().onPressed, isNull, reason: '纯空白不启用发送');
+
+      await tester.enterText(find.byType(TextField), 'hi');
+      await tester.pump();
+      expect(sendButton().onPressed, isNotNull, reason: '有效输入后发送键启用');
+
+      await tester.runAsync(() => db.db.close());
+    },
+  );
+
+  testWidgets('long-press on a message opens the copy/delete sheet', (
+    tester,
+  ) async {
     late final AppDatabase db;
     late final int sessionId;
     late final int charId;
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       sessionId = await SessionRepository(db).create(charId, 's');
-      await MessageRepository(db).append(sessionId: sessionId, role: 'user', content: '可以长按我');
+      await MessageRepository(
+        db,
+      ).append(sessionId: sessionId, role: 'user', content: '可以长按我');
     });
     await tester.pumpWidget(
       ProviderScope(
@@ -99,9 +165,13 @@ void main() {
     late final int charId;
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       sessionId = await SessionRepository(db).create(charId, 's');
-      await MessageRepository(db).append(sessionId: sessionId, role: 'user', content: '待删除消息');
+      await MessageRepository(
+        db,
+      ).append(sessionId: sessionId, role: 'user', content: '待删除消息');
     });
     await tester.pumpWidget(
       ProviderScope(
@@ -138,13 +208,88 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('deleted message can be restored from the undo snackbar', (
+    tester,
+  ) async {
+    late final AppDatabase db;
+    late final int sessionId;
+    late final int charId;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's');
+      await MessageRepository(
+        db,
+      ).append(sessionId: sessionId, role: 'user', content: '可撤销消息');
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: MaterialApp(
+          home: ChatScreen(
+            sessionId: sessionId,
+            characterId: charId,
+            character: const CharacterCard(name: 'Alice'),
+          ),
+        ),
+      ),
+    );
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+
+    await tester.longPress(find.text('可撤销消息'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除消息'));
+    await tester.runAsync(() async {
+      for (var i = 0; i < 60; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await tester.pump();
+        final msgs = await MessageRepository(db).bySession(sessionId);
+        if (msgs.isEmpty) break;
+      }
+      await tester.pump();
+    });
+    // SnackBar 入场动画走完再点动作键,避免点到移动中的位置。
+    await tester.pumpAndSettle();
+    expect(find.text('已删除消息'), findsOneWidget);
+    expect(find.text('撤销'), findsOneWidget);
+
+    await tester.tap(find.text('撤销'));
+    await tester.pump();
+    await tester.runAsync(() async {
+      // 恢复写库与列表刷新是两条异步链:先等库里有行,再给控制器多抽几帧
+      // 完成 _refreshMessages,避免只看到库已恢复、界面还没重建。
+      for (var i = 0; i < 60; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await tester.pump();
+        final msgs = await MessageRepository(db).bySession(sessionId);
+        if (msgs.isNotEmpty) {
+          for (var j = 0; j < 10; j++) {
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+            await tester.pump();
+          }
+          break;
+        }
+      }
+      await tester.pumpAndSettle();
+    });
+    expect(find.text('可撤销消息'), findsOneWidget);
+    await tester.runAsync(() => db.db.close());
+  });
+
   testWidgets('backend error shows a dismissible banner', (tester) async {
     late final AppDatabase db;
     late final int sessionId;
     late final int charId;
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       sessionId = await SessionRepository(db).create(charId, 's');
     });
     await tester.pumpWidget(
@@ -176,6 +321,7 @@ void main() {
     await tester.pump();
 
     await tester.enterText(find.byType(TextField), 'hi');
+    await tester.pump(); // 发送键在文本变化后的下一帧启用
     await tester.runAsync(() async {
       await tester.tap(find.byTooltip('发送'));
       await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -192,17 +338,25 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('@ button opens skill sheet and inserts token at cursor', (tester) async {
+  testWidgets('@ button opens skill sheet and inserts token at cursor', (
+    tester,
+  ) async {
     late final AppDatabase db;
     late final int sessionId;
     late final int charId;
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       sessionId = await SessionRepository(db).create(charId, 's');
       final repo = SkillRepository(db);
-      await repo.insert(const Skill(name: '剑术', description: '挥剑的姿势', content: '# 剑术'));
-      await repo.insert(const Skill(name: '禁用技能', enabled: false, content: 'x'));
+      await repo.insert(
+        const Skill(name: '剑术', description: '挥剑的姿势', content: '# 剑术'),
+      );
+      await repo.insert(
+        const Skill(name: '禁用技能', enabled: false, content: 'x'),
+      );
     });
     await tester.pumpWidget(
       ProviderScope(
@@ -248,15 +402,21 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('@skill token renders in the primary color inside the input', (tester) async {
+  testWidgets('@skill token renders in the primary color inside the input', (
+    tester,
+  ) async {
     late final AppDatabase db;
     late final int sessionId;
     late final int charId;
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       sessionId = await SessionRepository(db).create(charId, 's');
-      await SkillRepository(db).insert(const Skill(name: '剑术', description: '', content: '# 剑术'));
+      await SkillRepository(
+        db,
+      ).insert(const Skill(name: '剑术', description: '', content: '# 剑术'));
     });
     await tester.pumpWidget(
       ProviderScope(
@@ -281,9 +441,12 @@ void main() {
 
     final element = tester.element(find.byType(TextField));
     final primary = Theme.of(element).colorScheme.primary;
-    final span = tester.widget<TextField>(find.byType(TextField)).controller!
+    final span = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!
         .buildTextSpan(context: element, style: null, withComposing: false);
-    final children = span.children?.whereType<TextSpan>().toList() ?? const <TextSpan>[];
+    final children =
+        span.children?.whereType<TextSpan>().toList() ?? const <TextSpan>[];
     final colored = children.where((s) => s.text == '@剑术').toList();
     expect(colored, hasLength(1));
     expect(colored.single.style?.color, primary);
@@ -292,9 +455,14 @@ void main() {
     expect(children.any((s) => s.text == '看看' && s.style == null), isTrue);
 
     // 高亮只命中已启用技能名:span 中不会出现其它 @ 片段(如 @别人)。
-    final plainSpan = tester.widget<TextField>(find.byType(TextField)).controller!
+    final plainSpan = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!
         .buildTextSpan(context: element, style: null, withComposing: false);
-    expect(plainSpan.children!.whereType<TextSpan>().where((s) => s.text == '@别人'), isEmpty);
+    expect(
+      plainSpan.children!.whereType<TextSpan>().where((s) => s.text == '@别人'),
+      isEmpty,
+    );
     await tester.runAsync(() => db.db.close());
   });
 }

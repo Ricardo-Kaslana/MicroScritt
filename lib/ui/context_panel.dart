@@ -7,8 +7,10 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/context_snapshot.dart';
+import '../models/llm_units.dart';
 import '../state/chat_controller.dart';
 import 'common/empty_state.dart';
+import 'common/motion.dart';
 import 'common/section_header.dart';
 
 /// 上下文面板:展示当前会话最近一次组装的上下文(分段 + 字符数)、消息数组
@@ -20,7 +22,10 @@ import 'common/section_header.dart';
 /// 段落按缓存角色打上小标签:稳定前缀(进 system 稳定段)或消息数组(随
 /// messages 发出),未知键兜底为「通知」档;可一键全部展开/收起。
 class ContextPanel extends ConsumerStatefulWidget {
-  const ContextPanel({super.key});
+  /// 外部滚动控制器:聊天页以 [DraggableScrollableSheet] 打开时传入,
+  /// 面板列表与拖拽手势共用同一条滚动链;独立使用时为 null。
+  final ScrollController? scrollController;
+  const ContextPanel({super.key, this.scrollController});
 
   @override
   ConsumerState<ContextPanel> createState() => _ContextPanelState();
@@ -46,6 +51,7 @@ class _ContextPanelState extends ConsumerState<ContextPanel> {
         const Divider(height: 1),
         Expanded(
           child: ListView(
+            controller: widget.scrollController,
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
             children: [
               _TokensCard(chat: chat),
@@ -107,7 +113,12 @@ class _ContextPanelState extends ConsumerState<ContextPanel> {
                             minimumSize: Size.zero,
                             padding: const EdgeInsets.symmetric(horizontal: 10),
                             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                            textStyle: const TextStyle(
+                            // 按钮文字样式会替换默认 DefaultTextStyle,
+                            // 须自带主题字体,否则 Windows 中文走系统回退。
+                            textStyle: TextStyle(
+                              fontFamily: Theme.of(
+                                context,
+                              ).textTheme.labelLarge?.fontFamily,
                               fontSize: 13,
                               fontWeight: FontWeight.w600,
                             ),
@@ -192,12 +203,13 @@ class _PanelHeader extends StatelessWidget {
 
 /// 上下分段在缓存布局中的角色,决定标签文字与色调。
 enum _SegmentBucket {
-  /// 进 system 稳定段:preset / rules / character / postHistory / 常驻世界书。
+  /// 进 system 稳定段:preset / rules / characterSystem / character / 常驻世界书。
   /// 技能不进 system —— 只有 @技能名 主动触发的附件行,归 messages。
   stable,
 
   /// 随 messages 数组发出:记忆第 0 条 + 压缩摘要(数组头部合成消息)+ 会话历史
-  /// + 已落库的附件行(技能/触发世界书/压缩与记忆差异通知)。
+  /// + 已落库的附件行(技能/触发世界书/压缩与记忆差异通知)+ 历史后指令
+  /// (数组尾部合成提醒)。
   history,
 
   /// 兜底档:组装器当前不产出未知键;若出现新分段键,按「通知」标签与
@@ -209,10 +221,15 @@ enum _SegmentBucket {
 _SegmentBucket _bucketOf(String key) => switch (key) {
   'preset' ||
   'rules' ||
+  'characterSystem' ||
   'character' ||
-  'postHistory' ||
   'worldbookConstant' => _SegmentBucket.stable,
-  'memory' || 'history' || 'summary' || 'attachments' => _SegmentBucket.history,
+  'memory' ||
+  'history' ||
+  'summary' ||
+  'attachments' ||
+  'postHistory' ||
+  'rewrite' => _SegmentBucket.history,
   _ => _SegmentBucket.state,
 };
 
@@ -228,12 +245,14 @@ IconData _segmentIcon(String key) => switch (key) {
   'preset' => Icons.auto_fix_high,
   'rules' => Icons.gavel,
   'character' => Icons.person_outline,
+  'characterSystem' => Icons.tune,
   'postHistory' => Icons.notes,
   'worldbookConstant' => Icons.menu_book_outlined,
   'memory' => Icons.lightbulb_outline,
   'history' => Icons.forum_outlined,
   'summary' => Icons.compress,
   'attachments' => Icons.attach_file,
+  'rewrite' => Icons.edit_note,
   // 变量只进后台 agent 上下文,主写快照不产出 variables 分段。
   _ => Icons.article_outlined,
 };
@@ -453,22 +472,7 @@ class _SubEntryTile extends StatefulWidget {
 class _SubEntryTileState extends State<_SubEntryTile> {
   bool _expanded = false;
 
-  /// 全文内容区按下时的原始指针事件(用于绕过 SelectionArea 对手势竞技场的
-  /// 占据,让"点击可选文本也能收起"仍然生效)。
-  PointerDownEvent? _contentDown;
-
   bool get _effective => _expanded || widget.forceExpanded;
-
-  void _handleContentPointerUp(PointerUpEvent e) {
-    final down = _contentDown;
-    _contentDown = null;
-    if (down == null) return;
-    final moved = (e.position - down.position).distance;
-    final quick =
-        e.timeStamp - down.timeStamp < const Duration(milliseconds: 350);
-    // 快速轻点视为"点击收起";长按选区、拖动选择等由 SelectionArea 处理。
-    if (quick && moved <= 24) setState(() => _expanded = !_effective);
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -481,19 +485,22 @@ class _SubEntryTileState extends State<_SubEntryTile> {
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(10),
         clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: () {
-            // 全部展开模式下点击单条:只折叠这一条,其余保持展开。
-            setState(() => _expanded = !_effective);
-          },
-          child: Padding(
-            // 右侧不留内边距:三角与分段级三角共用同一条右缘线
-            // (分段行右缩进 14,子条目卡片本身已处于该缩进内)。
-            padding: const EdgeInsets.fromLTRB(10, 8, 0, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+        // 只有头部行承担展开/收起:正文区完全留给 SelectionArea 选字。
+        // 旧实现按「350ms 内、位移 ≤24px」猜测点击意图,慢一点的点按会被
+        // 当成选字而毫无反应;现在点正文只选字,点标签行才折叠。
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            InkWell(
+              onTap: () {
+                // 全部展开模式下点击单条:只折叠这一条,其余保持展开。
+                setState(() => _expanded = !_effective);
+              },
+              child: Padding(
+                // 右侧不留内边距:三角与分段级三角共用同一条右缘线
+                // (分段行右缩进 14,子条目卡片本身已处于该缩进内)。
+                padding: const EdgeInsets.fromLTRB(10, 8, 0, 8),
+                child: Row(
                   children: [
                     // 单一 flex 子组件:Expanded+Align 让胶囊左对齐、三角固定在
                     // 行右缘。此前 Flexible(默认 flex 1)与 Spacer(flex 1)平分
@@ -533,41 +540,36 @@ class _SubEntryTileState extends State<_SubEntryTile> {
                     ),
                   ],
                 ),
-                // 二级展开:折叠态不显示任何内容(整个内容区 Offstage 隐藏,finder
-                // 跳过),只留标签胶囊;展开时全文从 0 向下平滑长出(含顶部小间隙)。
-                _AnimatedReveal(
-                  visible: _effective,
-                  duration: const Duration(milliseconds: 200),
-                  childBuilder: (context) => Padding(
-                    // 头部行右侧无内边距(三角对齐用),正文单独补回右边距。
-                    padding: const EdgeInsets.only(right: 10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const SizedBox(height: 6),
-                        Listener(
-                          onPointerDown: (e) => _contentDown = e,
-                          onPointerUp: _handleContentPointerUp,
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: SelectionArea(
-                              child: Text(
-                                widget.content,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: scheme.onSurfaceVariant,
-                                  height: 1.45,
-                                ),
-                              ),
-                            ),
+              ),
+            ),
+            // 二级展开:折叠态不显示任何内容(整个内容区 Offstage 隐藏,finder
+            // 跳过),只留标签胶囊;展开时全文从 0 向下平滑长出(含顶部小间隙)。
+            _AnimatedReveal(
+              visible: _effective,
+              duration: const Duration(milliseconds: 200),
+              childBuilder: (context) => Padding(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: SelectionArea(
+                        child: Text(
+                          widget.content,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                            height: 1.45,
                           ),
                         ),
-                      ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
+          ],
         ),
       ),
     );
@@ -615,6 +617,13 @@ class _AnimatedRevealState extends State<_AnimatedReveal>
     // 收拢动画结束:重建一次,让 build 里的 shouldBuild 落到 false,
     // 释放已构建的子项(不再仅仅藏起来)。
     _controller.addStatusListener(_handleStatus);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 减弱动态效果时展开/收拢瞬时完成;媒体查询变化后下一次切换即生效。
+    _controller.duration = motionDurationOf(context, widget.duration);
   }
 
   void _handleStatus(AnimationStatus status) {
@@ -694,6 +703,11 @@ class _SelectableBlock extends StatelessWidget {
   }
 }
 
+/// token 数值展示:≥1万 时补「万/亿缩写（精确值）」,万以下保持原值。
+String _tokenValue(int tokens) => tokens >= 10000
+    ? '${formatTokenCountZh(tokens)}（$tokens）tok'
+    : '$tokens tok';
+
 /// token 用量卡片:主写/后台分账 + 缓存命中率。
 ///
 /// 数值取自 [ChatState] 的累计字段;`inputTokens == 0` 时命中率按 0% 处理
@@ -705,9 +719,6 @@ class _TokensCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final hitRate = chat.inputTokens == 0
-        ? 0.0
-        : chat.cachedInputTokens / chat.inputTokens;
     final hasBg =
         chat.backgroundInputTokens > 0 || chat.backgroundOutputTokens > 0;
     return SurfaceCard(
@@ -732,26 +743,12 @@ class _TokensCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          _row(context, '输入', '${chat.inputTokens} tok'),
-          _row(
+          ..._usageRows(
             context,
-            '缓存命中',
-            '${chat.cachedInputTokens} tok · 命中率 ${(hitRate * 100).toStringAsFixed(0)}%',
-            valueColor: chat.cachedInputTokens > 0 ? scheme.primary : null,
+            inputTokens: chat.inputTokens,
+            cachedInputTokens: chat.cachedInputTokens,
+            outputTokens: chat.outputTokens,
           ),
-          if (chat.inputTokens > 0)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(3),
-                child: LinearProgressIndicator(
-                  value: hitRate,
-                  minHeight: 4,
-                  backgroundColor: scheme.surfaceContainerHighest,
-                ),
-              ),
-            ),
-          _row(context, '输出', '${chat.outputTokens} tok'),
           if (hasBg) ...[
             const Divider(height: 18),
             Text(
@@ -761,12 +758,12 @@ class _TokensCard extends StatelessWidget {
               ).textTheme.labelMedium?.copyWith(color: scheme.outline),
             ),
             const SizedBox(height: 4),
-            _row(
+            ..._usageRows(
               context,
-              '输入',
-              '${chat.backgroundInputTokens} tok(缓存 ${chat.backgroundCachedInputTokens} tok)',
+              inputTokens: chat.backgroundInputTokens,
+              cachedInputTokens: chat.backgroundCachedInputTokens,
+              outputTokens: chat.backgroundOutputTokens,
             ),
-            _row(context, '输出', '${chat.backgroundOutputTokens} tok'),
           ],
           if (chat.inputTokens == 0 && chat.outputTokens == 0)
             Padding(
@@ -781,6 +778,40 @@ class _TokensCard extends StatelessWidget {
     );
   }
 
+  /// 一组用量行:输入 / 缓存命中(含命中率与进度条)/ 输出。主写与后台
+  /// 引擎共用同一结构,两段样式保持一致。
+  List<Widget> _usageRows(
+    BuildContext context, {
+    required int inputTokens,
+    required int cachedInputTokens,
+    required int outputTokens,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final hitRate = inputTokens == 0 ? 0.0 : cachedInputTokens / inputTokens;
+    return [
+      _row(context, '输入', _tokenValue(inputTokens)),
+      _row(
+        context,
+        '缓存命中',
+        '${_tokenValue(cachedInputTokens)} · 命中率 ${(hitRate * 100).toStringAsFixed(0)}%',
+        valueColor: cachedInputTokens > 0 ? scheme.primary : null,
+      ),
+      if (inputTokens > 0)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: hitRate,
+              minHeight: 4,
+              backgroundColor: scheme.surfaceContainerHighest,
+            ),
+          ),
+        ),
+      _row(context, '输出', _tokenValue(outputTokens)),
+    ];
+  }
+
   Widget _row(
     BuildContext context,
     String label,
@@ -791,21 +822,26 @@ class _TokensCard extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Text(
-              label,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+          Text(
+            label,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
-          Text(
-            value,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: valueColor,
-              fontWeight: FontWeight.w600,
-              fontFeatures: const [FontFeature.tabularFigures()],
+          const SizedBox(width: 12),
+          // 单位缩写 + 精确值会把数值行拉长:数值可换行并保持右对齐,
+          // 窄屏不溢出。
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: valueColor,
+                fontWeight: FontWeight.w600,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
             ),
           ),
         ],
@@ -971,7 +1007,8 @@ class _StablePrefixTile extends StatelessWidget {
     } else if (changed) {
       status = '稳定前缀已变化';
       hint = '缓存区漂移,本轮将重新建立提示缓存。';
-      color = scheme.error;
+      // 用强调(tertiary)而非错误红:前缀变化是缓存状态,不是故障。
+      color = scheme.tertiary;
     } else {
       status = '稳定前缀未变';
       hint = '可命中 LLM 提示缓存,节省本轮输入开销。';
@@ -1019,23 +1056,28 @@ class _StablePrefixTile extends StatelessWidget {
               ),
               if (hasStable) ...[
                 const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHighest.withValues(
-                      alpha: 0.7,
+                // 哈希徽标对普通用户是噪声,对排查缓存问题的人是锚点:
+                // 加 tooltip 解释含义,两轮相同即命中提示缓存。
+                Tooltip(
+                  message: '稳定前缀哈希:与上轮相同即可命中提示缓存',
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
                     ),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    hash.toRadixString(16),
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                      letterSpacing: 0.5,
-                      fontFeatures: const [FontFeature.tabularFigures()],
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerHighest.withValues(
+                        alpha: 0.7,
+                      ),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      hash.toRadixString(16),
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                        letterSpacing: 0.5,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
                     ),
                   ),
                 ),

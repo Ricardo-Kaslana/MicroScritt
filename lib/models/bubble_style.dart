@@ -4,6 +4,9 @@
 /// 存储键为 `extensions.microscritt_bubble_style`。
 library;
 
+/// 气泡正文默认字号(逻辑像素);角色卡未定制字号时使用。
+const double kBubbleDefaultFontSize = 15;
+
 /// 角色级气泡容器样式(仅助手气泡;存角色卡 `extensions.microscritt_bubble_style`,
 /// 导入/导出随卡携带,ST 端忽略未知 extension 字段、互不干扰)。
 ///
@@ -25,22 +28,27 @@ class BubbleStyle {
   /// 正文字体族(null = 应用默认;如 `serif` 衬线/宋体风)。
   final String? fontFamily;
 
+  /// 正文字号(逻辑像素;null = [kBubbleDefaultFontSize])。
+  final double? fontSize;
+
   const BubbleStyle({
     this.bubbleColor,
     this.textColor,
     this.radius,
     this.opacity,
     this.fontFamily,
+    this.fontSize,
   });
 
   /// 等同应用默认值(颜色未设 + 圆角为默认 18/未设 + 不透明度为 1/未设
-  /// + 字体未设)= 未定制,走应用统一样式。
+  /// + 字体未设 + 字号为默认 15/未设)= 未定制,走应用统一样式。
   bool get isDefault =>
       bubbleColor == null &&
       textColor == null &&
       (radius == null || radius == 18) &&
       (opacity == null || opacity == 1) &&
-      (fontFamily == null || fontFamily!.isEmpty);
+      (fontFamily == null || fontFamily!.isEmpty) &&
+      (fontSize == null || fontSize == kBubbleDefaultFontSize);
 
   BubbleStyle copyWith({
     int? bubbleColor,
@@ -48,6 +56,7 @@ class BubbleStyle {
     double? radius,
     double? opacity,
     String? fontFamily,
+    double? fontSize,
   }) =>
       BubbleStyle(
         bubbleColor: bubbleColor ?? this.bubbleColor,
@@ -55,6 +64,7 @@ class BubbleStyle {
         radius: radius ?? this.radius,
         opacity: opacity ?? this.opacity,
         fontFamily: fontFamily ?? this.fontFamily,
+        fontSize: fontSize ?? this.fontSize,
       );
 
   factory BubbleStyle.fromJson(Map<String, dynamic> json) => BubbleStyle(
@@ -63,6 +73,7 @@ class BubbleStyle {
         radius: (json['radius'] as num?)?.toDouble(),
         opacity: (json['opacity'] as num?)?.toDouble(),
         fontFamily: json['font_family'] as String?,
+        fontSize: (json['font_size'] as num?)?.toDouble(),
       );
 
   Map<String, dynamic> toJson() => {
@@ -71,5 +82,6 @@ class BubbleStyle {
         if (radius != null) 'radius': radius,
         if (opacity != null) 'opacity': opacity,
         if (fontFamily != null && fontFamily!.isNotEmpty) 'font_family': fontFamily,
+        if (fontSize != null) 'font_size': fontSize,
       };
 }

@@ -44,6 +44,89 @@ void main() {
     expect(sp.contains('knight'), isTrue);
   });
 
+  test('character system prompt joins the stable segment between rules and character', () {
+    final snapshot = assembler.assemble(
+      character: const CharacterCard(
+        name: 'Alice',
+        description: 'knight',
+        systemPrompt: 'speak in rhymes',
+      ),
+      items: const [
+        PromptItem(kind: PromptItemKind.preset, text: 'You are an RP assistant'),
+        PromptItem(kind: PromptItemKind.rule, text: 'No OOC'),
+      ],
+      history: const [],
+    );
+    final sp = snapshot.systemPrompt;
+    // 角色专属系统指令作为独立稳定段:规则之后、角色设定之前。
+    expect(sp.indexOf('<rules>'), lessThan(sp.indexOf('<character_system>')));
+    expect(sp.indexOf('<character_system>'), lessThan(sp.indexOf('<character>')));
+    expect(sp, contains('speak in rhymes</character_system>'));
+    expect(snapshot.stableSystemPrompt, sp);
+
+    // 面板分段与线上格式解耦:分段内容保持未包裹原文。
+    final seg = snapshot.segments.firstWhere((s) => s.key == 'characterSystem');
+    expect(seg.label, '角色系统提示词');
+    expect(seg.content, 'speak in rhymes');
+
+    // 空值不产生段落,也不留悬挂标签。
+    final empty = assembler.assemble(
+      character: const CharacterCard(name: 'Bob'),
+      items: const [],
+      history: const [],
+    );
+    expect(empty.systemPrompt, isNot(contains('<character_system>')));
+    expect(empty.segments.map((s) => s.key), isNot(contains('characterSystem')));
+  });
+
+  test('post-history instructions ride after history as a tail reminder', () {
+    final snapshot = assembler.assemble(
+      character: const CharacterCard(
+        name: 'Alice',
+        postHistoryInstructions: 'stay in character',
+      ),
+      items: const [],
+      history: const [
+        Message(sessionId: 1, role: 'user', content: 'hi', seq: 0),
+        Message(sessionId: 1, role: 'assistant', content: 'hello', seq: 1),
+        Message(sessionId: 1, role: 'user', content: 'again', seq: 2),
+      ],
+    );
+    // 不再进 system 稳定段:它是回复前最后读到的尾部提醒。
+    expect(snapshot.systemPrompt, isNot(contains('stay in character')));
+    expect(snapshot.stableSystemPrompt, isNot(contains('stay in character')));
+    final tail = snapshot.messages.last;
+    expect(tail.role, ChatRole.user);
+    expect(tail.content, startsWith('<system-reminder>'));
+    expect(tail.content, contains('stay in character'));
+    expect(tail.content, endsWith('</system-reminder>'));
+    // 排在全部历史之后:前一条仍是最后一条真实用户消息。
+    expect(snapshot.messages[snapshot.messages.length - 2].content, 'again');
+    // 面板分段按真实顺序排在历史之后,内容保持未包裹原文。
+    expect(snapshot.segments.map((s) => s.key).last, 'postHistory');
+    final seg = snapshot.segments.firstWhere((s) => s.key == 'postHistory');
+    expect(seg.label, '历史后指令');
+    expect(seg.content, 'stay in character');
+
+    // 字段为空或无历史时不产生尾置提醒。
+    final noField = assembler.assemble(
+      character: const CharacterCard(name: 'Alice'),
+      items: const [],
+      history: const [Message(sessionId: 1, role: 'user', content: 'hi', seq: 0)],
+    );
+    expect(noField.messages.last.content, 'hi');
+    final noHistory = assembler.assemble(
+      character: const CharacterCard(
+        name: 'Alice',
+        postHistoryInstructions: 'stay in character',
+      ),
+      items: const [],
+      history: const [],
+    );
+    expect(noHistory.messages, isEmpty);
+    expect(noHistory.segments.map((s) => s.key), isNot(contains('postHistory')));
+  });
+
   test('sends the whole active history — no per-count trimming', () {
     // 组装不做按条数裁剪:上下文规模由压缩按 token 占用率控制(target/soft/hard
     // 三挡),组装器只渲染调用方给的窗口。此前的 2x 滞回裁剪会每轮把数组首条
@@ -459,6 +542,7 @@ void main() {
       character: const CharacterCard(
         name: 'Alice',
         description: 'knight',
+        systemPrompt: 'speak in rhymes',
         postHistoryInstructions: 'stay in character',
       ),
       items: const [
@@ -478,8 +562,11 @@ void main() {
     final stable = snapshot.stableSystemPrompt;
     expect(stable, contains('<preset>'));
     expect(stable, contains('<rules>'));
+    expect(stable, contains('<character_system>'));
+    expect(stable, contains('speak in rhymes'));
     expect(stable, contains('<character>'));
-    expect(stable, contains('<post_history_instructions>'));
+    expect(stable, isNot(contains('<post_history_instructions>')));
+    expect(stable, isNot(contains('stay in character')));
     expect(stable, contains('<worldbook_constant>'));
     expect(stable, contains('Always-on lore'));
     expect(stable, isNot(contains('<summary>')));
@@ -488,6 +575,9 @@ void main() {
     expect(stable, isNot(contains('auto fact')));
     // system 即稳定段:可变内容全部移入 messages 数组。
     expect(snapshot.systemPrompt, stable);
+    // 历史后指令不在 system:它是 messages 尾部的合成提醒。
+    expect(snapshot.messages.last.content, startsWith('<system-reminder>'));
+    expect(snapshot.messages.last.content, contains('stay in character'));
     // 摘要/记忆是数组头部合成消息,真实历史紧随其后。
     expect(snapshot.messages[0].content, startsWith('<system-reminder>'));
     expect(snapshot.messages[1].content, startsWith('<summary>'));
@@ -671,6 +761,7 @@ void main() {
       character: const CharacterCard(
         name: 'Alice',
         description: 'knight',
+        systemPrompt: 'speak in rhymes',
         postHistoryInstructions: 'stay in character',
       ),
       items: const [
@@ -687,12 +778,13 @@ void main() {
     final keys = snapshot.segments.map((s) => s.key).toList();
     expect(keys[0], 'preset');
     expect(keys[1], 'rules');
-    expect(keys[2], 'character');
-    expect(keys[3], 'postHistory');
+    expect(keys[2], 'characterSystem');
+    expect(keys[3], 'character');
     expect(keys, isNot(contains('worldbookConstant'))); // 无命中时不出现在列表
     expect(keys[4], 'memory'); // 第 0 条消息(冻结副本)
     expect(keys[5], 'history'); // 真实历史随 messages 数组
-    expect(keys.last, 'history'); // 无附件时 attachments 段被剔除
+    expect(keys[6], 'postHistory'); // 尾部合成提醒排在全部历史之后
+    expect(keys, isNot(contains('attachments'))); // 无附件时剔除
     expect(keys, isNot(contains('summary')));
     expect(keys, isNot(contains('variables'))); // 变量不进主写分段
     expect(keys, isNot(contains('skills'))); // 技能不进分段(只走附件行)
@@ -782,6 +874,7 @@ void main() {
       character: const CharacterCard(
         name: 'Alice',
         description: 'knight',
+        systemPrompt: 'speak in rhymes',
         postHistoryInstructions: 'stay in character',
       ),
       items: const [
@@ -793,13 +886,13 @@ void main() {
         WorldbookEntry(characterId: 1, keys: [], constant: true, content: 'Always-on lore'),
       ],
     );
-    // system 稳定段 = preset/rules/character/post-history/常驻世界书 五个标签块
-    // 按序拼接(技能移出 system,只走附件行)。
+    // system 稳定段 = preset/rules/角色卡系统提示词/character/常驻世界书
+    // 五个标签块按序拼接(历史后指令走 messages 尾部提醒,技能只走附件行)。
     const expectedTags = [
       'preset',
       'rules',
+      'character_system',
       'character',
-      'post_history_instructions',
       'worldbook_constant',
     ];
     final sp = snapshot.systemPrompt;
@@ -814,9 +907,11 @@ void main() {
     }
     expect(sp, contains('You are an RP assistant</preset>'));
     expect(sp, contains('No OOC</rules>'));
+    expect(sp, contains('speak in rhymes</character_system>'));
     expect(sp, contains('knight</character>'));
-    expect(sp, contains('stay in character</post_history_instructions>'));
     expect(sp, contains('Always-on lore</worldbook_constant>'));
+    // 历史后指令不再出现在 system;本测试无历史,故也不产生尾部提醒。
+    expect(sp, isNot(contains('stay in character')));
   });
 
   test('CV: panel segments stay untagged while the wire format wraps them', () {
@@ -843,8 +938,8 @@ void main() {
     const allTags = [
       'preset',
       'rules',
+      'character_system',
       'character',
-      'post_history_instructions',
       'worldbook_constant',
       'skills',
       'summary',
@@ -854,5 +949,39 @@ void main() {
       expect(snapshot.leadingSummaryContent ?? '', isNot(contains('<$t>')));
       expect(snapshot.leadingMemoryContent ?? '', isNot(contains('<$t>')));
     }
+  });
+
+  test('rewrite context rides as the final transient reminder after post-history', () {
+    final snapshot = assembler.assemble(
+      character: const CharacterCard(
+        name: 'Alice',
+        postHistoryInstructions: 'stay in character',
+      ),
+      items: const [],
+      history: const [
+        Message(sessionId: 1, role: 'user', content: 'hi', seq: 0),
+        Message(sessionId: 1, role: 'assistant', content: 'old reply', seq: 1),
+      ],
+      rewrite: const RewriteContext(
+        instruction: 'make it shorter',
+        previousReply: 'old reply',
+      ),
+    );
+
+    // 重写提醒是当次请求真正的末条:旧稿作底稿、修改要求最后读到。
+    final tail = snapshot.messages.last;
+    expect(tail.role, ChatRole.user);
+    expect(tail.content, startsWith('<system-reminder>'));
+    expect(tail.content, contains('make it shorter'));
+    expect(tail.content, contains('old reply'));
+    expect(tail.content, endsWith('</system-reminder>'));
+    // 历史后指令仍在其前,既有尾部语义不变。
+    expect(snapshot.messages[snapshot.messages.length - 2].content, contains('stay in character'));
+
+    // 面板分段镜像线上顺序:rewrite 段在 postHistory 之后。
+    expect(snapshot.segments.map((s) => s.key).last, 'rewrite');
+    final seg = snapshot.segments.firstWhere((s) => s.key == 'rewrite');
+    expect(seg.label, '重写要求');
+    expect(seg.subEntries.map((e) => e.label), ['上一版回复', '修改要求']);
   });
 }

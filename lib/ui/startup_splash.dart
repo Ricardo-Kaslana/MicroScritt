@@ -2,7 +2,8 @@
 /// 淡出露出首屏;全程约 2 秒、纯代码绘制,亮暗自适应。
 ///
 /// 由 `MaterialApp.builder` 挂在 Navigator 之上:child 常驻 Stack 第 0 项,
-/// 动画结束只移除 overlay;播放中点击任意处跳过,Reduce Motion 直接显示首屏。
+/// 动画结束只移除 overlay;播放中点击任意处跳过(150ms 淡出,不硬切),
+/// Reduce Motion 直接显示首屏。
 library;
 
 import 'dart:math' as math;
@@ -10,6 +11,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'common/motion.dart';
 import 'theme/brand.dart';
 
 /// 冷启动品牌动画的挂载点与状态机:负责开始、跳过与结束调度;绘制在 overlay
@@ -48,10 +50,15 @@ const List<Color> _dotColors = [
 ];
 
 class _StartupSplashState extends State<StartupSplash>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _controller;
+
+  /// 跳过时的淡出控制器:主时间轴停住后,整层从当前画面淡到透明再移除。
+  /// 点击瞬间硬切会让首屏像被「闪一下」,淡出把两段画面接起来。
+  late final AnimationController _dismiss;
   bool _started = false;
   bool _finished = false;
+  bool _skipping = false;
 
   @override
   void initState() {
@@ -62,6 +69,12 @@ class _StartupSplashState extends State<StartupSplash>
       // 跳过判断自己做,避免系统设置把 2 秒动画悄悄压成 100ms 的闪烁。
       animationBehavior: AnimationBehavior.preserve,
     )..addStatusListener(_onStatus);
+    _dismiss = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 150),
+      // 初值 1(完全可见);跳过后 reverse 到 0。
+      value: 1,
+    );
   }
 
   @override
@@ -69,23 +82,11 @@ class _StartupSplashState extends State<StartupSplash>
     super.didChangeDependencies();
     if (_started) return;
     _started = true;
-    if (_reduceMotion(context)) {
+    if (reduceMotionOf(context)) {
       _finished = true;
       return;
     }
     _controller.forward();
-  }
-
-  /// iOS 的「减弱动态效果」不会体现在 MediaQuery.disableAnimations 上,
-  /// 需直接读无障碍特性。
-  bool _reduceMotion(BuildContext context) {
-    final media = MediaQuery.maybeOf(context);
-    final features =
-        View.maybeOf(context)?.platformDispatcher.accessibilityFeatures ??
-        WidgetsBinding.instance.platformDispatcher.accessibilityFeatures;
-    return (media?.disableAnimations ?? false) ||
-        features.disableAnimations ||
-        features.reduceMotion;
   }
 
   void _onStatus(AnimationStatus status) {
@@ -93,16 +94,22 @@ class _StartupSplashState extends State<StartupSplash>
     setState(() => _finished = true);
   }
 
-  /// 点击跳过:停表并标记结束,只移除 overlay,不重建首屏。
+  /// 点击跳过:主时间轴停住,整层淡出后再移除 overlay,不重建首屏。
+  /// 淡出期间 overlay 仍拦截点击、不穿透到首屏。
   void _skip() {
-    if (_finished) return;
+    if (_finished || _skipping) return;
+    _skipping = true;
     _controller.stop();
-    setState(() => _finished = true);
+    _dismiss.reverse().whenComplete(() {
+      if (!mounted) return;
+      setState(() => _finished = true);
+    });
   }
 
   @override
   void dispose() {
     _controller.dispose();
+    _dismiss.dispose();
     super.dispose();
   }
 
@@ -116,14 +123,17 @@ class _StartupSplashState extends State<StartupSplash>
         if (!_finished)
           Positioned.fill(
             child: BlockSemantics(
-              child: AnnotatedRegion<SystemUiOverlayStyle>(
-                value: isDark
-                    ? SystemUiOverlayStyle.light
-                    : SystemUiOverlayStyle.dark,
-                child: _SplashOverlay(
-                  key: StartupSplash.overlayKey,
-                  animation: _controller,
-                  onTap: _skip,
+              child: FadeTransition(
+                opacity: _dismiss,
+                child: AnnotatedRegion<SystemUiOverlayStyle>(
+                  value: isDark
+                      ? SystemUiOverlayStyle.light
+                      : SystemUiOverlayStyle.dark,
+                  child: _SplashOverlay(
+                    key: StartupSplash.overlayKey,
+                    animation: _controller,
+                    onTap: _skip,
+                  ),
                 ),
               ),
             ),
@@ -146,26 +156,30 @@ class _SplashOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: AnimatedBuilder(
-        animation: animation,
-        builder: (context, _) {
-          final elapsed = animation.value * _totalMs;
-          final exitT = _interval(elapsed, _exitStartMs, _exitEndMs);
-          final fade = 1 - Curves.easeInCubic.transform(exitT);
-          return Opacity(
-            opacity: fade.clamp(0.0, 1.0),
-            child: Material(
-              color: theme.scaffoldBackgroundColor,
-              child: LayoutBuilder(
-                builder: (context, constraints) =>
-                    _buildContent(context, constraints.biggest, elapsed),
+    return Semantics(
+      button: true,
+      label: '启动动画,轻点任意处跳过',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: AnimatedBuilder(
+          animation: animation,
+          builder: (context, _) {
+            final elapsed = animation.value * _totalMs;
+            final exitT = _interval(elapsed, _exitStartMs, _exitEndMs);
+            final fade = 1 - Curves.easeInCubic.transform(exitT);
+            return Opacity(
+              opacity: fade.clamp(0.0, 1.0),
+              child: Material(
+                color: theme.scaffoldBackgroundColor,
+                child: LayoutBuilder(
+                  builder: (context, constraints) =>
+                      _buildContent(context, constraints.biggest, elapsed),
+                ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -182,6 +196,7 @@ class _SplashOverlay extends StatelessWidget {
     final wordT = Curves.easeOutCubic.transform(
       _interval(elapsed, _wordStartMs, _wordEndMs),
     );
+    final hintT = Curves.easeOut.transform(_interval(elapsed, 700, 1000));
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -206,16 +221,45 @@ class _SplashOverlay extends StatelessWidget {
             opacity: wordT,
             child: Transform.translate(
               offset: Offset(0, 8 * (1 - wordT)),
-              child: Text(
-                'MicroScritt',
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                textScaler: TextScaler.noScaling,
-                style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.3,
-                  color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
+              // 应用名跟随系统字号;大字号下以 FittedBox 收缩到可用宽度,
+              // 只压回放不下的部分,不整体禁用用户的无障碍设置。
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    'MicroScritt',
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.3,
+                      color: theme.colorScheme.onSurface.withValues(
+                        alpha: 0.55,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: IgnorePointer(
+            child: SafeArea(
+              minimum: const EdgeInsets.only(bottom: 24),
+              child: Opacity(
+                opacity: hintT,
+                child: Text(
+                  '轻点任意处跳过',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurface.withValues(alpha: 0.36),
+                  ),
                 ),
               ),
             ),

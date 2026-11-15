@@ -30,6 +30,15 @@ class AppSettingsRepository {
     final bgReasoningRaw = rows.first['background_reasoning_level'];
     final bgTierRaw = rows.first['background_output_tier'];
     final compactEnabledRaw = rows.first['auto_compact_enabled'];
+    final compactThresholdRaw = rows.first['auto_compact_threshold'];
+    // 先归一化到百分比精度再校验,避免 Slider 浮点尾差(0.9000000000000001)
+    // 被当成"越界"回落默认;真正越界/脏值才回落。
+    final compactThreshold = compactThresholdRaw is num
+        ? AppSettings.normalizeAutoCompactThreshold(
+                compactThresholdRaw.toDouble(),
+              ) ??
+              AppSettings.defaultAutoCompactThreshold
+        : AppSettings.defaultAutoCompactThreshold;
     final imageIntervalRaw = rows.first['image_interval'];
     final maxAutoRaw = rows.first['max_auto_attachments'];
     final charAnchorRaw = rows.first['background_character_anchor'];
@@ -60,6 +69,8 @@ class AppSettingsRepository {
       autoCompactEnabled: compactEnabledRaw is int
           ? compactEnabledRaw != 0
           : true,
+      // 触发线脏值/越界一律回落默认,坏值不允许阻断启动。
+      autoCompactThreshold: compactThreshold,
       imageInterval: imageIntervalRaw is int && imageIntervalRaw > 0
           ? imageIntervalRaw
           : 1,
@@ -93,6 +104,7 @@ class AppSettingsRepository {
       // 基线 DDL 保留(带 DEFAULT)但不再写入,缺省插入即回填历史默认值,
       // 无需为删列重建数据库。
       'auto_compact_enabled': s.autoCompactEnabled ? 1 : 0,
+      'auto_compact_threshold': s.autoCompactThreshold,
       'image_interval': s.imageInterval,
       'max_auto_attachments': s.maxAutoAttachments,
       'background_character_anchor': s.backgroundCharacterAnchor ? 1 : 0,

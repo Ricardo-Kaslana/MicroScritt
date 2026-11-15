@@ -15,7 +15,8 @@ import '../state/providers.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/shrink_image.dart';
 
-/// 用户管理屏:设置用户名与头像,保存后同步内存快照与文本配置文件。
+/// 用户管理屏:设置用户名与头像,保存后同步内存快照与文本配置文件并
+/// 返回设置页。
 ///
 /// 头像先缩到安全尺寸再落库,避免大图撑爆 Android CursorWindow;
 /// `_saving` 期间禁用保存按钮,防止重复提交。
@@ -69,6 +70,7 @@ class _UserScreenState extends ConsumerState<UserScreen> {
       await syncAppConfigFile(ref);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('用户信息已保存')));
+      Navigator.pop(context);
     } finally {
       if (mounted) setState(() => _saving = false);
     }

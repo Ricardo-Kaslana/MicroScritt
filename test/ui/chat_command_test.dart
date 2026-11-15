@@ -1,9 +1,11 @@
 // 聊天页命令与导航 UI:斜杠命令按钮/建议、滚动导航折叠与自动隐藏、灵岛进度
 // 反馈、窄屏输入底栏不溢出、压缩后原始消息仍留在聊天流。
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/llm_backend.dart';
+import 'package:microscritt/data/app_settings_repository.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/llm_provider_repository.dart';
@@ -67,6 +69,15 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  /// 命令 chip 只把 `/命令 ` 填入输入框;真正执行还需要再按发送。
+  Future<void> runCommandChip(WidgetTester tester, String label) async {
+    await tester.ensureVisible(find.text(label));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(label));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('发送'));
+  }
+
   testWidgets('chat input shows the five slash-command buttons', (tester) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
@@ -114,8 +125,14 @@ void main() {
     await tester.enterText(field, '/t');
     await tester.pumpAndSettle();
 
-    // 前缀 /t 建议 test 命令;执行行为由 controller 测试覆盖。
+    // 前缀 /t 建议 test 命令;点建议只补全输入框,不直接执行。
     expect(find.byType(ActionChip), findsWidgets);
+    await tester.tap(find.text('/test 测试生成'));
+    await tester.pumpAndSettle();
+    final fieldWidget = tester.widget<TextField>(field);
+    expect(fieldWidget.controller!.text, '/test ');
+    expect(fieldWidget.controller!.selection.baseOffset, '/test '.length);
+    expect(fieldWidget.focusNode!.hasFocus, isTrue);
     await tester.runAsync(() => db.db.close());
   });
 
@@ -154,6 +171,85 @@ void main() {
     expect(find.text('/compact 主动压缩'), findsOneWidget);
     expect(find.text('/rerun 重跑后台'), findsOneWidget);
     expect(find.byType(ActionChip), findsNWidgets(5));
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('tapping a resident command chip fills the composer', (tester) async {
+    late final AppDatabase db;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: const MaterialApp(
+          home: ChatScreen(sessionId: 1, characterId: 1, character: CharacterCard(name: 'Alice')),
+        ),
+      ),
+    );
+    await _pumpUntilLoaded(tester);
+    await expandCommands(tester);
+
+    // 点命令 chip 不再立即执行:命令文本写入输入框、光标在末尾,等待用户
+    // 追加参数(如修改方向)后自己按发送。
+    await tester.ensureVisible(find.text('/rerun 重跑后台'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('/rerun 重跑后台'));
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, '/rerun ');
+    expect(field.controller!.selection.baseOffset, '/rerun '.length);
+    expect(field.focusNode!.hasFocus, isTrue);
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('narrow command row stays single-line and scrolls with the mouse wheel', (tester) async {
+    // 命令 chip 不换行:窄窗下靠后的命令通过横向滚动到达。桌面滚轮只有
+    // 纵向 delta,组件内把它映射到横向;这里用真实鼠标滚轮事件验证。
+    tester.view
+      ..physicalSize = const Size(460, 700)
+      ..devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    late final AppDatabase db;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: const MaterialApp(
+          home: ChatScreen(sessionId: 1, characterId: 1, character: CharacterCard(name: 'Alice')),
+        ),
+      ),
+    );
+    await _pumpUntilLoaded(tester);
+    await expandCommands(tester);
+
+    // 直接按 ActionChip 取位置:chip 的 tooltip 文案与标签相同,悬停后
+    // tooltip 覆盖层会让文本匹配出现两份。
+    final chips = find.byType(ActionChip);
+    expect(chips, findsNWidgets(5));
+    final first = tester.getRect(chips.at(0));
+    final last = tester.getRect(chips.at(4));
+    expect(last.top, first.top, reason: '命令 chip 保持单行,不允许换行');
+    expect(last.right, greaterThan(460.0), reason: '窄窗初始状态下最右命令在视口外');
+
+    final pointer = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(pointer.hover(tester.getCenter(chips.at(0))));
+    for (var i = 0; i < 8; i++) {
+      await tester.sendEventToBinding(pointer.scroll(const Offset(0, 160)));
+    }
+    await tester.pump();
+
+    final scrolledFirst = tester.getRect(chips.at(0));
+    final scrolledLast = tester.getRect(chips.at(4));
+    expect(scrolledFirst.left, lessThan(first.left), reason: '滚轮应把命令行横向滚动');
+    expect(scrolledLast.right, lessThanOrEqualTo(460.0), reason: '滚动后可看到最右命令');
     await tester.runAsync(() => db.db.close());
   });
 
@@ -455,13 +551,10 @@ void main() {
     );
     await _pumpUntilLoaded(tester);
 
-    // 点击 /compact,压缩流尚未关闭 → 运行时进度动画应可见。
-    // compact 是常驻命令行的第 4 个 chip:命令行默认折叠,先展开,横向滚动到
-    // 可视后再点。
+    // 点击 /compact 填入输入框,再按发送让压缩流启动;流尚未关闭 →
+    // 运行时进度动画应可见。
     await expandCommands(tester);
-    await tester.ensureVisible(find.text('/compact 主动压缩'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('/compact 主动压缩'));
+    await runCommandChip(tester, '/compact 主动压缩');
     await tester.pump(); // 建帧让 _busyCommand 生效
     await tester.pump(const Duration(milliseconds: 300)); // AnimatedSwitcher 淡入
     expect(find.text('正在压缩会话历史…'), findsOneWidget);
@@ -547,6 +640,54 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('reasoning badge sheet switches level with a slider', (tester) async {
+    late final AppDatabase db;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          databaseProvider.overrideWithValue(db),
+          appSettingsProvider.overrideWith(
+            (ref) => const AppSettings(reasoningLevel: ReasoningLevel.high),
+          ),
+        ],
+        child: const MaterialApp(
+          home: ChatScreen(sessionId: 1, characterId: 1, character: CharacterCard(name: 'Alice')),
+        ),
+      ),
+    );
+    await _pumpUntilLoaded(tester);
+
+    await tester.tap(find.byTooltip('推理等级:高'));
+    await tester.pumpAndSettle();
+    expect(find.text('推理等级'), findsOneWidget);
+    expect(find.byType(Slider), findsOneWidget);
+    // 旧的档位说明文字已移除,只留滑块与刻度。
+    expect(find.textContaining('不发送推理'), findsNothing);
+
+    // 滑块拖到最左端 = 关闭;松手即关闭底单并落库。
+    await tester.drag(find.byType(Slider), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+
+    late ReasoningLevel persisted;
+    await tester.runAsync(() async {
+      for (var i = 0; i < 60; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        persisted = (await AppSettingsRepository(db).load()).reasoningLevel;
+        if (persisted == ReasoningLevel.off) break;
+      }
+    });
+    expect(persisted, ReasoningLevel.off);
+    await tester.pumpAndSettle();
+    // off 档不显示推理徽标。
+    expect(find.byTooltip('推理等级:高'), findsNothing);
+
+    await tester.runAsync(() => db.db.close());
+  });
+
   testWidgets('/compact keeps all original messages visible in the chat flow', (tester) async {
     // 回归测试:用户反馈「/compact 后聊天页面消息丢失,只剩最近几条」——
     // 旧实现在 message_list.dart 用 `!m.isCompacted` 把被压缩的原文从聊天流里
@@ -597,10 +738,9 @@ void main() {
       expect(find.text('m$i'), findsOneWidget, reason: 'm$i should be visible before compact');
     }
 
-    // 触发 /compact 并等摘要调用完成。
+    // 触发 /compact(填入输入框后再发送)并等摘要调用完成。
     await expandCommands(tester);
-    await tester.ensureVisible(find.text('/compact 主动压缩'));
-    await tester.tap(find.text('/compact 主动压缩'));
+    await runCommandChip(tester, '/compact 主动压缩');
     await tester.pump();
     backend.finish();
     await tester.runAsync(() async {

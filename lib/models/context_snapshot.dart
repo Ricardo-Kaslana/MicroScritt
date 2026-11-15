@@ -38,7 +38,8 @@ class ContextSnapshot {
   /// 实际发送的 system 提示词(已含全部稳定段与当轮通知)。
   final String systemPrompt;
 
-  /// 实际发送的消息数组(含记忆第 0 条、摘要与全部历史/附件行)。
+  /// 实际发送的消息数组(含记忆第 0 条、摘要、全部历史/附件行,以及卡片
+  /// 配置的历史后指令尾部提醒;按要求重写时另含仅当次生效的重写提醒)。
   final List<ChatMessage> messages;
 
   /// 段键 → 来源说明,供上下文面板标注内容出处。
@@ -47,8 +48,8 @@ class ContextSnapshot {
   /// 按真实组装顺序保存的展示分段;不影响发送内容。
   final List<ContextSegment> segments;
 
-  /// 缓存优化:system 提示词的稳定前缀(preset + rules + character +
-  /// post-history + 常驻世界书)。技能不再进 system(改为 @ 触发附件),
+  /// 缓存优化:system 提示词的稳定前缀(preset + rules + 角色卡系统提示词 +
+  /// character + 常驻世界书)。技能不再进 system(改为 @ 触发附件),
   /// 触发世界书/记忆全部移出 system(分别改为附件行与第 0 条消息)——
   /// system 只剩几乎不随轮次变化的稳定段。Anthropic 后端据此在 system 字段内
   /// 放置 cache_control 断点,使稳定前缀跨轮命中缓存。
@@ -72,7 +73,7 @@ class ContextSnapshot {
   /// 缓存优化:稳定 system 前缀([stableSystemPrompt])的内容哈希。
   ///
   /// 用于在上下文面板直观判断"两轮之间稳定前缀是否变化":同一会话里,只要
-  /// preset/rules/角色卡/剧情后注/常驻世界书没变,该哈希就不变 —— 说明本轮请求
+  /// preset/rules/角色卡系统提示词/角色卡/常驻世界书没变,该哈希就不变 —— 说明本轮请求
   /// 在 LLM 提示缓存的重用区(stableSystemPrompt + 历史前段)字节一致、可命中。
   /// 只做会话内"变没变"的对照,不做跨进程持久语义(用 Dart 字符串 hashCode
   /// 即可,同内容同运行期内稳定)。

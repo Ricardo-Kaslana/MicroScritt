@@ -24,7 +24,12 @@ class UiPrefsFile {
   static const int formatVersion = 1;
 
   final String path;
-  const UiPrefsFile(this.path);
+
+  /// 串行写队列:牌堆翻牌可能连续触发回写,并发共用同一个临时文件会互相
+  /// 覆盖或删除;按调用顺序排队,保证最后一次快照落盘。
+  Future<void> _writes = Future<void>.value();
+
+  UiPrefsFile(this.path);
 
   /// 与数据库同目录:桌面端固定数据根优先,移动端回退应用私有 Documents。
   static Future<UiPrefsFile> openDefault() async {
@@ -45,12 +50,21 @@ class UiPrefsFile {
     }
   }
 
-  /// 原子写(临时文件 + 替换);写失败只打日志,绝不影响 UI 操作。
-  Future<void> write(UiPrefs prefs) async {
+  /// 原子写(临时文件 + 替换),按调用顺序串行执行;写失败只打日志,
+  /// 绝不影响 UI 操作。
+  Future<void> write(UiPrefs prefs) {
+    final result = _writes.then((_) => _writeNow(prefs));
+    _writes = result;
+    return result;
+  }
+
+  Future<void> _writeNow(UiPrefs prefs) async {
     try {
       final text = const JsonEncoder.withIndent('  ').convert({
         'version': formatVersion,
         'characterLayout': prefs.characterLayout.wire,
+        'sidebarCollapsed': prefs.sidebarCollapsed,
+        'deckFrontCharacterId': prefs.deckFrontCharacterId,
       });
       final target = File(path);
       await target.parent.create(recursive: true);

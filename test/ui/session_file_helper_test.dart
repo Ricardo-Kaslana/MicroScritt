@@ -1,4 +1,4 @@
-// 会话归档保存通道:移动端「保存到本地 / 分享」分支、临时暂存文件的清理与
+// 会话归档保存/分享通道:移动端保存与分享分支、临时暂存文件的清理与
 // 取消语义(平台通道打桩,不弹真实系统对话框)。
 import 'dart:io';
 
@@ -12,6 +12,7 @@ void main() {
 
   const pathProviderChannel = MethodChannel('plugins.flutter.io/path_provider');
   const fileDialogChannel = MethodChannel('flutter_file_dialog');
+  const shareChannel = MethodChannel('dev.fluttercommunity.plus/share');
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
@@ -28,6 +29,7 @@ void main() {
   tearDown(() async {
     messenger.setMockMethodCallHandler(pathProviderChannel, null);
     messenger.setMockMethodCallHandler(fileDialogChannel, null);
+    messenger.setMockMethodCallHandler(shareChannel, null);
     if (temp.existsSync()) temp.deleteSync(recursive: true);
   });
 
@@ -80,7 +82,7 @@ void main() {
   }
 
   testWidgets(
-    'mobile export offers local save and share, then saves a streamed staging file',
+    'mobile save writes a streamed staging file and removes it afterwards',
     (tester) async {
       await runAsMobile(() async {
         String? stagedPath;
@@ -111,11 +113,6 @@ void main() {
         );
 
         await tester.tap(find.text('导出'));
-        await tester.pumpAndSettle();
-        expect(find.text('保存到本地'), findsOneWidget);
-        expect(find.text('分享'), findsOneWidget);
-
-        await tester.tap(find.text('保存到本地'));
         await pumpUntil(tester, () => result != null);
         await tester.pumpAndSettle();
 
@@ -155,8 +152,6 @@ void main() {
       );
 
       await tester.tap(find.text('导出'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('保存到本地'));
       await pumpUntil(tester, () => result != null);
       await tester.pumpAndSettle();
 
@@ -167,34 +162,47 @@ void main() {
     });
   });
 
-  testWidgets('dismissing the export sheet does not build the archive', (
-    tester,
-  ) async {
-    await runAsMobile(() async {
-      var buildCalls = 0;
-      bool? result;
-      await pumpExportButton(
-        tester,
-        export: (context) async {
-          result = await saveSessionArchive(
-            context,
-            fileName: 'session.json',
-            build: (staging, {onProgress, isCancelled}) async {
-              buildCalls++;
-              staging.writeAsStringSync('{}');
-              return staging;
-            },
-          );
-        },
-      );
+  testWidgets(
+    'mobile share hands the staging file to the share channel and keeps it',
+    (tester) async {
+      await runAsMobile(() async {
+        Map<Object?, Object?>? shareArgs;
+        messenger.setMockMethodCallHandler(shareChannel, (call) async {
+          if (call.method != 'share') return null;
+          shareArgs = call.arguments as Map<Object?, Object?>;
+          return 'ok';
+        });
 
-      await tester.tap(find.text('导出'));
-      await tester.pumpAndSettle();
-      await tester.tapAt(const Offset(10, 10));
-      await tester.pumpAndSettle();
+        bool? result;
+        await pumpExportButton(
+          tester,
+          export: (context) async {
+            result = await saveSessionArchive(
+              context,
+              fileName: '王都之旅.json',
+              delivery: SessionArchiveDelivery.share,
+              build: (staging, {onProgress, isCancelled}) async {
+                staging.writeAsStringSync('{"version":4}');
+                return staging;
+              },
+            );
+          },
+        );
 
-      expect(result, isFalse);
-      expect(buildCalls, 0);
-    });
-  });
+        await tester.tap(find.text('导出'));
+        await pumpUntil(tester, () => result != null);
+        await tester.pumpAndSettle();
+
+        expect(result, isTrue);
+        final paths = shareArgs?['paths'] as List?;
+        expect(paths, isNotNull);
+        final sharedPath = paths!.single as String;
+        expect(sharedPath, endsWith('王都之旅.json'));
+        expect(File(sharedPath).readAsStringSync(), '{"version":4}');
+        // 分享分支的暂存文件要留到接收方读完,不随返回删除。
+        expect(File(sharedPath).existsSync(), isTrue);
+        expect(find.text('已打开分享面板'), findsOneWidget);
+      });
+    },
+  );
 }

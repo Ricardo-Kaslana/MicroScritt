@@ -28,6 +28,31 @@ class PromptItemRepository {
     await db.db.update('prompt_items', i.toMap(), where: 'id = ?', whereArgs: [i.id]);
   }
 
+  /// 按给定顺序重写 position:同类条目从 0 递增,跨类型各自计数(组装顺序
+  /// 先按 kind 分段,再按段内 position)。条目 id 不变。
+  Future<void> reorder(List<PromptItem> ordered) async {
+    await db.db.transaction((txn) async {
+      final batch = txn.batch();
+      final nextByKind = <PromptItemKind, int>{};
+      for (final item in ordered) {
+        final id = item.id;
+        if (id == null) continue;
+        final position = nextByKind.update(
+          item.kind,
+          (v) => v + 1,
+          ifAbsent: () => 0,
+        );
+        batch.update(
+          'prompt_items',
+          {'position': position},
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
   Future<void> delete(int id) async {
     await db.db.delete('prompt_items', where: 'id = ?', whereArgs: [id]);
   }

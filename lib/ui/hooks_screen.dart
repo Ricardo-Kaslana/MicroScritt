@@ -11,12 +11,15 @@ import '../export/resource_exporter.dart';
 import '../import/resource_importer.dart';
 import '../models/hook.dart';
 import '../state/providers.dart';
+import 'common/app_menu.dart';
 import 'common/confirm_dialog.dart';
+import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
 import 'common/form_field.dart';
+import 'common/list_page_scaffold.dart';
 import 'common/resource_io.dart';
-import 'common/searchable_list.dart';
 import 'common/section_header.dart';
+import 'common/toggle_delete_tile.dart';
 
 /// 触发点的中文标签(编辑页下拉共用);wire 值即枚举名,落库与导入都按它。
 String hookPointLabel(HookTriggerPoint p) => switch (p) {
@@ -92,22 +95,33 @@ class HooksScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hooks = ref.watch(hooksProvider);
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Hooks'),
-        actions: [
-          IconButton(
-            tooltip: '导出 JSON',
-            icon: const Icon(Icons.file_download_outlined),
-            onPressed: () => _exportJson(context, ref),
-          ),
-          IconButton(
-            tooltip: '导入 JSON',
-            icon: const Icon(Icons.file_upload_outlined),
-            onPressed: () => _importJson(context, ref),
-          ),
-        ],
-      ),
+    return ListPageScaffold<Hook>(
+      title: 'Hooks',
+      actions: [
+        AppPopupMenuButton<String>(
+          tooltip: '更多操作',
+          onSelected: (action) {
+            switch (action) {
+              case 'export':
+                _exportJson(context, ref);
+              case 'import':
+                _importJson(context, ref);
+            }
+          },
+          actions: const [
+            MenuAction(
+              value: 'export',
+              label: '导出 JSON',
+              icon: Icons.file_download_outlined,
+            ),
+            MenuAction(
+              value: 'import',
+              label: '导入 JSON',
+              icon: Icons.file_upload_outlined,
+            ),
+          ],
+        ),
+      ],
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => Navigator.push(
           context,
@@ -116,49 +130,31 @@ class HooksScreen extends ConsumerWidget {
         icon: const Icon(Icons.add),
         label: const Text('新建'),
       ),
-      body: hooks.when(
-        data: (list) => list.isEmpty
-            ? const EmptyState(
-                icon: Icons.code_outlined,
-                title: '暂无 Hook',
-                message: 'Hook 是在触发点上运行的 JS 脚本,可改写用户输入、系统提示词与回复文本。',
-              )
-            : SearchableList<Hook>(
-                items: list,
-                searchHint: '搜索 Hook 名称/代码',
-                searchText: (hook) => '${hook.name} ${hook.jsCode}',
-                itemBuilder: (context, hook) => GroupCard(
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.code),
-                      title: Text(hook.name),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: '删除',
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () => _delete(context, ref, hook),
-                          ),
-                          Switch(
-                            value: hook.enabled,
-                            onChanged: (_) => _toggle(ref, hook),
-                          ),
-                        ],
-                      ),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => HookEditScreen(hook: hook),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-        error: (e, _) =>
-            EmptyState(icon: Icons.error_outline, title: '加载失败', message: '$e'),
-        loading: () => const Center(child: CircularProgressIndicator()),
+      loading: hooks.isLoading && !hooks.hasValue,
+      error: hooks.hasError && !hooks.hasValue ? hooks.error : null,
+      onRetry: () => ref.invalidate(hooksProvider),
+      items: hooks.value,
+      emptyState: const EmptyState(
+        icon: Icons.code_outlined,
+        title: '暂无 Hook',
+        message: 'Hook 是在触发点上运行的 JS 脚本,可改写用户输入、系统提示词与回复文本。',
+      ),
+      searchHint: '搜索 Hook 名称/代码',
+      searchText: (hook) => '${hook.name} ${hook.jsCode}',
+      itemBuilder: (context, hook) => GroupCard(
+        children: [
+          ToggleDeleteTile(
+            leading: const Icon(Icons.code),
+            title: hook.name,
+            enabled: hook.enabled,
+            onToggle: (_) => _toggle(ref, hook),
+            onDelete: () => _delete(context, ref, hook),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => HookEditScreen(hook: hook)),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -190,6 +186,9 @@ class _HookEditScreenState extends ConsumerState<HookEditScreen> {
   late bool _enabled;
   bool _saving = false;
 
+  /// 打开编辑器时的表单快照(未保存修改的判定基准)。
+  late String _initialSignature;
+
   bool get _isNew => widget.hook == null;
 
   @override
@@ -200,7 +199,11 @@ class _HookEditScreenState extends ConsumerState<HookEditScreen> {
     _code = TextEditingController(text: hook?.jsCode ?? _template);
     _point = hook?.triggerPoint ?? HookTriggerPoint.afterStream;
     _enabled = hook?.enabled ?? true;
+    _initialSignature = _signature();
   }
+
+  String _signature() =>
+      '${_name.text}\u0000${_code.text}\u0000${_point.name}\u0000$_enabled';
 
   @override
   void dispose() {
@@ -212,6 +215,7 @@ class _HookEditScreenState extends ConsumerState<HookEditScreen> {
   /// 保存:名字与代码缺一即提示并中止;通过后整条写入(新建插入、编辑更新)
   /// 并失效列表,随后返回上一页。
   Future<void> _save() async {
+    if (_saving) return;
     if (_name.text.trim().isEmpty) {
       ScaffoldMessenger.of(
         context,
@@ -248,49 +252,37 @@ class _HookEditScreenState extends ConsumerState<HookEditScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_isNew ? '新建 Hook' : '编辑 Hook'),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          FormTextField(controller: _name, label: '名字 *', hint: 'Hook 名称'),
-          const SizedBox(height: 14),
-          FormDropdownField<HookTriggerPoint>(
-            value: _point,
-            label: '触发点',
-            items: HookTriggerPoint.values.toList(),
-            labelOf: hookPointLabel,
-            onChanged: (v) => setState(() => _point = v ?? _point),
-          ),
-          const SizedBox(height: 14),
-          FormTextField(
-            controller: _code,
-            label: 'JS 代码 *',
-            lines: 10,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-            hint: '改写脚本...',
-          ),
-          const SizedBox(height: 12),
-          SwitchListTile(
-            title: const Text('启用'),
-            value: _enabled,
-            onChanged: (v) => setState(() => _enabled = v),
-          ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+    return EditFormScaffold(
+      title: _isNew ? '新建 Hook' : '编辑 Hook',
+      saving: _saving,
+      onSave: _save,
+      hasChanges: () => _signature() != _initialSignature,
+      changes: [_name, _code],
+      children: [
+        FormTextField(controller: _name, label: '名字 *', hint: 'Hook 名称'),
+        const SizedBox(height: 14),
+        FormDropdownField<HookTriggerPoint>(
+          value: _point,
+          label: '触发点',
+          items: HookTriggerPoint.values.toList(),
+          labelOf: hookPointLabel,
+          onChanged: (v) => setState(() => _point = v ?? _point),
+        ),
+        const SizedBox(height: 14),
+        FormTextField(
+          controller: _code,
+          label: 'JS 代码 *',
+          lines: 10,
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+          hint: '改写脚本...',
+        ),
+        const SizedBox(height: 12),
+        SwitchListTile(
+          title: const Text('启用'),
+          value: _enabled,
+          onChanged: (v) => setState(() => _enabled = v),
+        ),
+      ],
     );
   }
 }

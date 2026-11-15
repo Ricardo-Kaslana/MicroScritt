@@ -1,10 +1,11 @@
-// 角色列表页 widget 测试:空态、卡片/网格布局、头像惰性加载与刷新、PNG 导入预览。
+// 角色列表页 widget 测试:空态、卡片/网格/牌堆布局、头像惰性加载与刷新、PNG 导入预览。
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/character_repository.dart';
@@ -16,14 +17,32 @@ import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/models/ui_prefs.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/character_screen.dart';
+import 'package:microscritt/ui/common/export_helper.dart';
+import 'package:microscritt/ui/widgets/character_deck.dart';
 import 'package:path/path.dart' as p;
 import '../import/png_chunk_reader_test.dart' show buildPngWithText;
+import '../support/fake_file_picker.dart';
 import '../support/test_database.dart';
 
 Widget _harness(AppDatabase db) => ProviderScope(
   overrides: [databaseProvider.overrideWithValue(db)],
   child: const MaterialApp(home: CharacterScreen()),
 );
+
+/// 打开布局菜单并直选目标布局(入口已从三态盲循环改为菜单)。
+Future<void> _selectLayout(WidgetTester tester, String label) async {
+  await tester.tap(find.byTooltip('切换布局'));
+  await tester.pumpAndSettle();
+  // 点菜单行本体而不是其中的 Text:全量套件并发时菜单入场动画偶有未
+  // 完全收敛,Text 的命中点会落在行外,导致选择被吞。
+  await tester.tap(
+    find.ancestor(
+      of: find.text(label),
+      matching: find.byType(CheckedPopupMenuItem<CharacterLayout>),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
 
 Future<void> _pumpUntilLoaded(WidgetTester tester) async {
   // 角色列表已改为「头像按 id 惰性加载」:列表查询不拉大头像 BLOB(移动端
@@ -55,7 +74,9 @@ Future<String> _pngBase64(int width, int height) async {
 /// 轮询直到头像预览的 Image 出现(惰性加载 + 图片解码都是真实异步)。
 Future<void> _pumpAvatarUntilImage(WidgetTester tester) async {
   for (var i = 0; i < 40 && find.byType(Image).evaluate().isEmpty; i++) {
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
     await tester.pump();
   }
 }
@@ -70,7 +91,9 @@ Uint8List? _renderedAvatarBytes(WidgetTester tester) {
 }
 
 void main() {
-  testWidgets('empty database shows the empty state with import action', (tester) async {
+  testWidgets('empty database shows the empty state with import action', (
+    tester,
+  ) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -79,15 +102,20 @@ void main() {
     await _pumpUntilLoaded(tester);
 
     expect(find.text('暂无角色'), findsOneWidget);
-    expect(find.text('导入角色卡'), findsWidgets);
+    expect(find.text('导入'), findsOneWidget);
+    expect(find.text('新建'), findsOneWidget);
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('lists characters as cards with preview and action sheet', (tester) async {
+  testWidgets('lists characters as cards with preview and action sheet', (
+    tester,
+  ) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
-      await CharacterRepository(db).insert(const CharacterCard(name: 'Alice', description: 'a knight'));
+      await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice', description: 'a knight'));
     });
     await tester.pumpWidget(_harness(db));
     await _pumpUntilLoaded(tester);
@@ -102,18 +130,132 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('编辑角色卡'), findsOneWidget);
     expect(find.text('世界书'), findsOneWidget);
-    expect(find.text('导出角色卡(JSON)'), findsOneWidget);
-    expect(find.text('导出角色卡(PNG)'), findsOneWidget);
+    expect(find.text('导出角色卡'), findsOneWidget);
+    expect(find.text('导出角色卡(JSON)'), findsNothing);
+    expect(find.text('导出角色卡(PNG)'), findsNothing);
+    // 桌面端不提供系统分享面板,菜单里没有「分享角色卡」。
+    expect(find.text('分享角色卡'), findsNothing);
     expect(find.text('删除角色'), findsOneWidget);
+
+    // 导出合并为单个入口,点开后再选 JSON/PNG。
+    await tester.tap(find.text('导出角色卡'));
+    await tester.pumpAndSettle();
+    expect(find.text('JSON'), findsOneWidget);
+    expect(find.text('PNG'), findsOneWidget);
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('card preview shows the avatar image when base64 is set', (tester) async {
+  testWidgets('exports the chosen JSON format via the merged entry', (
+    tester,
+  ) async {
+    late final AppDatabase db;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+    });
+    final fake = FakeFilePicker.install(savePath: '/tmp/Alice.json');
+    await tester.pumpWidget(_harness(db));
+    await _pumpUntilLoaded(tester);
+
+    await tester.tap(find.byTooltip('更多操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('导出角色卡'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('JSON'));
+    await tester.runAsync(() async {
+      for (var i = 0; i < 100 && fake.saveCalls == 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await tester.pump();
+      }
+    });
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(fake.saveCalls, 1);
+    final saved =
+        jsonDecode(utf8.decode(fake.savedBytes!)) as Map<String, dynamic>;
+    expect(saved['name'], 'Alice');
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('mobile menu shares the chosen JSON format', (tester) async {
+    late final AppDatabase db;
+    late final Directory temp;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      temp = await Directory.systemTemp.createTemp('card_share');
+      await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+    });
+
+    const pathProviderChannel = MethodChannel(
+      'plugins.flutter.io/path_provider',
+    );
+    const shareChannel = MethodChannel('dev.fluttercommunity.plus/share');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(pathProviderChannel, (call) async {
+      if (call.method == 'getTemporaryDirectory') return temp.path;
+      return null;
+    });
+    Map<Object?, Object?>? shareArgs;
+    messenger.setMockMethodCallHandler(shareChannel, (call) async {
+      if (call.method != 'share') return null;
+      shareArgs = call.arguments as Map<Object?, Object?>;
+      return 'ok';
+    });
+
+    debugMobileShareOverride = true;
+    try {
+      await tester.pumpWidget(_harness(db));
+      await _pumpUntilLoaded(tester);
+
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      expect(find.text('分享角色卡'), findsOneWidget);
+      await tester.tap(find.text('分享角色卡'));
+      await tester.pumpAndSettle();
+      expect(find.text('JSON'), findsOneWidget);
+      expect(find.text('PNG'), findsOneWidget);
+      await tester.tap(find.text('JSON'));
+      await tester.runAsync(() async {
+        for (var i = 0; i < 100 && shareArgs == null; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          await tester.pump();
+        }
+      });
+      await tester.pumpAndSettle();
+
+      final paths = shareArgs?['paths'] as List?;
+      expect(paths, isNotNull);
+      final sharedPath = paths!.single as String;
+      expect(sharedPath, endsWith('Alice.json'));
+      final content =
+          jsonDecode(File(sharedPath).readAsStringSync())
+              as Map<String, dynamic>;
+      expect(content['name'], 'Alice');
+      // 分享档留给接收方读取,不随返回删除。
+      expect(File(sharedPath).existsSync(), isTrue);
+      expect(find.text('已打开分享面板'), findsOneWidget);
+    } finally {
+      debugMobileShareOverride = null;
+      messenger.setMockMethodCallHandler(pathProviderChannel, null);
+      messenger.setMockMethodCallHandler(shareChannel, null);
+      await tester.runAsync(() async {
+        await db.db.close();
+        if (temp.existsSync()) temp.deleteSync(recursive: true);
+      });
+    }
+  });
+
+  testWidgets('card preview shows the avatar image when base64 is set', (
+    tester,
+  ) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
       final b64 = await _pngBase64(64, 84);
-      await CharacterRepository(db).insert(CharacterCard(name: 'Pixel', avatarBase64: b64));
+      await CharacterRepository(
+        db,
+      ).insert(CharacterCard(name: 'Pixel', avatarBase64: b64));
     });
     await tester.pumpWidget(_harness(db));
     await _pumpUntilLoaded(tester);
@@ -125,13 +267,20 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('card preview shows a data-URI (data:image) avatar', (tester) async {
+  testWidgets('card preview shows a data-URI (data:image) avatar', (
+    tester,
+  ) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
       // 常见角色卡把头像存成完整 data URI;以前 base64Decode 直接抛 → 渐变占位。
       final rawB64 = await _pngBase64(64, 84);
-      await CharacterRepository(db).insert(CharacterCard(name: 'Pixel', avatarBase64: 'data:image/png;base64,$rawB64'));
+      await CharacterRepository(db).insert(
+        CharacterCard(
+          name: 'Pixel',
+          avatarBase64: 'data:image/png;base64,$rawB64',
+        ),
+      );
     });
     await tester.pumpWidget(_harness(db));
     await _pumpUntilLoaded(tester);
@@ -190,9 +339,96 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('layout toggle switches list/grid in place and keeps the query', (
-    tester,
-  ) async {
+  testWidgets(
+    'layout toggle cycles list/grid/deck in place and keeps the query',
+    (tester) async {
+      late final AppDatabase db;
+      await tester.runAsync(() async {
+        db = await openTestDb();
+        final repo = CharacterRepository(db);
+        await repo.insert(
+          const CharacterCard(name: 'Alice', description: 'a knight'),
+        );
+        await repo.insert(
+          const CharacterCard(name: 'Bob', description: 'a bard'),
+        );
+      });
+      await tester.pumpWidget(_harness(db));
+      await _pumpUntilLoaded(tester);
+
+      // 默认列表布局:描述正常显示。
+      expect(find.byType(ListView), findsOneWidget);
+      expect(find.byType(GridView), findsNothing);
+      expect(find.text('a knight'), findsOneWidget);
+
+      // 先搜索,再原地切到图片网格:检索词与过滤保留。
+      await tester.enterText(find.byType(TextField), 'Alice');
+      await tester.pumpAndSettle();
+      expect(find.text('Bob'), findsNothing);
+
+      await _selectLayout(tester, '图片布局');
+      final grid = find.byType(GridView);
+      expect(grid, findsOneWidget);
+      expect(find.byType(ListView), findsNothing);
+      expect(
+        find.descendant(of: grid, matching: find.text('Alice')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: grid, matching: find.text('a knight')),
+        findsOneWidget,
+      );
+      expect(find.text('Bob'), findsNothing);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        'Alice',
+      );
+
+      // 网格条目右上角的操作菜单可用。
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      expect(find.text('编辑角色卡'), findsOneWidget);
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+
+      // 再切到牌堆布局:过滤后的 Alice 独占正面,检索词仍保留。
+      await _selectLayout(tester, '牌堆布局');
+      expect(find.byType(CharacterDeckView), findsOneWidget);
+      expect(find.byType(ListView), findsNothing);
+      expect(find.byType(GridView), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byType(CharacterDeckView),
+          matching: find.text('Alice'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('a knight'), findsOneWidget);
+      expect(find.text('Bob'), findsNothing);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        'Alice',
+      );
+
+      // 牌堆正面的操作菜单可用。
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      expect(find.text('编辑角色卡'), findsOneWidget);
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+
+      // 切回列表布局,搜索词仍保留。
+      await _selectLayout(tester, '列表布局');
+      expect(find.byType(ListView), findsOneWidget);
+      expect(find.byType(GridView), findsNothing);
+      expect(find.byType(CharacterDeckView), findsNothing);
+      expect(find.text('a knight'), findsOneWidget);
+      expect(find.text('Bob'), findsNothing);
+      await tester.runAsync(() => db.db.close());
+    },
+  );
+
+  testWidgets('keyboard does not squeeze the deck cards', (tester) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -203,53 +439,33 @@ void main() {
       await repo.insert(
         const CharacterCard(name: 'Bob', description: 'a bard'),
       );
+      await repo.insert(
+        const CharacterCard(name: 'Carol', description: 'a mage'),
+      );
     });
     await tester.pumpWidget(_harness(db));
     await _pumpUntilLoaded(tester);
+    await _selectLayout(tester, '牌堆布局');
 
-    // 默认列表布局:描述正常显示。
-    expect(find.byType(ListView), findsOneWidget);
-    expect(find.byType(GridView), findsNothing);
-    expect(find.text('a knight'), findsOneWidget);
-
-    // 先搜索,再原地切到图片网格:检索词与过滤保留。
-    await tester.enterText(find.byType(TextField), 'Alice');
-    await tester.pumpAndSettle();
-    expect(find.text('Bob'), findsNothing);
-
-    await tester.tap(find.byTooltip('图片布局'));
-    await tester.pumpAndSettle();
-    final grid = find.byType(GridView);
-    expect(grid, findsOneWidget);
-    expect(find.byType(ListView), findsNothing);
+    // 牌堆卡面尺寸由可用高度推导:键盘弹起若压缩 body,IME 动画的逐帧
+    // 改高会让整副牌来回缩放。牌堆模式不随键盘让位,检索框固定在顶部,
+    // 键盘直接覆盖底部即可。
     expect(
-      find.descendant(of: grid, matching: find.text('Alice')),
-      findsOneWidget,
+      tester.widget<Scaffold>(find.byType(Scaffold)).resizeToAvoidBottomInset,
+      isFalse,
     );
-    expect(
-      find.descendant(of: grid, matching: find.text('a knight')),
-      findsOneWidget,
+    final face = find.descendant(
+      of: find.byType(CharacterDeckView),
+      matching: find.byType(ImageFiltered),
     );
-    expect(find.text('Bob'), findsNothing);
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller?.text,
-      'Alice',
-    );
+    final settled = tester.getSize(face.first);
 
-    // 网格条目右上角的操作菜单可用。
-    await tester.tap(find.byTooltip('更多操作'));
-    await tester.pumpAndSettle();
-    expect(find.text('编辑角色卡'), findsOneWidget);
-    await tester.tapAt(const Offset(20, 20));
+    await tester.tap(find.byType(TextField));
+    tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+    addTearDown(tester.view.resetViewInsets);
     await tester.pumpAndSettle();
 
-    // 切回列表布局,搜索词仍保留。
-    await tester.tap(find.byTooltip('列表布局'));
-    await tester.pumpAndSettle();
-    expect(find.byType(ListView), findsOneWidget);
-    expect(find.byType(GridView), findsNothing);
-    expect(find.text('a knight'), findsOneWidget);
-    expect(find.text('Bob'), findsNothing);
+    expect(tester.getSize(face.first), settled);
     await tester.runAsync(() => db.db.close());
   });
 
@@ -287,8 +503,7 @@ void main() {
 
     // 切到图片布局:立即生效并回写偏好文件(写盘是真实 IO,需要真实时间 +
     // 帧循环推进才能跑完回调)。
-    await tester.tap(find.byTooltip('图片布局'));
-    await tester.pump();
+    await _selectLayout(tester, '图片布局');
     expect(find.byType(GridView), findsOneWidget);
     UiPrefs? saved;
     for (var i = 0; i < 40; i++) {
@@ -309,7 +524,130 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('oversized card rows still show their description', (tester) async {
+  testWidgets('deck layout choice is persisted and restored on next launch', (
+    tester,
+  ) async {
+    late final AppDatabase db;
+    late final Directory dir;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      dir = await Directory.systemTemp.createTemp('ui_prefs_deck_');
+      final repo = CharacterRepository(db);
+      await repo.insert(const CharacterCard(name: 'Alice'));
+      await repo.insert(const CharacterCard(name: 'Bob'));
+    });
+    addTearDown(() async {
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {
+        // Windows 上仍在收尾的写入偶尔会短暂占用目录;临时目录交给系统清理。
+      }
+    });
+    final prefs = UiPrefsFile(p.join(dir.path, UiPrefsFile.fileName));
+
+    Widget harnessWith(CharacterLayout initial) => ProviderScope(
+      overrides: [
+        databaseProvider.overrideWithValue(db),
+        uiPrefsFileProvider.overrideWithValue(prefs),
+        characterLayoutProvider.overrideWith((ref) => initial),
+      ],
+      child: const MaterialApp(home: CharacterScreen()),
+    );
+
+    // 列表 → 图片 → 牌堆:菜单直选,最后一次选择落盘为 deck。
+    await tester.pumpWidget(harnessWith(CharacterLayout.list));
+    await _pumpUntilLoaded(tester);
+    await _selectLayout(tester, '图片布局');
+    await _selectLayout(tester, '牌堆布局');
+    expect(find.byType(CharacterDeckView), findsOneWidget);
+    UiPrefs? saved;
+    for (var i = 0; i < 40; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 25)),
+      );
+      await tester.pump();
+      saved = await tester.runAsync(() => prefs.read());
+      if (saved!.characterLayout == CharacterLayout.deck) break;
+    }
+    expect(saved!.characterLayout, CharacterLayout.deck);
+
+    // 模拟下次启动:按文件内容重建根作用域,直接呈现牌堆布局。
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(harnessWith(saved.characterLayout));
+    await _pumpUntilLoaded(tester);
+    expect(find.byType(CharacterDeckView), findsOneWidget);
+    expect(find.textContaining('1 / 2'), findsOneWidget);
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('deck front card is persisted and restored on next launch', (
+    tester,
+  ) async {
+    late final AppDatabase db;
+    late final Directory dir;
+    late final List<CharacterRecord> records;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      dir = await Directory.systemTemp.createTemp('ui_prefs_deck_front_');
+      final repo = CharacterRepository(db);
+      await repo.insert(const CharacterCard(name: 'Alice'));
+      await repo.insert(const CharacterCard(name: 'Bob'));
+      records = await repo.all();
+    });
+    addTearDown(() async {
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {
+        // Windows 上仍在收尾的写入偶尔会短暂占用目录;临时目录交给系统清理。
+      }
+    });
+    final prefs = UiPrefsFile(p.join(dir.path, UiPrefsFile.fileName));
+
+    Widget harnessWith(UiPrefs saved) => ProviderScope(
+      overrides: [
+        databaseProvider.overrideWithValue(db),
+        uiPrefsFileProvider.overrideWithValue(prefs),
+        characterLayoutProvider.overrideWith((ref) => saved.characterLayout),
+        deckFrontCharacterIdProvider.overrideWith(
+          (ref) => saved.deckFrontCharacterId,
+        ),
+      ],
+      child: const MaterialApp(home: CharacterScreen()),
+    );
+
+    await tester.pumpWidget(
+      harnessWith(const UiPrefs(characterLayout: CharacterLayout.deck)),
+    );
+    await _pumpUntilLoaded(tester);
+    expect(find.textContaining('1 / 2'), findsOneWidget);
+
+    // 翻到第二张:内存态立即更新,偏好文件异步回写。
+    await tester.tap(find.byTooltip('下一张'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('2 / 2'), findsOneWidget);
+
+    UiPrefs? saved;
+    for (var i = 0; i < 40; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 25)),
+      );
+      await tester.pump();
+      saved = await tester.runAsync(() => prefs.read());
+      if (saved!.deckFrontCharacterId != null) break;
+    }
+    expect(saved!.deckFrontCharacterId, records[1].id);
+
+    // 模拟下次启动:按文件内容重建根作用域,牌堆仍停在第二张。
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(harnessWith(saved));
+    await _pumpUntilLoaded(tester);
+    expect(find.textContaining('2 / 2'), findsOneWidget);
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('oversized card rows still show their description', (
+    tester,
+  ) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -331,30 +669,35 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('card preview falls back to the avatar_base64 column when data_json lacks it', (tester) async {
-    late final AppDatabase db;
-    await tester.runAsync(() async {
-      db = await openTestDb();
-      final rawB64 = await _pngBase64(64, 84);
-      // 手工写入:avatar 只落在 characters.avatar_base64 列,data_json 里没有 avatar。
-      await db.db.insert('characters', {
-        'name': 'Legacy',
-        'avatar_base64': rawB64,
-        'data_json':
-            '{"name":"Legacy","description":"","personality":"","scenario":'
-            '"","first_mes":"","mes_example":"","system_prompt":"","post_history_instructions":"","creator_notes":""}',
+  testWidgets(
+    'card preview falls back to the avatar_base64 column when data_json lacks it',
+    (tester) async {
+      late final AppDatabase db;
+      await tester.runAsync(() async {
+        db = await openTestDb();
+        final rawB64 = await _pngBase64(64, 84);
+        // 手工写入:avatar 只落在 characters.avatar_base64 列,data_json 里没有 avatar。
+        await db.db.insert('characters', {
+          'name': 'Legacy',
+          'avatar_base64': rawB64,
+          'data_json':
+              '{"name":"Legacy","description":"","personality":"","scenario":'
+              '"","first_mes":"","mes_example":"","system_prompt":"","post_history_instructions":"","creator_notes":""}',
+        });
       });
-    });
-    await tester.pumpWidget(_harness(db));
-    await _pumpUntilLoaded(tester);
-    await _pumpAvatarUntilImage(tester);
+      await tester.pumpWidget(_harness(db));
+      await _pumpUntilLoaded(tester);
+      await _pumpAvatarUntilImage(tester);
 
-    expect(find.byType(Image), findsOneWidget);
-    expect(find.text('L'), findsNothing);
-    await tester.runAsync(() => db.db.close());
-  });
+      expect(find.byType(Image), findsOneWidget);
+      expect(find.text('L'), findsNothing);
+      await tester.runAsync(() => db.db.close());
+    },
+  );
 
-  testWidgets('delete menu item removes the character after confirmation', (tester) async {
+  testWidgets('delete menu item removes the character after confirmation', (
+    tester,
+  ) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -373,9 +716,13 @@ void main() {
     expect(find.text('删除角色?'), findsOneWidget);
     await tester.runAsync(() async {
       await tester.tap(find.text('删除').last);
-      final container = ProviderScope.containerOf(tester.element(find.byType(CharacterScreen)));
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(CharacterScreen)),
+      );
       for (var i = 0; i < 60; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 50)); // 真实时间,喂给 DB isolate
+        await Future<void>.delayed(
+          const Duration(milliseconds: 50),
+        ); // 真实时间,喂给 DB isolate
         await tester.pump();
         final st = container.read(charactersProvider);
         final stillThere = st.value?.any((c) => c.card.name == 'Bob') ?? true;
@@ -390,7 +737,9 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('imported PNG card shows its own image as the preview avatar', (tester) async {
+  testWidgets('imported PNG card shows its own image as the preview avatar', (
+    tester,
+  ) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -402,7 +751,9 @@ void main() {
       });
       final png = buildPngWithText('ccv3', base64.encode(utf8.encode(json)));
       final card = CharacterCardImporter.fromBytes(png);
-      await CharacterRepository(db).insertWithWorldbook(card, WorldbookImporter.extract(card));
+      await CharacterRepository(
+        db,
+      ).insertWithWorldbook(card, WorldbookImporter.extract(card));
     });
     await tester.pumpWidget(_harness(db));
     await _pumpUntilLoaded(tester);

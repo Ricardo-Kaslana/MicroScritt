@@ -42,6 +42,16 @@ void main() {
     });
   });
 
+  group('formatTokenCountZh', () {
+    test('formats 万 and 亿', () {
+      expect(formatTokenCountZh(999), '999');
+      expect(formatTokenCountZh(10000), '1万');
+      expect(formatTokenCountZh(237000), '23.7万');
+      expect(formatTokenCountZh(1000000), '100万');
+      expect(formatTokenCountZh(123456789), '1.2亿');
+    });
+  });
+
   test('estimateTokensFromChars is a rough non-negative estimate', () {
     expect(estimateTokensFromChars(320), 100);
     expect(estimateTokensFromChars(0), 0);

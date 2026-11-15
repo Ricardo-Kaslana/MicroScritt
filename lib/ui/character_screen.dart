@@ -1,10 +1,11 @@
-/// 角色列表首屏:导入/新建入口、列表与网格两种布局、角色操作菜单。
+/// 角色列表首屏:导入/新建入口、列表/图片/牌堆三种布局、角色操作菜单。
 ///
 /// 头像经 `characterAvatarProvider` 按 id 惰性读取并降采样解码,大卡头像
 /// 不随列表行加载(Android CursorWindow 上限);导入/导出都带阶段进度,
 /// 取消即中止且不写库。
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -20,6 +21,7 @@ import '../models/character_card.dart';
 import '../models/ui_prefs.dart';
 import '../models/worldbook_entry.dart';
 import '../state/providers.dart';
+import '../state/ui_prefs_sync.dart';
 import 'character_edit_screen.dart';
 import 'common/app_menu.dart';
 import 'common/confirm_dialog.dart';
@@ -31,23 +33,33 @@ import 'common/searchable_list.dart';
 import 'common/shrink_image.dart';
 import 'sessions_screen.dart';
 import 'settings_screen.dart';
+import 'widgets/character_avatar_preview.dart';
+import 'widgets/character_deck.dart';
 import 'worldbook_screen.dart';
 
-/// 角色卡管理:首屏(`home`),卡片/网格两种布局,点击进入会话列表;
+/// 角色卡导出/分享的文件形态:纯 JSON,或内嵌卡数据的 PNG 图片。
+enum _CardFileFormat { json, png }
+
+/// 角色卡管理:首屏(`home`),列表/图片/牌堆三种布局,点击进入会话列表;
 /// 右上角进入设置页,底部「添加」提供导入 PNG/JSON 与新建角色。
 ///
 /// 布局偏好写入独立的 `ui-prefs.json`,写失败只打日志,不回滚本次切换。
 class CharacterScreen extends ConsumerWidget {
   const CharacterScreen({super.key});
 
-  /// 原地切换列表/图片布局:先更新内存状态(立即生效),再回写偏好文件
-  /// (`ui-prefs.json`,写失败只打日志,不影响本次切换)。
-  Future<void> _toggleLayout(WidgetRef ref) async {
-    final next = ref.read(characterLayoutProvider).toggled;
+  /// 切换布局:先更新内存状态(立即生效),再整体回写偏好文件
+  /// (`ui-prefs.json`,写失败只打日志,不影响本次切换)。布局从三态盲循环
+  /// 改为菜单直选,当前项带勾选标记,不必连点猜下一个是什么。
+  Future<void> _setLayout(WidgetRef ref, CharacterLayout next) async {
+    if (ref.read(characterLayoutProvider) == next) return;
     ref.read(characterLayoutProvider.notifier).state = next;
-    final file = ref.read(uiPrefsFileProvider);
-    if (file == null) return;
-    await file.write(UiPrefs(characterLayout: next));
+    await syncUiPrefsFile(ref);
+  }
+
+  /// 牌堆翻到新正面卡:进度先在内存生效,再异步回写偏好文件。
+  void _onDeckFrontChanged(WidgetRef ref, int id) {
+    ref.read(deckFrontCharacterIdProvider.notifier).state = id;
+    unawaited(syncUiPrefsFile(ref));
   }
 
   void _toast(BuildContext context, String message) {
@@ -74,8 +86,13 @@ class CharacterScreen extends ConsumerWidget {
     // 这里一律从选择结果的 path 读,Dart 堆不占原生配额,大文件也稳。
     try {
       final result = await FilePicker.pickFiles(withData: false);
-      final picked = result?.files.single;
-      if (picked == null || !context.mounted) return;
+      // 系统文件选择器的返回键是标准取消路径,取消不是失败。
+      if (result == null) {
+        if (context.mounted) _toast(context, '已取消导入');
+        return;
+      }
+      final picked = result.files.single;
+      if (!context.mounted) return;
       // 分阶段进度:20MB 卡光是读文件/解码缩图就要数秒,不能只丢一个会消失的
       // SnackBar 让界面看起来卡死。任务内每个阶段先让对话框完成一帧,再干重活。
       final card = await runWithProgress<CharacterCard?>(
@@ -144,6 +161,8 @@ class CharacterScreen extends ConsumerWidget {
         return;
       }
       ref.invalidate(charactersProvider);
+      // 侧栏分组直接读角色仓库,不随 charactersProvider 联动,需显式失效。
+      ref.invalidate(sessionGroupsProvider);
       _toast(context, '已导入:${card.name}');
     } on FormatException catch (e) {
       if (!context.mounted) return;
@@ -168,6 +187,7 @@ class CharacterScreen extends ConsumerWidget {
     if (!confirmed || !context.mounted) return;
     await ref.read(characterRepositoryProvider).deleteWithCascade(id);
     ref.invalidate(charactersProvider);
+    ref.invalidate(sessionGroupsProvider);
   }
 
   /// 导出前的公共读取:分块读取让 20MB 级卡(单行超 CursorWindow)也能导出。
@@ -184,71 +204,44 @@ class CharacterScreen extends ConsumerWidget {
     return (card, worldbook);
   }
 
-  /// 导出 JSON 卡:世界书以本端当前条目为准覆盖 `character_book`;读取失败
-  /// 给出明确提示,不生成空文件。
-  Future<void> _export(
-    BuildContext context,
-    WidgetRef ref,
-    int id,
-    String name,
-  ) async {
-    var cancelled = false;
-    try {
-      final bytes = await runWithProgress<Uint8List?>(
-        context,
-        title: '正在导出角色卡',
-        task: (controller) async {
-          controller.report(message: '读取角色卡…');
-          await WidgetsBinding.instance.endOfFrame;
-          final loaded = await _loadForExport(ref, id);
-          if (loaded == null) return null;
-          if (controller.cancelled) {
-            cancelled = true;
-            return null;
-          }
-          final (card, worldbook) = loaded;
-          controller.report(message: '生成导出文件…');
-          await WidgetsBinding.instance.endOfFrame;
-          // 世界书随卡导出:以本端当前条目为准覆盖 character_book(见 exporter 注释)。
-          final content = CharacterCardExporter.export(
-            card,
-            worldbook: worldbook,
-          );
-          return utf8.encoder.convert(content);
-        },
-      );
-      if (!context.mounted) return;
-      if (bytes == null) {
-        _toast(
-          context,
-          cancelled ? '已取消导出' : '无法导出:角色卡数据读取失败',
-        );
-        return;
-      }
-      await saveBytesFile(
-        context,
-        fileName: '$name.json',
-        bytes: bytes,
-        allowedExtensions: const ['json'],
-      );
-    } catch (e) {
-      if (!context.mounted) return;
-      _toast(context, '导出失败:$e');
-    }
+  /// 选择导出/分享的文件形态:纯 JSON 或内嵌卡数据的 PNG。
+  Future<_CardFileFormat?> _chooseCardFormat(BuildContext context) {
+    return showAppActionSheet<_CardFileFormat>(
+      context,
+      actions: const [
+        MenuAction(
+          value: _CardFileFormat.json,
+          label: 'JSON',
+          subtitle: '纯文本角色卡,世界书随卡导出',
+          icon: Icons.code_outlined,
+        ),
+        MenuAction(
+          value: _CardFileFormat.png,
+          label: 'PNG',
+          subtitle: '头像作图片本体,卡数据嵌入图片',
+          icon: Icons.image_outlined,
+        ),
+      ],
+    );
   }
 
-  /// PNG 卡导出:头像作图片本体、卡数据嵌入文本块;无头像时导出器生成占位图。
-  Future<void> _exportPng(
+  /// 导出/分享角色卡:JSON 为纯文本卡,PNG 以头像为图片本体并内嵌卡数据;
+  /// 世界书都以本端当前条目为准覆盖 `character_book`。读取失败给出明确提示,
+  /// 不生成空文件。
+  Future<void> _exportCard(
     BuildContext context,
     WidgetRef ref,
     int id,
     String name,
-  ) async {
+    _CardFileFormat format, {
+    bool share = false,
+  }) async {
+    final isPng = format == _CardFileFormat.png;
     var cancelled = false;
     try {
       final bytes = await runWithProgress<Uint8List?>(
         context,
-        title: '正在导出 PNG',
+        title: isPng ? '正在生成 PNG 角色卡' : '正在导出角色卡',
         task: (controller) async {
           controller.report(message: '读取角色卡…');
           await WidgetsBinding.instance.endOfFrame;
@@ -259,31 +252,40 @@ class CharacterScreen extends ConsumerWidget {
             return null;
           }
           final (card, worldbook) = loaded;
-          controller.report(message: '生成 PNG…');
+          controller.report(message: isPng ? '生成 PNG…' : '生成导出文件…');
           await WidgetsBinding.instance.endOfFrame;
-          return CharacterCardPngExporter.export(
-            card,
-            worldbook: worldbook,
-          );
+          // 世界书随卡导出:以本端当前条目为准覆盖 character_book(见 exporter 注释)。
+          return isPng
+              ? CharacterCardPngExporter.export(card, worldbook: worldbook)
+              : utf8.encoder.convert(
+                  CharacterCardExporter.export(card, worldbook: worldbook),
+                );
         },
       );
       if (!context.mounted) return;
       if (bytes == null) {
-        _toast(
-          context,
-          cancelled ? '已取消导出' : '无法导出:角色卡数据读取失败',
-        );
+        _toast(context, cancelled ? '已取消导出' : '无法导出:角色卡数据读取失败');
         return;
       }
-      await saveBytesFile(
-        context,
-        fileName: '$name.png',
-        bytes: bytes,
-        allowedExtensions: const ['png'],
-      );
+      final fileName = isPng ? '$name.png' : '$name.json';
+      if (share) {
+        await shareBytesFile(
+          context,
+          fileName: fileName,
+          bytes: bytes,
+          mimeType: isPng ? 'image/png' : 'application/json',
+        );
+      } else {
+        await saveBytesFile(
+          context,
+          fileName: fileName,
+          bytes: bytes,
+          allowedExtensions: [isPng ? 'png' : 'json'],
+        );
+      }
     } catch (e) {
       if (!context.mounted) return;
-      _toast(context, '导出 PNG 失败:$e');
+      _toast(context, share ? '分享失败:$e' : '导出失败:$e');
     }
   }
 
@@ -294,20 +296,29 @@ class CharacterScreen extends ConsumerWidget {
   ) async {
     final picked = await showAppActionSheet<String>(
       context,
-      actions: const [
-        MenuAction(value: 'edit', label: '编辑角色卡', icon: Icons.edit_outlined),
-        MenuAction(value: 'worldbook', label: '世界书', icon: Icons.book_outlined),
-        MenuAction(
+      actions: [
+        const MenuAction(
+          value: 'edit',
+          label: '编辑角色卡',
+          icon: Icons.edit_outlined,
+        ),
+        const MenuAction(
+          value: 'worldbook',
+          label: '世界书',
+          icon: Icons.book_outlined,
+        ),
+        const MenuAction(
           value: 'export',
-          label: '导出角色卡(JSON)',
+          label: '导出角色卡',
           icon: Icons.file_download_outlined,
         ),
-        MenuAction(
-          value: 'exportPng',
-          label: '导出角色卡(PNG)',
-          icon: Icons.image_outlined,
-        ),
-        MenuAction(
+        if (isMobileShareAvailable)
+          const MenuAction(
+            value: 'share',
+            label: '分享角色卡',
+            icon: Icons.share_outlined,
+          ),
+        const MenuAction(
           value: 'delete',
           label: '删除角色',
           icon: Icons.delete_outline,
@@ -333,9 +344,26 @@ class CharacterScreen extends ConsumerWidget {
           ),
         );
       case 'export':
-        _export(context, ref, c.id, c.card.name);
-      case 'exportPng':
-        _exportPng(context, ref, c.id, c.card.name);
+        {
+          final format = await _chooseCardFormat(context);
+          if (format != null && context.mounted) {
+            await _exportCard(context, ref, c.id, c.card.name, format);
+          }
+        }
+      case 'share':
+        {
+          final format = await _chooseCardFormat(context);
+          if (format != null && context.mounted) {
+            await _exportCard(
+              context,
+              ref,
+              c.id,
+              c.card.name,
+              format,
+              share: true,
+            );
+          }
+        }
       case 'delete':
         _delete(context, ref, c.id, c.card.name);
     }
@@ -353,17 +381,42 @@ class CharacterScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final characters = ref.watch(charactersProvider);
-    final grid = ref.watch(characterLayoutProvider) == CharacterLayout.grid;
+    final layout = ref.watch(characterLayoutProvider);
+    final grid = layout == CharacterLayout.grid;
     return Scaffold(
+      // 牌堆的卡面尺寸由可用高度推导,键盘弹起时若 body 随之收缩,弹起
+      // 动画的每一帧都会重算卡宽,整副牌被持续缩放挤压。牌堆没有滚动
+      // 视图、检索框又固定在页面顶部,让键盘直接覆盖底部即可(点空白处
+      // 或按搜索键收起键盘);列表/网格仍保留默认的让位行为。
+      resizeToAvoidBottomInset: layout != CharacterLayout.deck,
       appBar: AppBar(
         title: const Text('角色'),
         actions: [
-          IconButton(
-            tooltip: grid ? '列表布局' : '图片布局',
-            icon: Icon(
-              grid ? Icons.view_list_rounded : Icons.grid_view_rounded,
-            ),
-            onPressed: () => _toggleLayout(ref),
+          PopupMenuButton<CharacterLayout>(
+            tooltip: '切换布局',
+            icon: Icon(switch (layout) {
+              CharacterLayout.list => Icons.view_list_rounded,
+              CharacterLayout.grid => Icons.grid_view_rounded,
+              CharacterLayout.deck => Icons.style_rounded,
+            }),
+            onSelected: (next) => _setLayout(ref, next),
+            itemBuilder: (context) => [
+              CheckedPopupMenuItem(
+                value: CharacterLayout.list,
+                checked: layout == CharacterLayout.list,
+                child: const Text('列表布局'),
+              ),
+              CheckedPopupMenuItem(
+                value: CharacterLayout.grid,
+                checked: layout == CharacterLayout.grid,
+                child: const Text('图片布局'),
+              ),
+              CheckedPopupMenuItem(
+                value: CharacterLayout.deck,
+                checked: layout == CharacterLayout.deck,
+                child: const Text('牌堆布局'),
+              ),
+            ],
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -386,10 +439,27 @@ class CharacterScreen extends ConsumerWidget {
                 icon: Icons.person_add_alt_1_outlined,
                 title: '暂无角色',
                 message: '导入一张角色卡(PNG/JSON),或从零新建一个角色。',
-                action: FilledButton.tonalIcon(
-                  onPressed: () => _import(context, ref),
-                  icon: const Icon(Icons.file_upload_outlined),
-                  label: const Text('导入角色卡'),
+                // 空态与右下角「添加」菜单给同一组入口:导入与新建都是
+                // 首次使用的正常路径,不让用户只能先猜 FAB。
+                action: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    FilledButton.tonal(
+                      onPressed: () => _import(context, ref),
+                      child: const Text('导入'),
+                    ),
+                    FilledButton.tonal(
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const CharacterEditScreen(),
+                        ),
+                      ),
+                      child: const Text('新建'),
+                    ),
+                  ],
                 ),
               )
             : Center(
@@ -399,6 +469,18 @@ class CharacterScreen extends ConsumerWidget {
                   child: SearchableList<CharacterRecord>(
                     items: list,
                     grid: grid,
+                    deckBuilder: layout == CharacterLayout.deck
+                        ? (context, items) => CharacterDeckView(
+                            records: items,
+                            initialFrontId: ref.read(
+                              deckFrontCharacterIdProvider,
+                            ),
+                            onFrontChanged: (id) =>
+                                _onDeckFrontChanged(ref, id),
+                            onOpen: (c) => _openSessions(context, c),
+                            onActions: (c) => _openActions(context, ref, c),
+                          )
+                        : null,
                     searchHint: '搜索角色名称/描述',
                     searchText: (c) => '${c.card.name} ${c.card.description}',
                     itemBuilder: (context, c) => grid
@@ -418,8 +500,19 @@ class CharacterScreen extends ConsumerWidget {
                   ),
                 ),
               ),
-        error: (e, _) =>
-            EmptyState(icon: Icons.error_outline, title: '加载失败', message: '$e'),
+        error: (e, _) => EmptyState(
+          icon: Icons.error_outline,
+          title: '加载失败',
+          message: '$e',
+          action: FilledButton.tonalIcon(
+            onPressed: () {
+              ref.invalidate(charactersProvider);
+              ref.invalidate(sessionGroupsProvider);
+            },
+            icon: const Icon(Icons.refresh),
+            label: const Text('重试'),
+          ),
+        ),
         loading: () => const Center(child: CircularProgressIndicator()),
       ),
     );
@@ -491,7 +584,7 @@ class _CharacterCardView extends StatelessWidget {
                     // 一律走惰性加载:有则显示,读取失败/为空回退占位。
                     child: AspectRatio(
                       aspectRatio: 3 / 4,
-                      child: _LazyAvatarPreview(
+                      child: CharacterAvatarPreview(
                         recordId: record.id,
                         card: card,
                       ),
@@ -563,7 +656,7 @@ class _CharacterGridTile extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            _LazyAvatarPreview(
+            CharacterAvatarPreview(
               recordId: record.id,
               card: card,
               borderRadius: 0,
@@ -624,77 +717,6 @@ class _CharacterGridTile extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 角色卡头像预览:按 id 惰性读 base64(列表查询已排除大 BLOB),拿到后按
-/// 用途降采样解码(列表 384、网格 768),大图不再全分辨率解码占内存;
-/// 读取失败/为空(超大历史行)回退名字首字占位,绝不再转圈。
-///
-/// 数据走 [characterAvatarProvider]:编辑保存后 invalidate 该 provider,
-/// 复用中的列表项也会拿到新头像(此前只按 id 重载,换头像要重导入才生效)。
-class _LazyAvatarPreview extends ConsumerWidget {
-  final int recordId;
-  final CharacterCard card;
-
-  /// 圆角/解码宽度按用途可调:列表缩略图 96 宽(384 解码即 ~4x 密度),
-  /// 网格卡面更大,交给调用方放大解码宽度。
-  final double borderRadius;
-  final int cacheWidth;
-  const _LazyAvatarPreview({
-    required this.recordId,
-    required this.card,
-    this.borderRadius = 8,
-    this.cacheWidth = 384,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
-    final avatar = ref.watch(characterAvatarProvider(recordId));
-    final bytes = avatar.value;
-    if (bytes != null) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(borderRadius),
-        child: Image.memory(
-          bytes,
-          cacheWidth: cacheWidth,
-          fit: BoxFit.cover,
-          alignment: Alignment.topCenter,
-          errorBuilder: (_, __, ___) => _placeholder(context, scheme, card),
-        ),
-      );
-    }
-    if (avatar.isLoading) {
-      // 加载中:灰底占位,避免还没读到就闪字。
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(borderRadius),
-        child: Container(color: scheme.surfaceContainerHighest),
-      );
-    }
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(borderRadius),
-      child: _placeholder(context, scheme, card),
-    );
-  }
-
-  Widget _placeholder(
-    BuildContext context,
-    ColorScheme scheme,
-    CharacterCard card,
-  ) {
-    final initial = card.name.isEmpty ? '?' : card.name.characters.first;
-    return Container(
-      color: scheme.secondaryContainer.withValues(alpha: 0.55),
-      alignment: Alignment.center,
-      child: Text(
-        initial,
-        style: Theme.of(context).textTheme.displayLarge?.copyWith(
-          color: scheme.onSecondaryContainer,
-          fontWeight: FontWeight.w600,
         ),
       ),
     );

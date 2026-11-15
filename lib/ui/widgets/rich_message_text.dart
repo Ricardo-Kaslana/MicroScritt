@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../../engine/display_regex.dart';
 import '../../engine/glossary.dart';
+import '../text_syntax.dart';
 
 /// 剥离正文里 `<system-reminder>…</system-reminder>` 段所用的正则。
 ///
@@ -39,21 +40,6 @@ String expandDisplayMacros(String text, {String? userName, String? charName}) {
   return out;
 }
 
-/// 单遍扫描的主正则:样式标记(开/闭)与三种引号的台词。
-///
-/// 交替分支按序尝试,台词分支不允许跨引号(`“…”` 内无 `”`)。台词一旦命中
-/// 就整段输出,内部的标记不再解析 —— 引号里的 `<b>` 按原文显示。
-final RegExp _masterPattern = RegExp(
-  r'</?(?:i|b|u|s|mark|c)(?:=#?[0-9a-fA-F]{6})?>|“[^”]*”|「[^」]*」|"[^"]*"',
-);
-
-/// 开/闭标记的独立正则(用于判断主正则命中的是标记还是台词)。
-final RegExp _tagPattern = RegExp(r'^<(/?)(i|b|u|s|mark|c)(?:=(#?[0-9a-fA-F]{6}))?>$');
-
-/// 块级胶囊标记:优先匹配闭合形态;无闭合时把 `<chip>` 到文末的尾段也视为
-/// 胶囊内容(流式期间即时呈现,不闪裸标记)。
-final RegExp _chipPattern = RegExp(r'<chip>(.*?)</chip>|<chip>(.*?)$', dotAll: true);
-
 /// 拆分结果的一块:普通正文段(走行内富文本)或胶囊段(独占一行居中)。
 sealed class _RichPart {}
 
@@ -71,80 +57,33 @@ class _RichChipPart extends _RichPart {
 
 /// 把(宏替换 + 正则脚本之后的)显示文本按 `<chip>` 标记拆成块序列。
 ///
+/// 引号内的 chip 标记不拆块:整句台词交给富文本解析,标记在台词内剥除
+/// (见 [buildRichSpanTree] 的台词分支),避免一句话被拆成「引号 + 胶囊 +
+/// 引号」三段。胶囊标签按纯文本渲染,样式标记无从生效,直接剥掉。
 /// 标签内容为空的胶囊直接丢弃;纯空白正文段由渲染侧跳过。
-List<_RichPart> _splitChips(String text) {
+List<_RichPart> _splitChips(String text, CompiledSyntax syntax) {
   if (!text.contains('<chip>')) {
     return [_RichTextPart(text)];
   }
+  final quoteRanges = [
+    for (final m in syntax.quoteRangePattern.allMatches(text))
+      (m.start, m.end),
+  ];
+  bool inQuotes(int index) =>
+      quoteRanges.any((r) => index >= r.$1 && index < r.$2);
   final parts = <_RichPart>[];
   var last = 0;
-  for (final m in _chipPattern.allMatches(text)) {
+  for (final m in syntax.chipPattern.allMatches(text)) {
+    if (inQuotes(m.start)) continue;
     if (m.start > last) parts.add(_RichTextPart(text.substring(last, m.start)));
-    final label = (m.group(1) ?? m.group(2) ?? '').trim();
+    final label = (m.group(1) ?? m.group(2) ?? '')
+        .replaceAll(syntax.tagOnlyPattern, '')
+        .trim();
     if (label.isNotEmpty) parts.add(_RichChipPart(label));
     last = m.end;
   }
   if (last < text.length) parts.add(_RichTextPart(text.substring(last)));
   return parts;
-}
-
-/// 样式标记的种类。
-enum _TagKind { italic, bold, underline, strikethrough, color, highlight }
-
-_TagKind? _kindOf(String name) => switch (name) {
-      'i' => _TagKind.italic,
-      'b' => _TagKind.bold,
-      'u' => _TagKind.underline,
-      's' => _TagKind.strikethrough,
-      'c' => _TagKind.color,
-      'mark' => _TagKind.highlight,
-      _ => null,
-    };
-
-/// 栈里一个未闭合的标记。
-class _OpenTag {
-  final _TagKind kind;
-
-  /// `<c=RRGGBB>` 解析出的颜色(仅 color 种类有值)。
-  final Color? color;
-  const _OpenTag(this.kind, this.color);
-}
-
-/// 对话台词的强调色:随气泡底色取对比 —— 深色文字(白卡气泡)叠主题
-/// 主色,浅色文字(用户实心主色气泡)叠一点深色压出对比,再配斜体。
-Color _dialogueAccent(Color base, ColorScheme scheme) {
-  if (base.computeLuminance() > 0.5) {
-    return Color.alphaBlend(Colors.black.withValues(alpha: 0.18), base);
-  }
-  return Color.alphaBlend(scheme.primary.withValues(alpha: 0.55), base);
-}
-
-/// 把当前标记栈合成为样式。
-///
-/// 按入栈顺序叠加,后入栈的同类覆盖先入栈;`decoration` 只有一个槽位,
-/// 删除线会顶掉下划线(两者嵌套时以更内层为准)。
-TextStyle _composeStyle(TextStyle base, List<_OpenTag> stack, Color highlightColor) {
-  var s = base;
-  for (final t in stack) {
-    switch (t.kind) {
-      case _TagKind.italic:
-        s = s.copyWith(fontStyle: FontStyle.italic);
-      case _TagKind.bold:
-        s = s.copyWith(fontWeight: FontWeight.bold);
-      case _TagKind.underline:
-        s = s.copyWith(
-          decoration: TextDecoration.underline,
-          decorationColor: s.color?.withValues(alpha: 0.7),
-        );
-      case _TagKind.strikethrough:
-        s = s.copyWith(decoration: TextDecoration.lineThrough);
-      case _TagKind.color:
-        if (t.color != null) s = s.copyWith(color: t.color);
-      case _TagKind.highlight:
-        s = s.copyWith(backgroundColor: highlightColor);
-    }
-  }
-  return s;
 }
 
 /// 词条样式:保留当前样式,叠点状下划线(提示"这是个名词")。
@@ -157,15 +96,16 @@ TextStyle _termStyle(TextStyle style) => style.copyWith(
 /// 支持的样式标记(可由正则脚本的替换串输出,也可直接写在正文里):
 /// `<i>` / `<b>` / `<u>` / `<s>` / `<mark>` 与 `<c=RRGGBB>…</c>`;三种引号
 /// (`“…”` / `「…」` / `"…"`)内的台词按斜体强调渲染(受 [highlightDialogue]
-/// 开关控制)。未闭合的标记在段末自动容忍(流式期间常见),错配的闭合标记
-/// 被忽略。
+/// 开关控制),引号内的样式标记照常生效、不会以标签文本泄漏。未闭合的标记
+/// 在段末自动容忍(流式期间常见),错配的闭合标记被忽略。
 ///
 /// 解析为富文本 spans:普通文本随当前标记栈取样式;台词段叠斜体与强调色
 /// (`<c>` 栈里有颜色时尊重之);标记本身不产生文本。词典命中段在 emit 时
-/// 二次拆分为可点击词条 span;`@技能名` 记号([skillTokenPattern] 非空时)
-/// 同样在 emit 时二次拆分,命中段染 [skillTokenColor]。
+/// 二次拆分为可点击词条 span;`@技能名`、`/命令` 与未展开的显示宏在 emit
+/// 时由共享 [CompiledSyntax] 二次拆分并按 [SyntaxSurface] 取色。台词内不再
+/// 把 `/命令` 当成可执行命令高亮。
 ///
-/// 文本既不含 `<`/引号字符、也没有启用词典或记号高亮时,直接输出纯文本
+/// 文本既不含 `<`/引号字符、也没有启用词典或行内 token 时,直接输出纯文本
 /// span,不对长文本做正则扫描。新建的 [TapGestureRecognizer] 追加到
 /// [recognizerSink],所有权归调用方:
 /// 重建或销毁时必须逐个 dispose,否则 recognizer 会随流式重建累积泄漏。
@@ -177,28 +117,27 @@ TextSpan buildRichSpanTree(
   void Function(GlossaryTerm term)? onTermTap,
   List<TapGestureRecognizer>? recognizerSink,
   bool highlightDialogue = true,
-  RegExp? skillTokenPattern,
-  Color? skillTokenColor,
+  CompiledSyntax? syntax,
+  SyntaxSurface surface = SyntaxSurface.assistantBubble,
 }) {
   if (text.isEmpty) return TextSpan(style: base);
 
+  final s = syntax ?? CompiledSyntax.compile();
+  final palette = SyntaxPalette.of(scheme, surface, baseTextColor: base.color);
   final hasGlossary = glossary != null && !glossary.isEmpty;
-  final hasSkillTokens = skillTokenPattern != null &&
-      skillTokenColor != null &&
-      skillTokenPattern.hasMatch(text);
+  final hasInline =
+      s.mayContainSpecial(text) && s.scanInline(text).isNotEmpty;
   final mayHaveTagsOrQuotes = text.contains('<') ||
       text.contains('“') ||
       text.contains('「') ||
       text.contains('"');
 
-  // 快路径:既无标签也无引号且无词典/记号命中目标时,直接以纯文本 span 呈现,避免对长文本进行正则扫描
-  if (!mayHaveTagsOrQuotes && !hasGlossary && !hasSkillTokens) {
+  // 快路径:既无标签也无引号且无词典/行内 token 时,直接以纯文本 span 呈现,避免对长文本进行正则扫描
+  if (!mayHaveTagsOrQuotes && !hasGlossary && !hasInline) {
     return TextSpan(style: base, children: [TextSpan(text: text, style: base)]);
   }
 
-  final highlight = scheme.secondaryContainer.withValues(alpha: 0.85);
-  final accent = _dialogueAccent(base.color ?? scheme.onSurface, scheme);
-  final stack = <_OpenTag>[];
+  final stack = <StyleTag>[];
   final spans = <TextSpan>[];
   var last = 0;
 
@@ -217,7 +156,9 @@ TextSpan buildRichSpanTree(
     }
     var from = 0;
     for (final m in pat.allMatches(chunk)) {
-      if (m.start > from) spans.add(TextSpan(text: chunk.substring(from, m.start), style: style));
+      if (m.start > from) {
+        spans.add(TextSpan(text: chunk.substring(from, m.start), style: style));
+      }
       final term = g.termFor(m[0]!);
       if (term == null) {
         spans.add(TextSpan(text: m[0], style: style));
@@ -235,64 +176,150 @@ TextSpan buildRichSpanTree(
       }
       from = m.end;
     }
-    if (from < chunk.length) spans.add(TextSpan(text: chunk.substring(from), style: style));
+    if (from < chunk.length) {
+      spans.add(TextSpan(text: chunk.substring(from), style: style));
+    }
   }
 
-  /// @技能名 记号的二次拆分(仅用户气泡传入):命中段染记号色,其余继续走
-  /// 词典拆分。
-  void emitStyled(String chunk, TextStyle style) {
+  /// 普通段:先切行内 token(命令/技能/宏),非 token 段继续走词典拆分。
+  void emitStyled(
+    String chunk,
+    TextStyle style, {
+    required bool startsAtBoundary,
+    bool includeCommands = true,
+  }) {
     if (chunk.isEmpty) return;
-    final pattern = skillTokenPattern;
-    if (!hasSkillTokens || pattern == null || !pattern.hasMatch(chunk)) {
+    final tokens = s.mayContainSpecial(chunk)
+        ? s.scanInline(
+            chunk,
+            startsAtBoundary: startsAtBoundary,
+            includeCommands: includeCommands,
+          )
+        : const <InlineToken>[];
+    if (tokens.isEmpty) {
       emitGlossary(chunk, style);
       return;
     }
     var from = 0;
-    for (final m in pattern.allMatches(chunk)) {
-      if (m.start > from) emitGlossary(chunk.substring(from, m.start), style);
-      spans.add(TextSpan(text: m[0], style: style.copyWith(color: skillTokenColor)));
-      from = m.end;
+    for (final t in tokens) {
+      if (t.start > from) {
+        emitGlossary(chunk.substring(from, t.start), style);
+      }
+      final tokenStyle = switch (t.kind) {
+        InlineKind.command => style.copyWith(
+          color: palette.command,
+          fontWeight:
+              (style.fontWeight?.index ?? 0) > FontWeight.w600.index
+              ? style.fontWeight
+              : FontWeight.w600,
+        ),
+        InlineKind.skill => style.copyWith(color: palette.skill),
+        InlineKind.macro => style.copyWith(
+          color: palette.macro,
+          fontStyle: FontStyle.italic,
+        ),
+      };
+      spans.add(
+        TextSpan(text: chunk.substring(t.start, t.end), style: tokenStyle),
+      );
+      from = t.end;
     }
     if (from < chunk.length) emitGlossary(chunk.substring(from), style);
   }
 
-  for (final m in _masterPattern.allMatches(text)) {
-    emitStyled(text.substring(last, m.start), _composeStyle(base, stack, highlight));
+  /// 台词段:引号本身按台词样式输出,内部样式标记照常生效且不泄漏为
+  /// 可见文本;未闭合/错配的标记在引号结束处收敛,不影响引号外的标记栈。
+  /// 台词内的 `<chip>` 是块级标记放着不管会把一句台词拆碎,这里剥掉标记、
+  /// 保留文本;无内部标记时整段输出,保持单 span(常见路径与旧输出一致)。
+  void emitDialogue(String hit, TextStyle dialogueStyle, int absoluteStart) {
+    final markers = s.innerComposerPattern.allMatches(hit).toList();
+    // 无内部标记时整段输出,保持单 span(常见路径与旧输出一致)。
+    if (markers.isEmpty) {
+      emitStyled(
+        hit,
+        dialogueStyle,
+        startsAtBoundary: isSyntaxBoundaryAt(text, absoluteStart),
+        includeCommands: false,
+      );
+      return;
+    }
+    final innerStart = absoluteStart + 1;
+    final innerEnd = absoluteStart + hit.length - 1;
+    spans.add(
+      TextSpan(
+        text: text.substring(absoluteStart, innerStart),
+        style: dialogueStyle,
+      ),
+    );
+    final localStack = <StyleTag>[];
+    TextStyle localStyle() => localStack.isEmpty
+        ? dialogueStyle
+        : composeStyle(dialogueStyle, localStack, palette);
+    void emitInner(int start, int end) {
+      if (end <= start) return;
+      emitStyled(
+        text.substring(start, end),
+        localStyle(),
+        startsAtBoundary: isSyntaxBoundaryAt(text, start),
+        includeCommands: false,
+      );
+    }
+
+    var cursor = innerStart;
+    for (final m in markers) {
+      final start = absoluteStart + m.start;
+      final end = absoluteStart + m.end;
+      emitInner(cursor, start);
+      final marker = m[0]!;
+      if (marker != '<chip>' && marker != '</chip>') {
+        final tag = s.tagPattern.firstMatch(marker);
+        if (tag != null) applyStyleTag(tag, localStack);
+      }
+      cursor = end;
+    }
+    emitInner(cursor, innerEnd);
+    spans.add(
+      TextSpan(
+        text: text.substring(innerEnd, absoluteStart + hit.length),
+        style: dialogueStyle,
+      ),
+    );
+  }
+
+  for (final m in s.masterPattern.allMatches(text)) {
+    emitStyled(
+      text.substring(last, m.start),
+      composeStyle(base, stack, palette),
+      startsAtBoundary: isSyntaxBoundaryAt(text, last),
+    );
     final hit = m[0]!;
-    final tag = _tagPattern.firstMatch(hit);
+    final tag = s.tagPattern.firstMatch(hit);
     if (tag == null) {
       // 台词:斜体 + 强调色(`<c>` 栈顶颜色优先);对话高亮总开关关闭时按
-      // 当前栈样式原样输出(引号保留,只是不上色不斜体)。
-      if (!highlightDialogue) {
-        emitStyled(hit, _composeStyle(base, stack, highlight));
-      } else {
-        final topColor = stack.lastWhereOrNull((t) => t.kind == _TagKind.color)?.color;
-        final dialogueStyle = _composeStyle(base, stack, highlight).copyWith(
-          fontStyle: FontStyle.italic,
-          color: topColor ?? accent,
-        );
-        emitStyled(hit, dialogueStyle);
-      }
+      // 当前栈样式输出(引号保留,只是不上色不斜体)。引号内的样式标记
+      // 由 emitDialogue 在台词样式之上解析,不再原样泄漏。
+      final style = composeStyle(base, stack, palette);
+      final quoteStyle = highlightDialogue
+          ? style.copyWith(
+              fontStyle: FontStyle.italic,
+              color:
+                  stack
+                      .lastWhereOrNull((t) => t.kind == StyleTagKind.color)
+                      ?.color ??
+                  palette.dialogueAccent,
+            )
+          : style;
+      emitDialogue(hit, quoteStyle, m.start);
     } else {
-      final kind = _kindOf(tag.group(2)!)!;
-      if (tag.group(1) == '/') {
-        // 闭合:从栈顶向下找最近的同种类标记;找不到则忽略(容忍错配)。
-        for (var i = stack.length - 1; i >= 0; i--) {
-          if (stack[i].kind == kind) {
-            stack.removeAt(i);
-            break;
-          }
-        }
-      } else if (kind == _TagKind.color) {
-        final hex = (tag.group(3) ?? '').replaceFirst('#', '');
-        stack.add(_OpenTag(kind, Color(int.parse('ff$hex', radix: 16))));
-      } else {
-        stack.add(_OpenTag(kind, null));
-      }
+      applyStyleTag(tag, stack);
     }
     last = m.end;
   }
-  emitStyled(text.substring(last), _composeStyle(base, stack, highlight));
+  emitStyled(
+    text.substring(last),
+    composeStyle(base, stack, palette),
+    startsAtBoundary: isSyntaxBoundaryAt(text, last),
+  );
   return TextSpan(style: base, children: spans);
 }
 
@@ -340,12 +367,12 @@ class RichMessageText extends StatefulWidget {
   /// 内置对话高亮(引号台词斜体+强调色)总开关;false = 引号内文字按普通正文渲染。
   final bool highlightDialogue;
 
-  /// `@技能名` 记号高亮(仅用户气泡传入,与 [skillTokenColor] 成对):正文里
-  /// 命中的记号段染 [skillTokenColor]。两者任一为 null 即不启用。
-  final RegExp? skillTokenPattern;
+  /// 共享语法(命令/@技能/宏/标签);null = 默认命令语法、无启用技能。
+  /// 与输入框共用同一份 [CompiledSyntax],避免两处识别/配色漂移。
+  final CompiledSyntax? syntax;
 
-  /// 记号高亮色;与 [skillTokenPattern] 成对,单独给出不生效。
-  final Color? skillTokenColor;
+  /// 渲染表面:决定 token 在用户/助手气泡上的配色。
+  final SyntaxSurface surface;
 
   const RichMessageText({
     super.key,
@@ -357,8 +384,8 @@ class RichMessageText extends StatefulWidget {
     this.glossary,
     this.onTermTap,
     this.highlightDialogue = true,
-    this.skillTokenPattern,
-    this.skillTokenColor,
+    this.syntax,
+    this.surface = SyntaxSurface.assistantBubble,
   });
 
   @override
@@ -380,9 +407,9 @@ class _RichMessageTextState extends State<RichMessageText> {
   bool? _cachedHighlightDialogue;
   ColorScheme? _cachedScheme;
 
-  /// 记号高亮缓存按正则源串比(调用方每次 build 新建 RegExp,identity 必失配)。
-  String? _cachedSkillPatternSource;
-  Color? _cachedSkillTokenColor;
+  /// 语法缓存按 signature 比:技能集合未变时流式重建直接复用。
+  String? _cachedSyntaxSignature;
+  SyntaxSurface? _cachedSurface;
   Widget? _cachedChild;
 
   @override
@@ -403,6 +430,7 @@ class _RichMessageTextState extends State<RichMessageText> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final syntax = widget.syntax ?? CompiledSyntax.compile();
 
     final canReuse = _cachedChild != null &&
         _cachedText == widget.text &&
@@ -414,8 +442,8 @@ class _RichMessageTextState extends State<RichMessageText> {
         _cachedOnTermTap == widget.onTermTap &&
         _cachedHighlightDialogue == widget.highlightDialogue &&
         _cachedScheme == scheme &&
-        _cachedSkillPatternSource == widget.skillTokenPattern?.pattern &&
-        _cachedSkillTokenColor == widget.skillTokenColor;
+        _cachedSyntaxSignature == syntax.signature &&
+        _cachedSurface == widget.surface;
 
     if (canReuse) {
       return _cachedChild!;
@@ -431,8 +459,8 @@ class _RichMessageTextState extends State<RichMessageText> {
     _cachedOnTermTap = widget.onTermTap;
     _cachedHighlightDialogue = widget.highlightDialogue;
     _cachedScheme = scheme;
-    _cachedSkillPatternSource = widget.skillTokenPattern?.pattern;
-    _cachedSkillTokenColor = widget.skillTokenColor;
+    _cachedSyntaxSignature = syntax.signature;
+    _cachedSurface = widget.surface;
 
     // 先剥离 system-reminder 段(模型注入,不进渲染),再走宏替换与正则脚本。
     var displayed = stripSystemReminders(widget.text);
@@ -449,7 +477,7 @@ class _RichMessageTextState extends State<RichMessageText> {
       _cachedChild = const SizedBox.shrink();
       return _cachedChild!;
     }
-    final parts = _splitChips(displayed);
+    final parts = _splitChips(displayed, syntax);
     final hasChip = parts.any((p) => p is _RichChipPart);
     // 无 chip:维持单 Text.rich 的旧路径(布局/既有测试零变化)。
     if (!hasChip) {
@@ -462,8 +490,8 @@ class _RichMessageTextState extends State<RichMessageText> {
           onTermTap: widget.onTermTap,
           recognizerSink: _recognizers,
           highlightDialogue: widget.highlightDialogue,
-          skillTokenPattern: widget.skillTokenPattern,
-          skillTokenColor: widget.skillTokenColor,
+          syntax: syntax,
+          surface: widget.surface,
         ),
       );
       return _cachedChild!;
@@ -485,8 +513,8 @@ class _RichMessageTextState extends State<RichMessageText> {
                   onTermTap: widget.onTermTap,
                   recognizerSink: _recognizers,
                   highlightDialogue: widget.highlightDialogue,
-                  skillTokenPattern: widget.skillTokenPattern,
-                  skillTokenColor: widget.skillTokenColor,
+                  syntax: syntax,
+                  surface: widget.surface,
                 ),
               ),
             );

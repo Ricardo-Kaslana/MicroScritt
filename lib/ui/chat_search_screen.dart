@@ -8,13 +8,16 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../data/image_codec.dart';
 import '../data/message_repository.dart';
 import '../state/providers.dart';
 import 'common/app_search_field.dart';
 import 'common/empty_state.dart';
+import 'common/scroll_to_top_fab.dart';
 import 'widgets/rich_message_text.dart';
 
-/// 会话内聊天记录搜索页:输入即查(220ms 防抖),命中按时间倒序展示。
+/// 会话内聊天记录搜索页:输入即查(220ms 防抖),命中按时间倒序展示
+/// (最新在前),列表头会明确标注排序方向。
 ///
 /// 检索范围是当前会话的可见聊天行,最多取最新 200 条(取满即显示
 /// 「仅显示最新 200 条」)。点选结果时把 messageId 回传给聊天页,由聊天页
@@ -26,10 +29,23 @@ class ChatSearchScreen extends ConsumerStatefulWidget {
 
   /// 助手消息一栏显示的角色名。
   final String characterName;
+
+  /// 角色头像(base64);为 null/坏数据时回退到图标。
+  final String? characterAvatarBase64;
+
+  /// 上次搜索关键词:重新打开时恢复输入并直接检索。
+  final String initialQuery;
+
+  /// 关键词变化回调(含清空),供聊天页记住最近一次查询。
+  final ValueChanged<String>? onQueryChanged;
+
   const ChatSearchScreen({
     super.key,
     required this.sessionId,
     required this.characterName,
+    this.characterAvatarBase64,
+    this.initialQuery = '',
+    this.onQueryChanged,
   });
 
   @override
@@ -40,7 +56,8 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
   static const int _limit = 200;
   static const Duration _debounce = Duration(milliseconds: 220);
 
-  final _controller = TextEditingController();
+  late final TextEditingController _controller;
+  final _scroll = ScrollController();
   Timer? _debounceTimer;
 
   /// 请求代次:防抖窗口与在飞查询都靠它丢弃过期结果。
@@ -53,15 +70,31 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
   bool _truncated = false;
 
   @override
+  void initState() {
+    super.initState();
+    final initial = widget.initialQuery.trim();
+    _controller = TextEditingController(text: initial);
+    _query = initial;
+    if (initial.isNotEmpty) {
+      // 结果依赖真实 DB 查询,等首帧结束再发起;期间检索框已带关键词。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _query == initial) _search(initial);
+      });
+    }
+  }
+
+  @override
   void dispose() {
     _debounceTimer?.cancel();
     _controller.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
   void _onChanged(String raw) {
     _debounceTimer?.cancel();
     final query = raw.trim();
+    widget.onQueryChanged?.call(query);
     // 输入一变化就让在飞的旧查询作废,避免它赶在新一轮防抖之前把旧结果
     // 落进新关键词的列表里。
     if (query != _query) _request++;
@@ -160,18 +193,28 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
             onChanged: _onChanged,
           ),
           if (_loading) const LinearProgressIndicator(minHeight: 2),
-          Expanded(child: _body(context, scheme, user.name)),
+          Expanded(child: _body(context, scheme, user.name, user.avatarBase64)),
         ],
       ),
     );
   }
 
-  Widget _body(BuildContext context, ColorScheme scheme, String userName) {
+  Widget _body(
+    BuildContext context,
+    ColorScheme scheme,
+    String userName,
+    String? userAvatarBase64,
+  ) {
     if (_error != null) {
       return EmptyState(
         icon: Icons.error_outline,
         title: '搜索失败',
         message: _error,
+        action: FilledButton.tonalIcon(
+          onPressed: () => _search(_query),
+          icon: const Icon(Icons.refresh),
+          label: const Text('重试'),
+        ),
       );
     }
     if (_query.isEmpty) {
@@ -185,10 +228,18 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
       return const Center(child: CircularProgressIndicator());
     }
     if (_searched && _hits.isEmpty) {
-      return const EmptyState(
+      return EmptyState(
         icon: Icons.search_off,
         title: '没有匹配的消息',
         message: '换一个关键词试试。',
+        action: FilledButton.tonalIcon(
+          onPressed: () {
+            _controller.clear();
+            _onChanged('');
+          },
+          icon: const Icon(Icons.close),
+          label: const Text('清除搜索'),
+        ),
       );
     }
     return Column(
@@ -212,59 +263,80 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
                   ).textTheme.bodySmall?.copyWith(color: scheme.outline),
                 ),
               ],
+              const Spacer(),
+              // SQL 按 seq DESC 返回:明确标注排序方向,免得用户误以为
+              // 最早命中没有出现。
+              Text(
+                '最新在前',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.outline),
+              ),
             ],
           ),
         ),
         Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.only(bottom: 24),
-            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            itemCount: _hits.length,
-            itemBuilder: (context, index) {
-              final hit = _hits[index];
-              final isUser = hit.hit.role == 'user';
-              final roleName = isUser
-                  ? (userName.isEmpty ? '你' : userName)
-                  : widget.characterName;
-              return ListTile(
-                key: ValueKey('chat-search-hit-${hit.hit.messageId}'),
-                leading: CircleAvatar(
-                  radius: 16,
-                  backgroundColor: isUser
-                      ? scheme.primaryContainer
-                      : scheme.secondaryContainer,
-                  child: Icon(
-                    isUser ? Icons.person_outline : Icons.auto_awesome_outlined,
-                    size: 18,
-                    color: isUser
-                        ? scheme.onPrimaryContainer
-                        : scheme.onSecondaryContainer,
-                  ),
-                ),
-                title: Text.rich(
-                  _snippetSpan(hit, scheme),
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    roleName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
+          child: Stack(
+            children: [
+              ListView.builder(
+                controller: _scroll,
+                padding: const EdgeInsets.only(bottom: 24),
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
+                itemCount: _hits.length,
+                itemBuilder: (context, index) {
+                  final hit = _hits[index];
+                  final isUser = hit.hit.role == 'user';
+                  final roleName = isUser
+                      ? (userName.isEmpty ? '你' : userName)
+                      : widget.characterName;
+                  return ListTile(
+                    key: ValueKey('chat-search-hit-${hit.hit.messageId}'),
+                    leading: _SearchResultAvatar(
+                      avatarBase64: isUser
+                          ? userAvatarBase64
+                          : widget.characterAvatarBase64,
+                      fallbackIcon: isUser
+                          ? Icons.person_outline
+                          : Icons.auto_awesome_outlined,
+                      backgroundColor: isUser
+                          ? scheme.primaryContainer
+                          : scheme.secondaryContainer,
+                      foregroundColor: isUser
+                          ? scheme.onPrimaryContainer
+                          : scheme.onSecondaryContainer,
                     ),
-                  ),
-                ),
-                trailing: Icon(
-                  Icons.north_east,
-                  size: 16,
-                  color: scheme.outline,
-                ),
-                onTap: () => Navigator.pop(context, hit.hit.messageId),
-              );
-            },
+                    title: Text.rich(
+                      _snippetSpan(hit, scheme),
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        roleName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    trailing: Icon(
+                      Icons.north_east,
+                      size: 16,
+                      color: scheme.outline,
+                    ),
+                    onTap: () => Navigator.pop(context, hit.hit.messageId),
+                  );
+                },
+              ),
+              Positioned(
+                right: 16,
+                bottom: 24,
+                child: ScrollToTopFab(controller: _scroll),
+              ),
+            ],
           ),
         ),
       ],
@@ -307,6 +379,49 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
         if (highlightEnd < text.length)
           TextSpan(text: text.substring(highlightEnd)),
       ],
+    );
+  }
+}
+
+/// 搜索结果头像:有可解码头像时显示图片,否则回退到角色/用户图标。
+///
+/// StatefulWidget 缓存解码结果与 ImageProvider:列表随输入/结果刷新反复
+/// 重建,base64 未变时不重复解码。
+class _SearchResultAvatar extends StatefulWidget {
+  final String? avatarBase64;
+  final IconData fallbackIcon;
+  final Color backgroundColor;
+  final Color foregroundColor;
+
+  const _SearchResultAvatar({
+    required this.avatarBase64,
+    required this.fallbackIcon,
+    required this.backgroundColor,
+    required this.foregroundColor,
+  });
+
+  @override
+  State<_SearchResultAvatar> createState() => _SearchResultAvatarState();
+}
+
+class _SearchResultAvatarState extends State<_SearchResultAvatar> {
+  String? _key;
+  MemoryImage? _provider;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_key != widget.avatarBase64) {
+      _key = widget.avatarBase64;
+      final bytes = safeBase64Decode(widget.avatarBase64);
+      _provider = bytes == null ? null : MemoryImage(bytes);
+    }
+    return CircleAvatar(
+      radius: 16,
+      backgroundColor: widget.backgroundColor,
+      backgroundImage: _provider,
+      child: _provider == null
+          ? Icon(widget.fallbackIcon, size: 18, color: widget.foregroundColor)
+          : null,
     );
   }
 }

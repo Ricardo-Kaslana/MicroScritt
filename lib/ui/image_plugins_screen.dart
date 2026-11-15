@@ -16,8 +16,10 @@ import '../models/image_plugin_seeds.dart';
 import '../state/providers.dart';
 import 'common/confirm_dialog.dart';
 import 'common/empty_state.dart';
+import 'common/list_page_scaffold.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/section_header.dart';
+import 'common/toggle_delete_tile.dart';
 
 /// 生图插件列表屏,从设置页「生图」区或生图配置页进入。
 ///
@@ -57,7 +59,11 @@ class _ImagePluginsScreenState extends ConsumerState<ImagePluginsScreen> {
         type: FileType.custom,
         allowedExtensions: ['json'],
       );
-      if (result == null) return;
+      // 系统文件选择器的返回键是标准取消路径,取消不是失败。
+      if (result == null) {
+        _snack('已取消导入');
+        return;
+      }
       final bytes = await pickedFileBytes(result.files.single);
       if (bytes == null) {
         _snack('导入失败：未读取到所选文件');
@@ -175,8 +181,8 @@ ${plugin.code}
   @override
   Widget build(BuildContext context) {
     final plugins = ref.watch(imagePluginsProvider);
-    return Scaffold(
-      appBar: AppBar(title: const Text('生图插件')),
+    return ListPageScaffold<ImagePlugin>(
+      title: '生图插件',
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _importing ? null : _import,
         icon: _importing
@@ -188,50 +194,33 @@ ${plugin.code}
             : const Icon(Icons.file_open_outlined),
         label: Text(_importing ? '导入中' : '导入 JSON'),
       ),
-      body: plugins.isEmpty
-          ? const EmptyState(
-              icon: Icons.extension_outlined,
-              title: '暂无生图插件',
-              message:
-                  '导入 JSON 插件后，即可在生图配置中选择它。插件通过受限的 Dart 网络宿主接入 HTTP(S) 服务。',
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.only(top: 8, bottom: 96),
-              itemCount: plugins.length,
-              itemBuilder: (context, index) {
-                final plugin = plugins[index];
-                final builtin = kBuiltinImagePluginIds.contains(plugin.id);
-                return GroupCard(
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.extension_outlined),
-                      title: Text(plugin.name),
-                      subtitle: Text(
-                        '${plugin.version} · ${plugin.id}${builtin ? ' · 内置' : ''}',
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: builtin ? '内置插件不可删除' : '删除',
-                            icon: Icon(
-                              builtin
-                                  ? Icons.lock_outline
-                                  : Icons.delete_outline,
-                            ),
-                            onPressed: builtin ? null : () => _delete(plugin),
-                          ),
-                          Switch(
-                            value: plugin.enabled,
-                            onChanged: (_) => _toggle(plugin),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-              },
+      items: plugins,
+      emptyState: const EmptyState(
+        icon: Icons.extension_outlined,
+        title: '暂无生图插件',
+        message: '导入 JSON 插件后，即可在生图配置中选择它。插件通过受限的 Dart 网络宿主接入 HTTP(S) 服务。',
+      ),
+      searchHint: '搜索插件名称/ID',
+      searchText: (plugin) => '${plugin.name} ${plugin.id}',
+      itemBuilder: (context, plugin) {
+        final builtin = kBuiltinImagePluginIds.contains(plugin.id);
+        return GroupCard(
+          children: [
+            ToggleDeleteTile(
+              leading: const Icon(Icons.extension_outlined),
+              title: plugin.name,
+              subtitle:
+                  '${plugin.version} · ${plugin.id}${builtin ? ' · 内置' : ''}',
+              enabled: plugin.enabled,
+              onToggle: (_) => _toggle(plugin),
+              onDelete: () => _delete(plugin),
+              deleteEnabled: !builtin,
+              deleteIcon: builtin ? Icons.lock_outline : Icons.delete_outline,
+              deleteTooltip: builtin ? '内置插件不可删除' : '删除',
             ),
+          ],
+        );
+      },
     );
   }
 }

@@ -37,11 +37,46 @@ void main() {
     expect(list.single.id, id);
   });
 
+  test('createWithDefaultTitle numbers defaults per character', () async {
+    final a = await characters.insert(const CharacterCard(name: 'A'));
+    final b = await characters.insert(const CharacterCard(name: 'B'));
+
+    Future<String> nextTitle(int characterId) async {
+      final id = await sessions.createWithDefaultTitle(characterId);
+      return (await sessions.get(id))!.title;
+    }
+
+    expect(await nextTitle(a), '新会话');
+    expect(await nextTitle(a), '新会话 2');
+    // 普通标题不影响自动编号,编号只在「新会话 / 新会话 N」序列内递增。
+    await sessions.create(a, '手动标题');
+    expect(await nextTitle(a), '新会话 3');
+    // 编号按角色隔离,另一个角色的首个会话仍从「新会话」开始。
+    expect(await nextTitle(b), '新会话');
+  });
+
   test('rename updates the title', () async {
     final charId = await characters.insert(const CharacterCard(name: 'A'));
     final id = await sessions.create(charId, 'before');
     await sessions.rename(id, 'after');
     expect((await sessions.get(id))!.title, 'after');
+  });
+
+  test('setPinned records and clears pinnedAt in session infos', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final id = await sessions.create(charId, 's');
+    expect((await sessions.infosByCharacter(charId)).single.pinnedAt, isNull);
+
+    await sessions.setPinned(id, true);
+    final pinned = (await sessions.infosByCharacter(charId)).single;
+    expect(pinned.id, id);
+    expect(pinned.pinnedAt, isNotNull);
+
+    await sessions.setPinned(id, false);
+    expect(
+      (await sessions.infosByCharacter(charId)).single.pinnedAt,
+      isNull,
+    );
   });
 
   test(

@@ -6,6 +6,8 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'motion.dart';
+
 /// 长列表的「回到顶部」小按钮:滚动超过 [showAfter] 后出现,隐藏时零高度。
 /// 直接放进各页 `floatingActionButton` 的 Column 里,叠在新增 FAB 上方。
 class ScrollToTopFab extends StatefulWidget {
@@ -57,8 +59,11 @@ class _ScrollToTopFabState extends State<ScrollToTopFab> {
 
   @override
   Widget build(BuildContext context) {
+    final reduceMotion = reduceMotionOf(context);
     return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 160),
+      duration: reduceMotion
+          ? Duration.zero
+          : const Duration(milliseconds: 160),
       transitionBuilder: (child, animation) => ScaleTransition(
         scale: animation,
         child: FadeTransition(opacity: animation, child: child),
@@ -68,11 +73,17 @@ class _ScrollToTopFabState extends State<ScrollToTopFab> {
               key: const ValueKey('scroll-to-top'),
               heroTag: null,
               tooltip: '回到顶部',
-              onPressed: () => widget.controller.animateTo(
-                0,
-                duration: const Duration(milliseconds: 240),
-                curve: Curves.easeOutCubic,
-              ),
+              onPressed: () {
+                if (reduceMotion) {
+                  widget.controller.jumpTo(0);
+                } else {
+                  widget.controller.animateTo(
+                    0,
+                    duration: const Duration(milliseconds: 240),
+                    curve: Curves.easeOutCubic,
+                  );
+                }
+              },
               child: const Icon(Icons.vertical_align_top_rounded, size: 20),
             )
           : const SizedBox.shrink(key: ValueKey('scroll-to-top-hidden')),

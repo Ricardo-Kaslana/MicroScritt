@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 
 import '../../engine/background_status.dart';
 import '../../state/chat_controller.dart';
+import '../common/motion.dart';
 import '../theme/brand.dart';
 
 /// 灵动岛语义色(iOS 系统调,与 AppTheme 的 iOS 设计语言同源)。
@@ -302,8 +303,10 @@ class _ChatIslandState extends State<ChatIsland> {
       widget.chat.backgroundOutputTokens > 0;
 
   /// 活动时钟随模式启停(见 [_liveTimer] 注释)。build 内直接调用,不触发 setState。
-  void _syncAnimations(_IslandMode mode) {
-    final live = mode == _IslandMode.liveStream || mode == _IslandMode.liveBg || mode == _IslandMode.liveCompact;
+  /// 减弱动态效果时连波形/旋转一并停住,只保留静态图标与文字。
+  void _syncAnimations(_IslandMode mode, {required bool reduceMotion}) {
+    final live = !reduceMotion &&
+        (mode == _IslandMode.liveStream || mode == _IslandMode.liveBg || mode == _IslandMode.liveCompact);
     if (live && _liveTimer == null) {
       _liveTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
         if (!mounted) return;
@@ -318,7 +321,10 @@ class _ChatIslandState extends State<ChatIsland> {
   @override
   Widget build(BuildContext context) {
     final mode = _resolve();
-    _syncAnimations(mode);
+    final reduceMotion = reduceMotionOf(context);
+    final sizeMotion = reduceMotion ? Duration.zero : const Duration(milliseconds: 220);
+    final switchMotion = reduceMotion ? Duration.zero : const Duration(milliseconds: 240);
+    _syncAnimations(mode, reduceMotion: reduceMotion);
     // 离开可展开的模式时静默收起,回到该模式不带着上一次的展开态。
     if (_expanded &&
         mode != _IslandMode.idle &&
@@ -349,11 +355,11 @@ class _ChatIslandState extends State<ChatIsland> {
           child: mode == _IslandMode.hidden
               ? const SizedBox(width: double.infinity)
               : AnimatedSize(
-                  duration: const Duration(milliseconds: 220),
+                  duration: sizeMotion,
                   curve: Curves.easeOutCubic,
                   alignment: Alignment.topCenter,
                   child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 240),
+                    duration: switchMotion,
                     switchInCurve: Curves.easeOutBack,
                     switchOutCurve: Curves.easeIn,
                     transitionBuilder: (child, animation) => FadeTransition(
@@ -462,7 +468,7 @@ class _ChatIslandState extends State<ChatIsland> {
           children: [
             _Spin(phase: _tick * 0.45, color: _toneGreen),
             const SizedBox(width: 8),
-            Flexible(child: _RichLabel('后台agent', append: ' · 状态维护中…')),
+            Flexible(child: _RichLabel('后台引擎', append: ' · 状态维护中…')),
             const SizedBox(width: 10),
             _MiniAction(
               tooltip: '中断后台维护',
@@ -532,7 +538,7 @@ class _ChatIslandState extends State<ChatIsland> {
             const SizedBox(width: 8),
             Flexible(
               child: _RichLabel(
-                '后台agent · ${backgroundStatusLabel(status)}',
+                '后台引擎 · ${backgroundStatusLabel(status)}',
                 append: widget.chat.backgroundSummary.isEmpty ? null : ' · ${widget.chat.backgroundSummary}',
                 maxLines: 2,
               ),

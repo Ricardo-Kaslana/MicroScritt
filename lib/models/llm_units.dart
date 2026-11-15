@@ -35,6 +35,20 @@ String formatTokenCount(int tokens) {
   return '$tokens';
 }
 
+/// 把 token 数格式化为中文万/亿单位的短串(上下文容量展示)。
+/// 例:237000→"23.7万",1000000→"100万",123456789→"1.2亿"。
+String formatTokenCountZh(int tokens) {
+  if (tokens >= 100000000) {
+    return '${_trimUnit(tokens / 100000000)}亿';
+  }
+  if (tokens >= 10000) {
+    return '${_trimUnit(tokens / 10000)}万';
+  }
+  return '$tokens';
+}
+
+String _trimUnit(double value) => value.toStringAsFixed(value % 1 == 0 ? 0 : 1);
+
 /// 把字符数估算为 token 数(经验值:混合中英文文本约 3~4 字符/token)。
 /// 用于对"当前已组装上下文"做上下文环的用量估算。
 int estimateTokensFromChars(int chars) => (chars / 3.2).round();

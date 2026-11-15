@@ -1,5 +1,6 @@
 // 气泡边框样式:默认面/圆角、定制色与透明度、尾巴角固定、用户气泡
 // 不受定制,以及高亮描边与文字色自动对比。
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/bubble_style.dart';
@@ -7,6 +8,22 @@ import 'package:microscritt/ui/widgets/message_bubble.dart';
 
 void main() {
   Widget host(Widget child) => MaterialApp(home: Scaffold(body: child));
+
+  test('serif bubble font maps to SimSun on Windows only', () {
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    expect(chatBubbleTextStyle(Colors.black, fontFamily: 'serif').fontFamily, 'SimSun');
+    expect(chatBubbleTextStyle(Colors.black).fontFamily, isNull);
+
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    expect(chatBubbleTextStyle(Colors.black, fontFamily: 'serif').fontFamily, 'serif');
+  });
+
+  test('bubble text style applies custom font size over the default', () {
+    expect(chatBubbleTextStyle(Colors.black).fontSize, kBubbleDefaultFontSize);
+    expect(chatBubbleTextStyle(Colors.black, fontSize: 19).fontSize, 19);
+  });
 
   BoxDecoration? decorationOf(WidgetTester tester) {
     final frame = tester.widget<Container>(

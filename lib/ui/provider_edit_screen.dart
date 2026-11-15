@@ -14,6 +14,8 @@ import '../models/llm_provider.dart';
 import '../state/app_config_sync.dart';
 import '../state/providers.dart';
 import 'model_edit_sheet.dart';
+import 'common/confirm_dialog.dart';
+import 'common/edit_form_scaffold.dart';
 import 'common/form_field.dart';
 import 'common/info_button.dart';
 import 'common/section_header.dart';
@@ -65,6 +67,12 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
   /// API Key 眼睛切换(与设置页生图区同一套显示/隐藏)。
   bool _showApiKey = false;
 
+  /// 保存中:禁用两处保存键,防止重复提交。
+  bool _saving = false;
+
+  /// 打开编辑器时的表单快照(未保存修改的判定基准)。
+  late String _initialSignature;
+
   @override
   void initState() {
     super.initState();
@@ -81,7 +89,22 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
       for (final entry in (e?.extraHeaders ?? const <String, String>{}).entries)
         _HeaderRow(name: entry.key, value: entry.value),
     ];
+    _initialSignature = _signature();
   }
+
+  /// 当前表单的扁平快照:文本、协议、兼容开关、模型目录与请求头。
+  String _signature() => [
+    _providerId.text,
+    _displayName.text,
+    _baseUrl.text,
+    _apiKey.text,
+    _protocol.name,
+    '$_modernParams',
+    '${_compat.replyViaTool}/${_compat.noncePrefix}',
+    for (final m in _models)
+      '${m.id}:${m.modelId}:${m.displayName}:${m.contextCapacity}:${m.maxOutput}:${m.temperature}',
+    for (final row in _headerRows) '${row.name.text}|${row.value.text}',
+  ].join('\u0000');
 
   @override
   void dispose() {
@@ -99,15 +122,20 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
   /// 沿用原状态(由聊天页模型选择器决定)。写库后刷新列表、回写文本配置并
   /// 关闭页面。
   Future<void> _save() async {
+    if (_saving) return;
     final providerId = _providerId.text.trim();
     final displayName = _displayName.text.trim();
     final baseUrl = _baseUrl.text.trim();
     if (providerId.isEmpty || displayName.isEmpty || baseUrl.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请填写 Provider ID、显示名称与 API 地址')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请填写 Provider ID、显示名称与 API 地址')),
+      );
       return;
     }
     if (_models.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请至少添加一个模型')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请至少添加一个模型')));
       return;
     }
 
@@ -128,21 +156,28 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
       compat: _compat,
     );
 
-    await repo.saveProvider(config);
+    setState(() => _saving = true);
+    try {
+      await repo.saveProvider(config);
 
-    // 若编辑的是当前在用的 provider,编辑后重解析运行时配置(如换了密钥/地址)。
-    if (config.isActive) {
-      final backend = await repo.loadBackendConfig();
-      if (backend != null) {
-        ref.read(backendConfigProvider.notifier).state = backend;
+      // 若编辑的是当前在用的 provider,编辑后重解析运行时配置(如换了密钥/地址)。
+      if (config.isActive) {
+        final backend = await repo.loadBackendConfig();
+        if (backend != null) {
+          ref.read(backendConfigProvider.notifier).state = backend;
+        }
       }
-    }
 
-    ref.invalidate(llmProvidersProvider);
-    await syncAppConfigFile(ref);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('LLM 配置已保存')));
-    Navigator.pop(context);
+      ref.invalidate(llmProvidersProvider);
+      await syncAppConfigFile(ref);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('LLM 配置已保存')));
+      Navigator.pop(context);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   Future<void> _addModel() async {
@@ -175,7 +210,14 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
     });
   }
 
-  void _removeModel(LlmModelEntry entry) {
+  /// 删除模型前确认:模型条目无法从界面恢复,误点删除只能重新手填。
+  Future<void> _removeModel(LlmModelEntry entry) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: '删除模型?',
+      message: entry.displayName,
+    );
+    if (!confirmed || !mounted) return;
     setState(() {
       _models = _models.where((m) => !(m.id == entry.id)).toList();
     });
@@ -201,7 +243,8 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
     final collected = LlmProviderConfig.normalizeExtraHeaders({
       for (final row in _headerRows) row.name.text: row.value.text,
     });
-    return Map.from(collected)..removeWhere((k, _) => _kManagedHeaderNames.contains(k));
+    return Map.from(collected)
+      ..removeWhere((k, _) => _kManagedHeaderNames.contains(k));
   }
 
   /// 「官方 OpenAI 参数风格」的详细说明弹层(表单行只留一行短文案,细节
@@ -215,7 +258,9 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('• 开启后改发 max_completion_tokens(o 系列推理模型必需),并请求流式 usage(否则用量统计为 0)'),
+            Text(
+              '• 开启后改发 max_completion_tokens(o 系列推理模型必需),并请求流式 usage(否则用量统计为 0)',
+            ),
             SizedBox(height: 6),
             Text('• 适用:直连 api.openai.com 或严格兼容官方协议的网关'),
             SizedBox(height: 10),
@@ -223,7 +268,10 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
           ],
         ),
         actions: [
-          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('知道了')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('知道了'),
+          ),
         ],
       ),
     );
@@ -247,7 +295,10 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
           ],
         ),
         actions: [
-          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('知道了')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('知道了'),
+          ),
         ],
       ),
     );
@@ -277,12 +328,17 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
               SizedBox(height: 4),
               Text('• 只在端点明确需要时开启;请确认符合所配置服务的条款'),
               SizedBox(height: 10),
-              Text('• 各端点要求的请求头仍需在「自定义请求头」中配置;普通端点请保持全部关闭 —— 部分端点对未知的 tools 字段回 400。'),
+              Text(
+                '• 各端点要求的请求头仍需在「自定义请求头」中配置;普通端点请保持全部关闭 —— 部分端点对未知的 tools 字段回 400。',
+              ),
             ],
           ),
         ),
         actions: [
-          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('知道了')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('知道了'),
+          ),
         ],
       ),
     );
@@ -292,7 +348,9 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
   /// 验证)。
   Future<void> _runProbe() async {
     final config = BackendConfig(
-      provider: _protocol == LlmProtocol.anthropic ? BackendProvider.anthropic : BackendProvider.openai,
+      provider: _protocol == LlmProtocol.anthropic
+          ? BackendProvider.anthropic
+          : BackendProvider.openai,
       baseUrl: _baseUrl.text.trim(),
       apiKey: _apiKey.text.trim(),
       model: _models.first.modelId,
@@ -321,206 +379,248 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(_isNew ? '新建 Provider' : '编辑 Provider')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
+    return EditFormScaffold(
+      title: _isNew ? '新建 Provider' : '编辑 Provider',
+      saving: _saving,
+      onSave: _save,
+      hasChanges: () => _signature() != _initialSignature,
+      changes: [_providerId, _displayName, _baseUrl, _apiKey],
+      children: [
+        GroupCard(
+          children: [
+            FormTextField(
+              controller: _providerId,
+              label: 'Provider ID',
+              hint: '逻辑标识,如 openai / anthropic / my-proxy',
+            ),
+            FormTextField(controller: _displayName, label: '显示名称'),
+            FormTextField(
+              controller: _baseUrl,
+              label: 'API 地址',
+              hint: '如 https://api.openai.com/v1',
+            ),
+            FormDropdownField<LlmProtocol>(
+              value: _protocol,
+              label: '协议',
+              hint: '选择 API 协议',
+              items: const [LlmProtocol.openaiCompat, LlmProtocol.anthropic],
+              labelOf: (p) => switch (p) {
+                LlmProtocol.openaiCompat => 'OpenAI 兼容',
+                LlmProtocol.anthropic => 'Anthropic',
+              },
+              onChanged: (v) =>
+                  setState(() => _protocol = v ?? LlmProtocol.openaiCompat),
+            ),
+            if (_protocol == LlmProtocol.openaiCompat)
+              Padding(
+                // 与各表单字段同一套节奏:FieldLabel 灰色小标题 + 行尾开关 +
+                // 12px 灰 hint,字段细节收进标题旁的 info 按钮弹层。
+                padding: const EdgeInsets.fromLTRB(14, 2, 14, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const FieldLabel('官方 OpenAI 参数风格'),
+                        const SizedBox(width: 2),
+                        InfoButton(onTap: () => _showModernParamsHelp(context)),
+                        const Spacer(),
+                        Switch(
+                          value: _modernParams,
+                          onChanged: (v) => setState(() => _modernParams = v),
+                        ),
+                      ],
+                    ),
+                    Text(
+                      '直连官方 OpenAI 或严格兼容网关时开启,默认关闭。',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.outline,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (_protocol == LlmProtocol.openaiCompat)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 2, 14, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const FieldLabel('端点兼容选项'),
+                        const SizedBox(width: 2),
+                        InfoButton(onTap: () => _showCompatHelp(context)),
+                        const Spacer(),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        const Expanded(child: Text('工具通道回复(正文被截断时)')),
+                        Switch(
+                          value: _compat.replyViaTool,
+                          onChanged: (v) => setState(
+                            () => _compat = _compat.copyWith(replyViaTool: v),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        const Expanded(child: Text('提示词随机前缀')),
+                        Switch(
+                          value: _compat.noncePrefix,
+                          onChanged: (v) => setState(
+                            () => _compat = _compat.copyWith(noncePrefix: v),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Text(
+                      '按端点怪癖开启,默认全关;说明见右上问号。',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.outline,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            FormTextField(
+              controller: _apiKey,
+              label: 'API Key',
+              hint: '粘贴你的 API Key',
+              obscureText: !_showApiKey,
+              onChanged: (_) => setState(() {}),
+              suffixIcon: IconButton(
+                tooltip: _showApiKey ? '隐藏' : '显示',
+                icon: Icon(
+                  _showApiKey ? Icons.visibility_off : Icons.visibility,
+                ),
+                onPressed: () => setState(() => _showApiKey = !_showApiKey),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Text('自定义请求头', style: Theme.of(context).textTheme.bodyLarge),
+            const SizedBox(width: 2),
+            InfoButton(onTap: () => _showCustomHeaderHelp(context)),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: _addHeader,
+              icon: const Icon(Icons.add),
+              label: const Text('添加'),
+            ),
+          ],
+        ),
+        Text(
+          '部分网关按请求头放行;同名的会覆盖内置头。',
+          style: TextStyle(
+            fontSize: 12,
+            color: Theme.of(context).colorScheme.outline,
+          ),
+        ),
+        if (_headerRows.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Text(
+              '无自定义请求头;站点要求时再添加即可。',
+              style: TextStyle(color: Theme.of(context).colorScheme.outline),
+            ),
+          )
+        else
           GroupCard(
             children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: FormTextField(controller: _providerId, label: 'Provider ID', hint: '逻辑标识,如 openai / anthropic / my-proxy'),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: FormTextField(controller: _displayName, label: '显示名称'),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: FormTextField(controller: _baseUrl, label: 'API 地址', hint: '如 https://api.openai.com/v1'),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: FormDropdownField<LlmProtocol>(
-                  value: _protocol,
-                  label: '协议',
-                  hint: '选择 API 协议',
-                  items: const [LlmProtocol.openaiCompat, LlmProtocol.anthropic],
-                  labelOf: (p) => switch (p) {
-                    LlmProtocol.openaiCompat => 'OpenAI 兼容',
-                    LlmProtocol.anthropic => 'Anthropic',
-                  },
-                  onChanged: (v) => setState(() => _protocol = v ?? LlmProtocol.openaiCompat),
+              for (var i = 0; i < _headerRows.length; i++)
+                _HeaderTile(
+                  key: ValueKey('header_row_$i'),
+                  row: _headerRows[i],
+                  onDelete: () => _removeHeader(i),
+                  onChanged: () => setState(() {}),
                 ),
-              ),
-              if (_protocol == LlmProtocol.openaiCompat)
-                Padding(
-                  // 与各表单字段同一套节奏:FieldLabel 灰色小标题 + 行尾开关 +
-                  // 12px 灰 hint,字段细节收进标题旁的 info 按钮弹层。
-                  padding: const EdgeInsets.fromLTRB(14, 2, 14, 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const FieldLabel('官方 OpenAI 参数风格'),
-                          const SizedBox(width: 2),
-                          InfoButton(onTap: () => _showModernParamsHelp(context)),
-                          const Spacer(),
-                          Switch(value: _modernParams, onChanged: (v) => setState(() => _modernParams = v)),
-                        ],
-                      ),
-                      Text(
-                        '直连官方 OpenAI 或严格兼容网关时开启,默认关闭。',
-                        style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.outline),
-                      ),
-                    ],
-                  ),
-                ),
-              if (_protocol == LlmProtocol.openaiCompat)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 2, 14, 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const FieldLabel('端点兼容选项'),
-                          const SizedBox(width: 2),
-                          InfoButton(onTap: () => _showCompatHelp(context)),
-                          const Spacer(),
-                        ],
-                      ),
-                      Row(
-                        children: [
-                          const Expanded(child: Text('工具通道回复(正文被截断时)')),
-                          Switch(
-                            value: _compat.replyViaTool,
-                            onChanged: (v) => setState(() => _compat = _compat.copyWith(replyViaTool: v)),
-                          ),
-                        ],
-                      ),
-                      Row(
-                        children: [
-                          const Expanded(child: Text('提示词随机前缀')),
-                          Switch(
-                            value: _compat.noncePrefix,
-                            onChanged: (v) => setState(() => _compat = _compat.copyWith(noncePrefix: v)),
-                          ),
-                        ],
-                      ),
-                      Text(
-                        '按端点怪癖开启,默认全关;说明见右上问号。',
-                        style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.outline),
-                      ),
-                    ],
-                  ),
-                ),
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: FormTextField(
-                  controller: _apiKey,
-                  label: 'API Key',
-                  hint: '粘贴你的 API Key',
-                  obscureText: !_showApiKey,
-                  onChanged: (_) => setState(() {}),
-                  suffixIcon: IconButton(
-                    tooltip: _showApiKey ? '隐藏' : '显示',
-                    icon: Icon(_showApiKey ? Icons.visibility_off : Icons.visibility),
-                    onPressed: () => setState(() => _showApiKey = !_showApiKey),
-                  ),
-                ),
-              ),
             ],
           ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Text('自定义请求头', style: Theme.of(context).textTheme.bodyLarge),
-              const SizedBox(width: 2),
-              InfoButton(onTap: () => _showCustomHeaderHelp(context)),
-              const Spacer(),
-              TextButton.icon(onPressed: _addHeader, icon: const Icon(Icons.add), label: const Text('添加')),
-            ],
-          ),
-          Text(
-            '部分网关按请求头放行;同名的会覆盖内置头。',
-            style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.outline),
-          ),
-          if (_headerRows.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Text('无自定义请求头;站点要求时再添加即可。', style: TextStyle(color: Theme.of(context).colorScheme.outline)),
-            )
-          else
-            GroupCard(
-              children: [
-                for (var i = 0; i < _headerRows.length; i++)
-                  _HeaderTile(
-                    key: ValueKey('header_row_$i'),
-                    row: _headerRows[i],
-                    onDelete: () => _removeHeader(i),
-                  ),
-              ],
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Text('模型目录', style: Theme.of(context).textTheme.bodyLarge),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: _addModel,
+              icon: const Icon(Icons.add),
+              label: const Text('添加模型'),
             ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Text('模型目录', style: Theme.of(context).textTheme.bodyLarge),
-              const Spacer(),
-              TextButton.icon(onPressed: _addModel, icon: const Icon(Icons.add), label: const Text('添加模型')),
-            ],
-          ),
-          if (_models.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Text('还没有模型,点击"添加模型"加入第一个。', style: TextStyle(color: Theme.of(context).colorScheme.outline)),
-            )
-          else
-            GroupCard(
-              children: [
-                for (final m in _models)
-                  _ModelTile(entry: m, onEdit: () => _editModel(m), onDelete: () => _removeModel(m)),
-              ],
+          ],
+        ),
+        if (_models.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Text(
+              '还没有模型,点击"添加模型"加入第一个。',
+              style: TextStyle(color: Theme.of(context).colorScheme.outline),
             ),
-          const SizedBox(height: 16),
-          Row(
+          )
+        else
+          GroupCard(
             children: [
-              Text('测试连接', style: Theme.of(context).textTheme.bodyLarge),
-              const Spacer(),
-              TextButton.icon(
-                // 探测用当前表单值;模型目录为空无从选模型。
-                onPressed: (_models.isEmpty || _probing) ? null : _runProbe,
-                icon: _probing
-                    ? const SizedBox(
-                        width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.network_check),
-                label: Text(_probing ? '探测中…' : '开始探测'),
-              ),
+              for (final m in _models)
+                _ModelTile(
+                  entry: m,
+                  onEdit: () => _editModel(m),
+                  onDelete: () => _removeModel(m),
+                ),
             ],
           ),
-          Text(
-            '发一次最小请求验证端点,精确归因「为什么不通」。',
-            style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.outline),
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Text('测试连接', style: Theme.of(context).textTheme.bodyLarge),
+            const Spacer(),
+            TextButton.icon(
+              // 探测用当前表单值;模型目录为空无从选模型。
+              onPressed: (_models.isEmpty || _probing) ? null : _runProbe,
+              icon: _probing
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.network_check),
+              label: Text(_probing ? '探测中…' : '开始探测'),
+            ),
+          ],
+        ),
+        Text(
+          '发一次最小请求验证端点,精确归因「为什么不通」。',
+          style: TextStyle(
+            fontSize: 12,
+            color: Theme.of(context).colorScheme.outline,
           ),
-          if (_probeError != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(_probeError!, style: const TextStyle(color: Colors.red)),
-            )
-          else if (_probeReport != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: SelectableText(
-                _probeReport!.summary,
-                style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant),
+        ),
+        if (_probeError != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              _probeError!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          )
+        else if (_probeReport != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: SelectableText(
+              _probeReport!.summary,
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),
-          const SizedBox(height: 24),
-          FilledButton(onPressed: _save, child: const Text('保存')),
-        ],
-      ),
+          ),
+      ],
     );
   }
 }
@@ -529,7 +629,11 @@ class _ModelTile extends StatelessWidget {
   final LlmModelEntry entry;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
-  const _ModelTile({required this.entry, required this.onEdit, required this.onDelete});
+  const _ModelTile({
+    required this.entry,
+    required this.onEdit,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -541,8 +645,16 @@ class _ModelTile extends StatelessWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          IconButton(icon: const Icon(Icons.edit_outlined), tooltip: '编辑', onPressed: onEdit),
-          IconButton(icon: const Icon(Icons.delete_outline), tooltip: '删除', onPressed: onDelete),
+          IconButton(
+            icon: const Icon(Icons.edit_outlined),
+            tooltip: '编辑',
+            onPressed: onEdit,
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            tooltip: '删除',
+            onPressed: onDelete,
+          ),
         ],
       ),
       onTap: onEdit,
@@ -575,7 +687,16 @@ const _kManagedHeaderNames = {'host', 'content-length'};
 class _HeaderTile extends StatelessWidget {
   final _HeaderRow row;
   final VoidCallback onDelete;
-  const _HeaderTile({super.key, required this.row, required this.onDelete});
+
+  /// 文本变化回调:页面据此重算未保存修改(请求头是动态行,无法在
+  /// 初始化时统一订阅)。
+  final VoidCallback onChanged;
+  const _HeaderTile({
+    super.key,
+    required this.row,
+    required this.onDelete,
+    required this.onChanged,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -588,9 +709,19 @@ class _HeaderTile extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                FormTextField(controller: row.name, label: '名称', hint: '如 Origin'),
+                FormTextField(
+                  controller: row.name,
+                  label: '名称',
+                  hint: '如 Origin',
+                  onChanged: (_) => onChanged(),
+                ),
                 const SizedBox(height: 2),
-                FormTextField(controller: row.value, label: '值', hint: '如 https://example.com'),
+                FormTextField(
+                  controller: row.value,
+                  label: '值',
+                  hint: '如 https://example.com',
+                  onChanged: (_) => onChanged(),
+                ),
               ],
             ),
           ),

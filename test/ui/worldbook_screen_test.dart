@@ -8,9 +8,22 @@ import 'package:microscritt/data/worldbook_repository.dart';
 import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/models/worldbook_entry.dart';
 import 'package:microscritt/state/providers.dart';
+import 'package:microscritt/ui/common/empty_state.dart';
 import 'package:microscritt/ui/worldbook_screen.dart';
 import '../support/test_database.dart';
 import '../support/wait_until.dart';
+
+/// 长按条目后纵向拖动:移动端 ReorderableListView 的默认拖动起手式。
+Future<void> _longPressDrag(WidgetTester tester, Finder item, double dy) async {
+  final gesture = await tester.startGesture(tester.getCenter(item));
+  await tester.pump(const Duration(milliseconds: 650));
+  for (var i = 0; i < 8; i++) {
+    await gesture.moveBy(Offset(0, dy / 8));
+    await tester.pump(const Duration(milliseconds: 25));
+  }
+  await gesture.up();
+  await tester.pumpAndSettle();
+}
 
 void main() {
   late AppDatabase db;
@@ -23,10 +36,14 @@ void main() {
     ),
   );
 
-  testWidgets('lists entries by name (fallback keys) and toggles enabled', (tester) async {
+  testWidgets('lists entries by name (fallback keys) and toggles enabled', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       await WorldbookRepository(db).replaceForCharacter(charId, const [
         WorldbookEntry(
           characterId: 0,
@@ -44,7 +61,9 @@ void main() {
       ]);
     });
     await tester.pumpWidget(harness());
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
     await tester.pump();
 
     // 有条目名时只显示名称;关键词/类型/内容摘要均不展示。
@@ -58,7 +77,10 @@ void main() {
     await tester.runAsync(() async {
       // 只点「被咒之剑」那行的开关(列表里有两条)。
       final switchFinder = find.descendant(
-        of: find.ancestor(of: find.text('被咒之剑'), matching: find.byType(ListTile)),
+        of: find.ancestor(
+          of: find.text('被咒之剑'),
+          matching: find.byType(ListTile),
+        ),
         matching: find.byType(Switch),
       );
       await tester.tap(switchFinder);
@@ -83,10 +105,14 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('deletes an entry via the visible row delete button', (tester) async {
+  testWidgets('deletes an entry via the visible row delete button', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       await WorldbookRepository(db).replaceForCharacter(charId, const [
         WorldbookEntry(
           characterId: 0,
@@ -98,7 +124,9 @@ void main() {
       ]);
     });
     await tester.pumpWidget(harness());
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
     await tester.pump();
 
     // 点「被咒之剑」行内可见的删除按钮 → 弹确认框。
@@ -136,10 +164,14 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('appbar menu enables/disables all entries at once', (tester) async {
+  testWidgets('appbar menu enables/disables all entries at once', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       await WorldbookRepository(db).replaceForCharacter(charId, const [
         WorldbookEntry(
           characterId: 0,
@@ -157,7 +189,9 @@ void main() {
       ]);
     });
     await tester.pumpWidget(harness());
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
     await tester.pump();
 
     await tester.runAsync(() async {
@@ -212,10 +246,14 @@ void main() {
   testWidgets('creates an entry via the editor', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
     });
     await tester.pumpWidget(harness());
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
     await tester.pump();
     expect(find.text('暂无世界书条目'), findsOneWidget);
 
@@ -224,11 +262,19 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     await tester.enterText(find.byKey(const ValueKey('field_名称')), '古龙传说');
-    await tester.enterText(find.byKey(const ValueKey('field_关键词(逗号分隔)')), '龙, dragon');
-    await tester.enterText(find.byKey(const ValueKey('field_内容 *')), '山谷里睡着一条古龙');
+    await tester.enterText(
+      find.byKey(const ValueKey('field_关键词(逗号分隔)')),
+      '龙, dragon',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('field_内容 *')),
+      '山谷里睡着一条古龙',
+    );
     await tester.runAsync(() async {
       await tester.tap(find.widgetWithText(TextButton, '保存'));
-      final container = ProviderScope.containerOf(tester.element(find.byType(WorldbookScreen, skipOffstage: false)));
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(WorldbookScreen, skipOffstage: false)),
+      );
       for (var i = 0; i < 80; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
         await tester.pump();
@@ -251,17 +297,24 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('appbar menu offers import and export of entries', (tester) async {
+  testWidgets('appbar menu offers import and export of entries', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       await WorldbookRepository(db).replaceForCharacter(charId, const [
         WorldbookEntry(characterId: 0, keys: ['圣剑'], content: 'a'),
       ]);
     });
     await tester.pumpWidget(harness());
     // 按条件等首次加载收敛,不用固定延时(并发跑全量套件时不够)。
-    await waitUntil(tester, () => find.byType(CircularProgressIndicator).evaluate().isEmpty);
+    await waitUntil(
+      tester,
+      () => find.byType(CircularProgressIndicator).evaluate().isEmpty,
+    );
 
     await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
@@ -274,21 +327,95 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('empty state offers an import action and the menu hides export', (tester) async {
+  testWidgets('empty state offers a create action and the menu hides export', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
     });
     await tester.pumpWidget(harness());
-    await waitUntil(tester, () => find.byType(CircularProgressIndicator).evaluate().isEmpty);
+    await waitUntil(
+      tester,
+      () => find.byType(CircularProgressIndicator).evaluate().isEmpty,
+    );
 
     expect(find.text('暂无世界书条目'), findsOneWidget);
-    // 空书时唯一的入口是导入:空态按钮与菜单项都在。
-    expect(find.text('导入条目'), findsOneWidget);
+    // 空态按钮与右下角悬浮按钮一致,都是「新建条目」;导入仍从右上角菜单进入。
+    expect(find.text('新建条目'), findsNWidgets(2));
+    await tester.tap(
+      find.descendant(of: find.byType(EmptyState), matching: find.text('新建条目')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('field_内容 *')), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
     await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
-    await waitUntil(tester, () => find.text('导入条目').evaluate().length == 2);
+    await waitUntil(tester, () => find.text('导入条目').evaluate().isNotEmpty);
+    expect(find.text('导入条目'), findsOneWidget);
     expect(find.text('导出条目(JSON)'), findsNothing);
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('dragging a row rewrites positions in the new order', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      await WorldbookRepository(db).replaceForCharacter(charId, const [
+        WorldbookEntry(
+          characterId: 0,
+          name: 'A',
+          keys: ['a'],
+          content: 'a',
+          position: 0,
+        ),
+        WorldbookEntry(
+          characterId: 0,
+          name: 'B',
+          keys: ['b'],
+          content: 'b',
+          position: 1,
+        ),
+        WorldbookEntry(
+          characterId: 0,
+          name: 'C',
+          keys: ['c'],
+          content: 'c',
+          position: 2,
+        ),
+      ]);
+    });
+    await tester.pumpWidget(harness());
+    await waitUntil(tester, () => find.text('A').evaluate().isNotEmpty);
+    expect(find.text('长按或拖动条目可调整顺序'), findsOneWidget);
+
+    // A 拖到 B 下方:顺序变为 B、A、C,position 重写为 0..2。
+    await _longPressDrag(tester, find.text('A'), 70);
+    late final List<WorldbookEntry> reordered;
+    await tester.runAsync(() async {
+      for (var i = 0; i < 80; i++) {
+        final rows = await WorldbookRepository(db).byCharacter(charId);
+        if (rows.first.name == 'B') break;
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+        await tester.pump();
+      }
+      reordered = await WorldbookRepository(db).byCharacter(charId);
+    });
+    expect(reordered.map((e) => e.name).toList(), ['B', 'A', 'C']);
+    expect(reordered.map((e) => e.position).toList(), [0, 1, 2]);
+    await tester.pumpAndSettle();
+    expect(
+      tester.getTopLeft(find.text('B')).dy,
+      lessThan(tester.getTopLeft(find.text('A')).dy),
+    );
     await tester.runAsync(() => db.db.close());
   });
 }

@@ -125,13 +125,14 @@ void main() {
       await _pumpUntilLoaded(tester);
 
       // 尚未发消息:灵岛的后台状态粒不显示(处于 idle)。
-      expect(find.textContaining('后台agent'), findsNothing);
+      expect(find.textContaining('后台引擎'), findsNothing);
 
       // 发一条消息 → 主回复 + 后台维护都跑完(点击发送按钮触发;输入框为
       // TextInputAction.newline,Enter 不发送)。
       final field = find.byType(TextField);
       await tester.enterText(field, 'hi');
-      await tester.tap(find.byIcon(Icons.send_rounded));
+      await tester.pump(); // 发送键随输入启用
+      await tester.tap(find.byTooltip('发送'));
       await tester.pump();
       await tester.runAsync(() async {
         for (var i = 0; i < 60; i++) {
@@ -151,7 +152,7 @@ void main() {
       // 状态闪示可见且带维护摘要(技能已迁出后台维护,不再出现在摘要里;
       // 后台返回的 variables 更新仍在)。闪示文案是富文本双段 span,
       // findRichText 才能匹配。
-      expect(find.textContaining('后台agent', findRichText: true), findsOneWidget);
+      expect(find.textContaining('后台引擎', findRichText: true), findsOneWidget);
       expect(find.textContaining('变量 mood=calm', findRichText: true), findsOneWidget);
 
       await tester.runAsync(() => db.db.close());
@@ -199,7 +200,8 @@ void main() {
 
       // 输入并发送;发送键在流式中变成中断键。
       await tester.enterText(find.byType(TextField), 'hi');
-      await tester.tap(find.byIcon(Icons.send_rounded));
+      await tester.pump(); // 发送键随输入启用
+      await tester.tap(find.byTooltip('发送'));
       await tester.runAsync(() async {
         backend.emit(const TextDelta('partial-'));
         // 等草稿真正进入气泡且中断键就绪,再点停止 —— 否则可能停在
@@ -358,6 +360,9 @@ void main() {
         ),
       );
       await _pumpUntilLoaded(tester);
+      // 灵岛入场形变(AnimatedSize + AnimatedSwitcher)走完再点关闭键:
+      // 全量套件并发时入场动画可能尚未落定,tap 会落在动画中的透明区域。
+      await tester.pump(const Duration(milliseconds: 300));
 
       // 点关闭按钮:提示条消失,且不触发任何 LLM 调用(记忆仍为空)。
       expect(find.text('初始化记忆'), findsOneWidget);
@@ -369,6 +374,85 @@ void main() {
         expect(await MemoryRepository(db).bySession(sessionId), isEmpty);
         await db.db.close();
       });
+    },
+  );
+
+  testWidgets(
+    'dismissed memory-init prompt stays hidden when re-entering the session',
+    (tester) async {
+      late final AppDatabase db;
+      late final int charId;
+      late final int sessionId;
+      await tester.runAsync(() async {
+        db = await openTestDb();
+        charId = await CharacterRepository(
+          db,
+        ).insert(const CharacterCard(name: 'Alice'));
+        sessionId = await SessionRepository(db).create(charId, 's1');
+      });
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            backendConfigProvider.overrideWith(
+              (ref) => const BackendConfig(
+                provider: BackendProvider.openai,
+                baseUrl: 'https://x',
+                apiKey: 'k',
+                model: 'm',
+              ),
+            ),
+            backendProvider.overrideWith((ref) => _MemoryInitBackend()),
+          ],
+          child: MaterialApp(
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: Center(
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => ChatScreen(
+                          sessionId: sessionId,
+                          characterId: charId,
+                          character: const CharacterCard(name: 'Alice'),
+                        ),
+                      ),
+                    ),
+                    child: const Text('open'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('open'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await _pumpUntilLoaded(tester);
+      // 等灵岛入场形变落定,再点关闭键(并发跑全量时入场动画可能未收敛)。
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('初始化记忆'), findsOneWidget);
+
+      // 关闭提示后返回,再进入同一会话:同一运行期内不再弹出。
+      await tester.tap(find.byTooltip('关闭初始化提示'));
+      await tester.pump();
+      expect(find.textContaining('新会话记忆为空'), findsNothing);
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('open'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await _pumpUntilLoaded(tester);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('新会话记忆为空'), findsNothing);
+      expect(find.text('初始化记忆'), findsNothing);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() => db.db.close());
     },
   );
 }

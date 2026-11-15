@@ -38,7 +38,12 @@ abstract class ChatControllerContext extends ChatControllerBase {
   /// 以"第 0 条消息"进数组。通知(压缩/记忆差异)同样落库为附件行随历史进数组。
   /// 历史对话行里的 @技能名 记号在此剥离:转录保留原话,只在 LLM 边界出口剥,
   /// 面板分段不受影响。
-  Future<ContextSnapshot?> _assembleSnapshot(List<Message> history) async {
+  /// [rewrite] 只用于"按要求重写"的当次请求:旧稿与修改要求作为一次性尾部
+  /// 提醒进入快照,不落库。
+  Future<ContextSnapshot?> _assembleSnapshot(
+    List<Message> history, {
+    RewriteContext? rewrite,
+  }) async {
     final sessionId = state.sessionId;
     final characterId = state.characterId;
     final character = state.character;
@@ -50,6 +55,7 @@ abstract class ChatControllerContext extends ChatControllerBase {
       worldbook: state.worldbook,
       frozenMemory: _frozenMemory,
       stripSkillNames: await enabledSkillNames(),
+      rewrite: rewrite,
     );
   }
 
@@ -146,36 +152,50 @@ abstract class ChatControllerContext extends ChatControllerBase {
     );
   }
 
+  /// 把一次压缩通知落库为附件行。
+  ///
+  /// 手动/软挡压缩在完成时**立即**调用(通知属于压缩后的第一次组装);
+  /// 硬挡压缩发生在用户消息落库之后,由 [_persistPendingNotices] 在同一轮
+  /// 发送管线内消费待发标志后调用。落库顺序允许晚于所属用户消息 ——
+  /// 组装期 [_correctNoticePositions] 会把它挪到该用户行之前。
+  Future<void> _persistCompactNotice(int sessionId) async {
+    await ref
+        .read(messageRepositoryProvider)
+        .append(
+          sessionId: sessionId,
+          role: 'user',
+          content: ContextAssembler.compactNoticeText,
+          kind: MessageKind.attachment,
+          refId: AttachmentRef.noticeCompact(
+            DateTime.now().millisecondsSinceEpoch,
+          ).value,
+        );
+  }
+
   /// 消费待发通知并落库为附件行(替代原合成插入的统一收口)。
   ///
-  /// 压缩通知消费 [_compactNoticePending] 标志(ref 含发生时刻,每次压缩唯一);
+  /// 压缩通知消费 [_compactNoticePending] 标志(ref 含发生时刻,每次压缩唯一;
+  /// 仅硬挡路径使用 —— 手动/软挡已在压缩完成时立即落库);
   /// 记忆差异经 [_memoryDiffNotice] 判定(ref 含版本哈希),去重账本在落库
   /// **成功后**置位。调用点:_sendPipeline/_appendAndGenerate 在落用户消息
   /// **前**(通知天然排在用户输入之前);regenerate 与硬挡中途压缩在其后
   /// (组装期由位置校正挪到最新用户行之前,字节对齐旧合成位置)。
   Future<void> _persistPendingNotices(int sessionId) async {
-    final messageRepo = ref.read(messageRepositoryProvider);
     if (_compactNoticePending) {
       _compactNoticePending = false;
-      await messageRepo.append(
-        sessionId: sessionId,
-        role: 'user',
-        content: ContextAssembler.compactNoticeText,
-        kind: MessageKind.attachment,
-        refId: AttachmentRef.noticeCompact(
-          DateTime.now().millisecondsSinceEpoch,
-        ).value,
-      );
+      await _persistCompactNotice(sessionId);
     }
     final diff = await _memoryDiffNotice(sessionId);
     if (diff != null) {
-      await messageRepo.append(
-        sessionId: sessionId,
-        role: 'user',
-        content: diff.content,
-        kind: MessageKind.attachment,
-        refId: AttachmentRef.noticeMemoryDiff(diff.hash).value,
-      );
+      await ref
+          .read(messageRepositoryProvider)
+          .append(
+            sessionId: sessionId,
+            role: 'user',
+            content: diff.content,
+            kind: MessageKind.attachment,
+            refId: AttachmentRef.noticeMemoryDiff(diff.hash).value,
+          );
       _memoryDiffNotifiedHash = diff.hash;
     }
   }

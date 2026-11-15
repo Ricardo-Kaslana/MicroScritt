@@ -1,8 +1,9 @@
 /// 会话压缩服务:把较早的活跃对话折叠为一条 LLM 摘要(合并式单一摘要)。
 ///
 /// 被压缩的原文保留 `is_compacted=1`(不删除);摘要作为 `system` 角色行
-/// 写入,由 `ContextAssembler` 渲染进系统提示。压缩由调用方内联执行
-/// (回复落库后的软挡、发送前的硬挡或手动命令),不进后台任务队列。
+/// 写入,由 `ContextAssembler` 包成 `<summary>` 合成消息放在 messages 数组
+/// 首位(记忆之后),不进 systemPrompt。压缩由调用方内联执行(回复落库后的
+/// 软挡、发送前的硬挡或手动命令),不进后台任务队列。
 library;
 
 import 'dart:async';
@@ -26,8 +27,8 @@ typedef _CompactPlan = ({List<Message> toCompact, List<Message> prevSummaries});
 /// 压缩会话较早的活跃对话为一条 LLM 摘要。
 ///
 /// 被压缩的原文保留 `is_compacted=1`(不删除);摘要作为 `system` 角色行写入,
-/// 由 `ContextAssembler` 渲染进系统提示。压缩在调用方的异步流程内联执行,
-/// 不进后台任务队列。
+/// 由 `ContextAssembler` 包成 `<summary>` 合成消息放在 messages 数组首位
+/// (记忆之后)。压缩在调用方的异步流程内联执行,不进后台任务队列。
 ///
 /// 合并式单一摘要:每次压缩把会话当前的未折叠摘要行作为「早期背景」一并
 /// 送入模型,产出的新摘要自足、可完全替代旧摘要;旧摘要行与新摘要落库同
@@ -45,7 +46,6 @@ class CompactService {
   /// 压缩除最新 [keep] 条活跃消息外的历史为一条摘要;发生压缩返回 true,
   /// 无事可做或摘要无产出返回 false。
   ///
-  /// [minChunk]:掉出窗口的对话达到该条数才压缩(默认 1 保持旧行为)。
   /// [maxSummarizeAttempts]:摘要调用的总尝试次数(默认 1 = 失败不重试;
   /// 自动路径传 4 = 首次 + 3 次失败重试)。每次失败(ErrorEvent/流错误/
   /// 空输出)都完整重试一遍摘要调用。
@@ -59,13 +59,12 @@ class CompactService {
     required int sessionId,
     required String model,
     int keep = 20,
-    int minChunk = 1,
     int maxSummarizeAttempts = 1,
     void Function(TokenUsage usage)? onUsage,
     Set<String> stripSkillNames = const {},
     Future<void>? cancelSignal,
   }) async {
-    final plan = await _plan(sessionId, keep: keep, minChunk: minChunk);
+    final plan = await _plan(sessionId, keep: keep);
     if (plan == null) return false;
 
     // 摘要失败重试:maxSummarizeAttempts 为总尝试次数,任一次成功即止;
@@ -92,7 +91,7 @@ class CompactService {
   /// 剧情摘要绝不能丢),旧摘要行与原文同事务折叠。
   /// 返回是否发生了折叠。
   Future<bool> foldToFit({required int sessionId, required int keep}) async {
-    final plan = await _plan(sessionId, keep: keep, minChunk: 1);
+    final plan = await _plan(sessionId, keep: keep);
     if (plan == null) return false;
     const baseNote =
         '【系统注记】上下文超出模型预算且自动摘要暂不可用,以下早期对话已被折叠为占位记录(未生成摘要,原文保留于会话存档)。';
@@ -106,7 +105,7 @@ class CompactService {
 
   /// 一次读取同时定出「待压缩集合」与「既有未折叠摘要行」,供摘要调用与
   /// 原子落库共用(避免两次读之间被写入穿插)。无可压时返回 null。
-  Future<_CompactPlan?> _plan(int sessionId, {required int keep, required int minChunk}) async {
+  Future<_CompactPlan?> _plan(int sessionId, {required int keep}) async {
     final all = await messages.bySession(sessionId);
     // 未折叠 system 行 = 现行版本摘要(可能含机械折叠的注记行);
     // 新摘要落库时它们一并折叠,线上摘要段始终只有一条。
@@ -114,8 +113,6 @@ class CompactService {
     final active = all.where((m) => m.role != 'system' && !m.isCompacted && m.content.isNotEmpty).toList();
     final chatRows = active.where((m) => m.isChat).toList();
     if (chatRows.length <= keep) return null;
-    final overflow = chatRows.length - keep;
-    if (overflow < minChunk) return null;
     final cutSeq = chatRows[chatRows.length - keep].seq;
     final toCompact = active.where((m) => m.seq < cutSeq).toList();
     if (toCompact.isEmpty) return null;
@@ -149,19 +146,37 @@ class CompactService {
     Set<String> stripSkillNames, {
     Future<void>? cancelSignal,
   }) async {
-    // 摘要转录只送真实对话:附件行是 <system-reminder> 注入资料,不是剧情,
-    // 混进摘要输入只会污染摘要输出(被压缩条目里的设定本就源于世界书/技能库)。
-    // 对话行先剥离 @技能名 记号(记号不进任何 LLM 出口)。
+    // 摘要转录以真实对话为主体:对话行先剥离 @技能名 记号(记号不进任何
+    // LLM 出口)。
     final transcript = msgs
         .where((m) => m.isChat)
         .map((m) => '${m.role}: ${ContextAssembler.withoutSkillTokens(m.content, stripSkillNames)}')
         .join('\n');
+    // 附件行(世界书/技能/通知)随历史折叠时,其资料性内容不能凭空消失:
+    // 单独成段交给模型,只允许提取其中已确立的设定事实(不当作对话/事件)。
+    // 若不送入,被折叠条目里的关键设定在后续轮次将彻底不可见。
+    final attachments = msgs
+        .where((m) => !m.isChat)
+        .map(
+          (m) =>
+              '[${_attachmentLabel(m)}] '
+              '${ContextAssembler.withoutSkillTokens(m.content, stripSkillNames)}',
+        )
+        .join('\n\n');
     // 既有摘要作「早期背景」前置:提示词的合并纪律要求模型把它吸收进新摘要
     // (冲突处以更新的对话为准),配合 _apply 折叠旧行实现单一自足最新摘要。
     final prior = prevSummaries.map((m) => m.content).join('\n\n');
-    final userContent = prior.isEmpty
-        ? transcript
-        : '【既有摘要 —— 仅作早期背景,与下方对话冲突处以对话为准】\n$prior\n\n【待摘要对话】\n$transcript';
+    final parts = <String>[
+      if (prior.isNotEmpty)
+        '【既有摘要 —— 仅作早期背景,与下方对话冲突处以对话为准】\n$prior',
+      '【待摘要对话】\n$transcript',
+      if (attachments.isNotEmpty)
+        '【历史注入资料(非对话)】\n'
+            '以下资料随早期对话一并折叠。只提取其中已经确立的设定事实并并入'
+            '「既定设定与事实」段;不要把它们当作剧情事件、台词或当前现场。\n'
+            '$attachments',
+    ];
+    final userContent = parts.join('\n\n');
     final request = LlmRequest(
       model: model,
       systemPrompt: _summarySystemPrompt,
@@ -220,6 +235,17 @@ class CompactService {
   }
 }
 
+/// 附件行的来源标签(供摘要转录区分资料类型,不影响正文判定)。
+String _attachmentLabel(Message m) {
+  final ref = m.refId ?? '';
+  if (ref.startsWith('wb:')) return '世界书条目';
+  if (ref.startsWith('skill:')) return '技能';
+  if (ref.startsWith('notice:compact:')) return '压缩通知';
+  if (ref.startsWith('notice:memdiff:')) return '记忆差异通知';
+  if (ref.startsWith('notice:')) return '系统通知';
+  return '附件';
+}
+
 /// 压缩摘要的结构化提示词 —— 为「本应用的主写模型据此续写同一角色、同一剧情」
 /// 这一读取场景专门设计(合并式单一摘要):
 /// - 【定位】摘要是"剧情状态文档"而非"对话日志" —— 按故事时间线记录事件、
@@ -249,6 +275,7 @@ const String _summarySystemPrompt = '''
 - 摘要会注入后续每一轮请求、长期占用上下文:只保留续写必需的信息,表达精炼,不无界增长。
 - 只归纳对话中真实发生的内容,不虚构、不脑补、不替剧情做决定。
 - 若输入附带「既有摘要」,将其作为早期背景吸收进新摘要;与更新的对话冲突处,一律以对话为准。新摘要必须自足,可完全替代旧摘要。
+- 若输入附带「历史注入资料」,只从中提取已确立的设定事实并入第 5 段;它们是资料而不是对话,不得当作剧情事件、台词或当前现场。
 - 只输出 <analysis> 与 <summary> 两部分,<summary> 内不要重复 <analysis> 的内容。
 ''';
 

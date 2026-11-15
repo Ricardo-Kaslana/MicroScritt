@@ -6,6 +6,8 @@ library;
 import 'package:flutter/material.dart';
 
 import 'copy_button.dart';
+import 'sheet_header.dart';
+import 'unsaved_changes_guard.dart';
 
 /// 通用底部文本编辑区:弹出后返回用户保存的新文本,取消返回 null。
 ///
@@ -19,6 +21,8 @@ Future<String?> showTextEditSheet(
   // 记忆等需要长文编辑的调用方可以传更高的编辑区;默认与消息编辑一致。
   double editorHeightFactor = 0.55,
   double maxEditorHeight = 420,
+  // 保存键文案:消息/记忆编辑用默认「保存」,重写要求等场景可换成动作名。
+  String submitLabel = '保存',
 }) {
   return showModalBottomSheet<String>(
     context: context,
@@ -30,6 +34,7 @@ Future<String?> showTextEditSheet(
       hintText: hintText,
       editorHeightFactor: editorHeightFactor,
       maxEditorHeight: maxEditorHeight,
+      submitLabel: submitLabel,
     ),
   );
 }
@@ -40,12 +45,14 @@ class _TextEditSheet extends StatefulWidget {
   final String hintText;
   final double editorHeightFactor;
   final double maxEditorHeight;
+  final String submitLabel;
   const _TextEditSheet({
     required this.title,
     required this.initialText,
     required this.hintText,
     required this.editorHeightFactor,
     required this.maxEditorHeight,
+    required this.submitLabel,
   });
 
   @override
@@ -77,11 +84,8 @@ class _TextEditSheetState extends State<_TextEditSheet> {
   void _onChanged(String v) => setState(() => _text = v);
 
   void _submit() {
-    // 空文本(仅空白)不保存:直接取消,避免把内容改空。
-    if (_text.trim().isEmpty) {
-      Navigator.pop(context);
-      return;
-    }
+    // 空文本(仅空白)不保存:保存键已置灰,这里只做最终防线。
+    if (_text.trim().isEmpty) return;
     Navigator.pop(context, _text);
   }
 
@@ -98,120 +102,108 @@ class _TextEditSheetState extends State<_TextEditSheet> {
           widget.maxEditorHeight,
         );
 
-    return Align(
-      alignment: Alignment.bottomCenter,
-      // heightFactor=1:让整个编辑区按内容高度收缩,而不是撑满整屏 ——
-      // 否则(isScrollControlled 给到全屏高)Align 占满高度,整块 sheet
-      // 表面被拉满,标题上方留下一大块空白。
-      heightFactor: 1,
-      child: Padding(
-        padding: EdgeInsets.only(bottom: bottomInset),
-        // 与其余底单一致占满整宽(不做桌面限宽):限宽会在宽屏上两侧
-        // 留出一大片空白,与本 App 其它底单/输入区风格不符。
-        child: Material(
-          color: scheme.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-          clipBehavior: Clip.antiAlias,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.sizeOf(context).height * 0.9,
-            ),
-            child: Padding(
-              // 左右留 12 与聊天输入胶囊(12/4/12/8)对齐,不再有额外宽边距。
-              padding: EdgeInsets.fromLTRB(
-                12,
-                12,
-                12,
-                bottomInset > 0 ? 12 : 20,
+    return UnsavedChangesGuard(
+      // 点遮罩/系统返回退出前确认;显式「取消」按钮走程序性 pop,不拦。
+      hasChanges: () => _text != widget.initialText,
+      changes: [_controller],
+      title: '放弃编辑?',
+      message: '已输入的内容不会保存。',
+      confirmLabel: '放弃',
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        // heightFactor=1:让整个编辑区按内容高度收缩,而不是撑满整屏 ——
+        // 否则(isScrollControlled 给到全屏高)Align 占满高度,整块 sheet
+        // 表面被拉满,标题上方留下一大块空白。
+        heightFactor: 1,
+        child: Padding(
+          padding: EdgeInsets.only(bottom: bottomInset),
+          // 与其余底单一致占满整宽(不做桌面限宽):限宽会在宽屏上两侧
+          // 留出一大片空白,与本 App 其它底单/输入区风格不符。
+          child: Material(
+            color: scheme.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            clipBehavior: Clip.antiAlias,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * 0.9,
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // 拖拽把手 + 标题 + 取消。
-                  Row(
-                    children: [
-                      Container(
-                        width: 36,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: scheme.outlineVariant,
-                          borderRadius: BorderRadius.circular(2),
+              child: Padding(
+                // 左右留 12 与聊天输入胶囊(12/4/12/8)对齐,不再有额外宽边距。
+                padding: EdgeInsets.fromLTRB(
+                  12,
+                  12,
+                  12,
+                  bottomInset > 0 ? 12 : 20,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    SheetHeader(
+                      title: widget.title,
+                      actions: [CopyTextButton(controller: _controller)],
+                      closeLabel: '取消',
+                    ),
+                    const SizedBox(height: 8),
+                    // 编辑主体:多行输入,长文内部滚动。空间充裕时占满期望高度
+                    // (editorHeight),可用高度不足(小窗/键盘弹起)时收缩让位,
+                    // 避免固定高度把 Column 撑爆溢出。
+                    Flexible(
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: 120,
+                          maxHeight: editorHeight,
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          widget.title,
-                          style: Theme.of(context).textTheme.titleMedium,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      CopyTextButton(controller: _controller),
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('取消'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  // 编辑主体:多行输入,长文内部滚动。空间充裕时占满期望高度
-                  // (editorHeight),可用高度不足(小窗/键盘弹起)时收缩让位,
-                  // 避免固定高度把 Column 撑爆溢出。
-                  Flexible(
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        minHeight: 120,
-                        maxHeight: editorHeight,
-                      ),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: scheme.surfaceContainerHighest.withValues(
-                            alpha: 0.6,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: scheme.surfaceContainerHighest.withValues(
+                              alpha: 0.6,
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: scheme.outlineVariant.withValues(
+                                alpha: 0.5,
+                              ),
+                            ),
                           ),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: scheme.outlineVariant.withValues(alpha: 0.5),
-                          ),
-                        ),
-                        child: TextField(
-                          controller: _controller,
-                          autofocus: true,
-                          maxLines: null,
-                          expands: true,
-                          textAlignVertical: TextAlignVertical.top,
-                          keyboardType: TextInputType.multiline,
-                          textInputAction: TextInputAction.newline,
-                          onChanged: _onChanged,
-                          style: const TextStyle(fontSize: 15, height: 1.4),
-                          decoration: InputDecoration(
-                            hintText: widget.hintText,
-                            border: InputBorder.none,
-                            contentPadding: const EdgeInsets.all(12),
+                          child: TextField(
+                            controller: _controller,
+                            autofocus: true,
+                            maxLines: null,
+                            expands: true,
+                            textAlignVertical: TextAlignVertical.top,
+                            keyboardType: TextInputType.multiline,
+                            textInputAction: TextInputAction.newline,
+                            onChanged: _onChanged,
+                            style: const TextStyle(fontSize: 15, height: 1.4),
+                            decoration: InputDecoration(
+                              hintText: widget.hintText,
+                              border: InputBorder.none,
+                              contentPadding: const EdgeInsets.all(12),
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  // 底部一行:字数统计 + 保存。
-                  Row(
-                    children: [
-                      Text(
-                        '${_text.length} 字符',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
+                    const SizedBox(height: 8),
+                    // 底部一行:字数统计 + 保存。
+                    Row(
+                      children: [
+                        Text(
+                          '${_text.length} 字符',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: scheme.onSurfaceVariant),
                         ),
-                      ),
-                      const Expanded(child: SizedBox.shrink()),
-                      FilledButton.icon(
-                        onPressed: _text.trim().isEmpty ? null : _submit,
-                        icon: const Icon(Icons.check, size: 18),
-                        label: const Text('保存'),
-                      ),
-                    ],
-                  ),
-                ],
+                        const Expanded(child: SizedBox.shrink()),
+                        FilledButton.icon(
+                          onPressed: _text.trim().isEmpty ? null : _submit,
+                          icon: const Icon(Icons.check, size: 18),
+                          label: Text(widget.submitLabel),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

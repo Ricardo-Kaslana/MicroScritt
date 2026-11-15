@@ -18,6 +18,7 @@ import 'common/form_field.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/section_header.dart';
 import 'common/shrink_image.dart';
+import 'common/unsaved_changes_guard.dart';
 import 'widgets/message_bubble.dart';
 import 'widgets/rich_message_text.dart';
 
@@ -46,6 +47,8 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
   late final TextEditingController _postHistory;
   late final TextEditingController _creatorNotes;
   late final TextEditingController _tags;
+  final _scroll = ScrollController();
+  final _nameFocus = FocusNode();
   String? _avatarBase64;
   String? _backgroundBase64;
 
@@ -53,6 +56,9 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
   BubbleStyle? _bubbleStyle;
   bool _loading = true;
   bool _saving = false;
+
+  /// 打开编辑器时的表单快照:返回时据此判断是否有未保存修改。
+  String _initialSignature = '';
 
   /// 编辑模式下加载的原始卡片:保存时把界面上没有编辑入口的元数据字段
   /// (creator/character_version/talkativeness/fav/depth_prompt)原样带过,
@@ -81,6 +87,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
   Future<void> _loadExisting() async {
     final id = widget.characterId;
     if (id == null) {
+      _initialSignature = _signature();
       setState(() => _loading = false);
       return;
     }
@@ -104,11 +111,52 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
     _avatarBase64 = card.avatarBase64;
     _backgroundBase64 = card.backgroundBase64;
     _bubbleStyle = card.bubbleStyle;
+    _initialSignature = _signature();
     setState(() => _loading = false);
   }
 
+  /// 当前表单的扁平快照:文本 + 头像/背景 + 气泡样式。头像与背景用
+  /// 引用哈希参与比较 —— base64 可能是几十 KB 级字符串,逐字比较会在
+  /// 每次输入时白烧 CPU,而换图必然产生新实例。
+  String _signature() => [
+    _name.text,
+    _description.text,
+    _personality.text,
+    _scenario.text,
+    _firstMessage.text,
+    _alternateGreetings.text,
+    _mesExample.text,
+    _systemPrompt.text,
+    _postHistory.text,
+    _creatorNotes.text,
+    _tags.text,
+    '${identityHashCode(_avatarBase64)}',
+    '${identityHashCode(_backgroundBase64)}',
+    _bubbleSignature(_bubbleStyle),
+  ].join('\u0000');
+
+  static String _bubbleSignature(BubbleStyle? s) => s == null
+      ? ''
+      : '${s.bubbleColor}|${s.textColor}|${s.radius}|${s.opacity}|${s.fontFamily}|${s.fontSize}';
+
+  List<Listenable> get _textChanges => [
+    _name,
+    _description,
+    _personality,
+    _scenario,
+    _firstMessage,
+    _alternateGreetings,
+    _mesExample,
+    _systemPrompt,
+    _postHistory,
+    _creatorNotes,
+    _tags,
+  ];
+
   @override
   void dispose() {
+    _scroll.dispose();
+    _nameFocus.dispose();
     _name.dispose();
     _description.dispose();
     _personality.dispose();
@@ -184,11 +232,18 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
     );
   }
 
-  /// 保存:新建 insert,编辑 update 后失效该 id 的头像缓存;名字为空只提示,
-  /// 不落库也不关闭页面。
+  /// 保存:新建 insert,编辑 update 后失效该 id 的头像缓存;名字为空时把
+  /// 焦点/视口带回名字字段,不落库也不关闭页面。
   Future<void> _save() async {
+    if (_saving) return;
     final name = _name.text.trim();
     if (name.isEmpty) {
+      _nameFocus.requestFocus();
+      _scroll.animateTo(
+        0,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('名字不能为空')));
@@ -207,6 +262,8 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
         ref.invalidate(characterAvatarProvider(id));
       }
       ref.invalidate(charactersProvider);
+      // 侧栏分组直接读角色仓库(名字/顺序),改名/换头像卡后需一并失效。
+      ref.invalidate(sessionGroupsProvider);
       if (mounted) Navigator.pop(context);
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -236,148 +293,175 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
         ),
       );
     }
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_isNew ? '新建角色' : '编辑角色'),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : _save,
-            child: _saving
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('保存'),
-          ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        children: [
-          Center(
-            child: Column(
+    return UnsavedChangesGuard(
+      // 加载完成前不参与判定:首帧空白表单与加载后的初值不应算修改。
+      hasChanges: () => !_loading && _signature() != _initialSignature,
+      changes: _textChanges,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(_isNew ? '新建角色' : '编辑角色'),
+          actions: [
+            TextButton(
+              onPressed: _saving ? null : _save,
+              child: _saving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('保存'),
+            ),
+          ],
+        ),
+        body: ListView(
+          controller: _scroll,
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          children: [
+            Center(
+              child: Column(
+                children: [
+                  avatar,
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    onPressed: _pickAvatar,
+                    icon: const Icon(Icons.image_outlined),
+                    label: const Text('选择头像'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            // 聊天背景:独立于头像的横图,开启"聊天背景"后铺在聊天页;未设置时回退头像。
+            _BackgroundField(
+              backgroundBase64: _backgroundBase64,
+              onPick: _pickBackground,
+              onClear: _clearBackground,
+            ),
+            const SizedBox(height: 20),
+            // ===== 角色名片 =====
+            const SectionHeader('名片', icon: Icons.badge_outlined),
+            GroupCard(
               children: [
-                avatar,
-                const SizedBox(height: 8),
-                TextButton.icon(
-                  onPressed: _pickAvatar,
-                  icon: const Icon(Icons.image_outlined),
-                  label: const Text('选择头像'),
+                FormTextField(
+                  controller: _name,
+                  focusNode: _nameFocus,
+                  label: '名字 *',
+                  hint: '角色的名字',
+                ),
+                FormTextField(
+                  controller: _description,
+                  label: '描述',
+                  hint: '角色的外貌、背景、身份等基础设定',
+                  lines: 4,
                 ),
               ],
             ),
-          ),
-          const SizedBox(height: 8),
-          // 聊天背景:独立于头像的横图,开启"聊天背景"后铺在聊天页;未设置时回退头像。
-          _BackgroundField(
-            backgroundBase64: _backgroundBase64,
-            onPick: _pickBackground,
-            onClear: _clearBackground,
-          ),
-          const SizedBox(height: 20),
-          // ===== 角色名片 =====
-          const SectionHeader('名片', icon: Icons.badge_outlined),
-          GroupCard(
-            children: [
-              FormTextField(controller: _name, label: '名字 *', hint: '角色的名字'),
-              FormTextField(
-                controller: _description,
-                label: '描述',
-                hint: '角色的外貌、背景、身份等基础设定',
-                lines: 4,
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          // ===== 性格与场景 =====
-          const SectionHeader('性格与场景', icon: Icons.psychology_outlined),
-          GroupCard(
-            children: [
-              FormTextField(
-                controller: _personality,
-                label: '性格',
-                hint: '性格特征与说话方式',
-                lines: 3,
-              ),
-              FormTextField(
-                controller: _scenario,
-                label: '场景',
-                hint: '故事发生的背景与当前情境',
-                lines: 3,
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          // ===== 对话 =====
-          const SectionHeader('对话', icon: Icons.forum_outlined),
-          GroupCard(
-            children: [
-              FormTextField(
-                controller: _firstMessage,
-                label: '开场白',
-                hint: '角色第一条消息(新建会话时自动写入)',
-                lines: 5,
-              ),
-              FormTextField(
-                controller: _alternateGreetings,
-                label: '备用开场白',
-                hint: '每行一条;点击左侧按钮切换',
-                lines: 2,
-              ),
-              FormTextField(
-                controller: _mesExample,
-                label: '对话示例',
-                hint: '示范角色语气的对话样例',
-                lines: 5,
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          // ===== 高级 =====
-          const SectionHeader('高级', icon: Icons.tune_outlined),
-          GroupCard(
-            children: [
-              FormTextField(
-                controller: _systemPrompt,
-                label: '系统提示词',
-                hint: '追加到系统提示词的专属指令',
-                lines: 4,
-              ),
-              FormTextField(
-                controller: _postHistory,
-                label: '历史后指令',
-                hint: '追加在历史之后的指令',
-                lines: 3,
-              ),
-              FormTextField(
-                controller: _creatorNotes,
-                label: '作者备注',
-                hint: '仅展示,不进上下文',
-                lines: 2,
-              ),
-              FormTextField(
-                controller: _tags,
-                label: '标签',
-                hint: '逗号分隔,如 奇幻, 图书馆',
-                lines: 1,
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          // ===== 气泡样式 =====
-          const SectionHeader('气泡样式', icon: Icons.chat_bubble_outline),
-          _BubbleStyleSection(
-            style: _bubbleStyle,
-            previewName: _name.text.trim().isEmpty ? '角色' : _name.text.trim(),
-            onChanged: (s) => setState(() => _bubbleStyle = s),
-          ),
-          const SizedBox(height: 28),
-          FilledButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
+            const SizedBox(height: 20),
+            // ===== 性格与场景 =====
+            const SectionHeader('性格与场景', icon: Icons.psychology_outlined),
+            GroupCard(
+              children: [
+                FormTextField(
+                  controller: _personality,
+                  label: '性格',
+                  hint: '性格特征与说话方式',
+                  lines: 3,
+                ),
+                FormTextField(
+                  controller: _scenario,
+                  label: '场景',
+                  hint: '故事发生的背景与当前情境',
+                  lines: 3,
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            // ===== 对话 =====
+            const SectionHeader('对话', icon: Icons.forum_outlined),
+            GroupCard(
+              children: [
+                FormTextField(
+                  controller: _firstMessage,
+                  label: '开场白',
+                  hint: '角色第一条消息(新建会话时自动写入)',
+                  lines: 5,
+                ),
+                FormTextField(
+                  controller: _alternateGreetings,
+                  label: '备用开场白',
+                  hint: '每行一条备用开场白,随角色卡保存与导出',
+                  lines: 2,
+                ),
+                FormTextField(
+                  controller: _mesExample,
+                  label: '对话示例',
+                  hint: '示范角色语气的对话样例',
+                  lines: 5,
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            // ===== 高级 =====
+            const SectionHeader('高级', icon: Icons.tune_outlined),
+            GroupCard(
+              children: [
+                FormTextField(
+                  controller: _systemPrompt,
+                  label: '系统提示词',
+                  hint: '追加到系统提示词的专属指令',
+                  lines: 4,
+                ),
+                FormTextField(
+                  controller: _postHistory,
+                  label: '历史后指令',
+                  hint: '追加在历史之后的指令',
+                  lines: 3,
+                ),
+                FormTextField(
+                  controller: _creatorNotes,
+                  label: '作者备注',
+                  hint: '仅展示,不进上下文',
+                  lines: 2,
+                ),
+                FormTextField(
+                  controller: _tags,
+                  label: '标签',
+                  hint: '逗号分隔,如 奇幻, 图书馆',
+                  lines: 1,
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            // ===== 气泡样式 =====
+            const SectionHeader('气泡样式', icon: Icons.chat_bubble_outline),
+            _BubbleStyleSection(
+              style: _bubbleStyle,
+              previewName: _name.text.trim().isEmpty ? '角色' : _name.text.trim(),
+              onChanged: (s) => setState(() => _bubbleStyle = s),
+            ),
+            const SizedBox(height: 28),
+            FilledButton(
+              onPressed: _saving ? null : _save,
+              child: _saving
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Theme.of(context).colorScheme.onPrimary,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        const Text('保存中…'),
+                      ],
+                    )
+                  : const Text('保存'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -482,9 +566,9 @@ const List<({String label, int color})> _kBubblePalette = [
   (label: '浅棕', color: 0xFFEFE6DA),
 ];
 
-/// 气泡样式定制节:预设色板 + 文字色三选(自动/深/浅)+ 圆角/透明度滑杆 +
-/// 实时预览(与聊天页同款 [ChatBubbleFrame] + [RichMessageText] 管线)。
-/// 全部字段回到默认值时上报 null(走应用统一样式)。
+/// 气泡样式定制节:预设色板 + 文字色三选(自动/深/浅)+ 字体/字号 +
+/// 圆角/透明度滑杆 + 实时预览(与聊天页同款 [ChatBubbleFrame] +
+/// [RichMessageText] 管线)。全部字段回到默认值时上报 null(走应用统一样式)。
 class _BubbleStyleSection extends StatelessWidget {
   final BubbleStyle? style;
   final ValueChanged<BubbleStyle?> onChanged;
@@ -518,18 +602,34 @@ class _BubbleStyleSection extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('气泡底色', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
+              Text(
+                '气泡底色',
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 10,
                 runSpacing: 10,
                 children: [
-                  _swatch(context, null, '默认', Icons.format_color_reset_outlined),
-                  for (final e in _kBubblePalette) _swatch(context, e.color, e.label, null),
+                  _swatch(
+                    context,
+                    null,
+                    '默认',
+                    Icons.format_color_reset_outlined,
+                  ),
+                  for (final e in _kBubblePalette)
+                    _swatch(context, e.color, e.label, null),
                 ],
               ),
               const SizedBox(height: 12),
-              Text('文字颜色', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
+              Text(
+                '文字颜色',
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
               const SizedBox(height: 6),
               SegmentedButton<int>(
                 segments: const [
@@ -537,38 +637,55 @@ class _BubbleStyleSection extends StatelessWidget {
                   ButtonSegment(value: 0xFF1B1B1F, label: Text('深色')),
                   ButtonSegment(value: 0xFFFFFFFF, label: Text('浅色')),
                 ],
-                selected: {
-                  s.textColor ?? 0,
-                },
+                selected: {s.textColor ?? 0},
                 // copyWith 传 null 不清除旧值,这里整对象重建以支持"回到自动"。
-                onSelectionChanged: (set) => _update(BubbleStyle(
-                  bubbleColor: s.bubbleColor,
-                  textColor: set.first == 0 ? null : set.first,
-                  radius: s.radius,
-                  opacity: s.opacity,
-                  fontFamily: s.fontFamily,
-                )),
+                onSelectionChanged: (set) => _update(
+                  BubbleStyle(
+                    bubbleColor: s.bubbleColor,
+                    textColor: set.first == 0 ? null : set.first,
+                    radius: s.radius,
+                    opacity: s.opacity,
+                    fontFamily: s.fontFamily,
+                    fontSize: s.fontSize,
+                  ),
+                ),
               ),
               const SizedBox(height: 12),
-              Text('正文字体', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
+              Text(
+                '正文字体',
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
               const SizedBox(height: 6),
               SegmentedButton<String>(
                 segments: const [
                   ButtonSegment(value: '', label: Text('默认')),
                   ButtonSegment(value: 'serif', label: Text('衬线')),
                 ],
-                selected: {
-                  s.fontFamily ?? '',
-                },
-                onSelectionChanged: (set) => _update(BubbleStyle(
-                  bubbleColor: s.bubbleColor,
-                  textColor: s.textColor,
-                  radius: s.radius,
-                  opacity: s.opacity,
-                  fontFamily: set.first.isEmpty ? null : set.first,
-                )),
+                selected: {s.fontFamily ?? ''},
+                onSelectionChanged: (set) => _update(
+                  BubbleStyle(
+                    bubbleColor: s.bubbleColor,
+                    textColor: s.textColor,
+                    radius: s.radius,
+                    opacity: s.opacity,
+                    fontFamily: set.first.isEmpty ? null : set.first,
+                    fontSize: s.fontSize,
+                  ),
+                ),
               ),
               const SizedBox(height: 4),
+              _slider(
+                context,
+                label: '正文字号',
+                value: s.fontSize ?? kBubbleDefaultFontSize,
+                min: 12,
+                max: 22,
+                divisions: 10,
+                display: '${(s.fontSize ?? kBubbleDefaultFontSize).round()}',
+                onChanged: (v) => _update(s.copyWith(fontSize: v)),
+              ),
               _slider(
                 context,
                 label: '圆角',
@@ -590,7 +707,12 @@ class _BubbleStyleSection extends StatelessWidget {
                 onChanged: (v) => _update(s.copyWith(opacity: v)),
               ),
               const SizedBox(height: 8),
-              Text('预览', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
+              Text(
+                '预览',
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
               const SizedBox(height: 6),
               Center(
                 child: ChatBubbleFrame(
@@ -600,10 +722,12 @@ class _BubbleStyleSection extends StatelessWidget {
                   style: style,
                   constraints: const BoxConstraints(maxWidth: 380),
                   child: RichMessageText(
-                    text: '【2024年·秋·晴 17:42】$previewName *微微一笑*,**压低声音**:“你来了。”',
+                    text:
+                        '【2024年·秋·晴 17:42】$previewName *微微一笑*,**压低声音**:“你来了。”',
                     style: chatBubbleTextStyle(
                       resolveAssistantTextColor(scheme, style),
                       fontFamily: s.fontFamily,
+                      fontSize: s.fontSize,
                     ),
                     charName: previewName,
                     scripts: _previewScripts,
@@ -613,7 +737,9 @@ class _BubbleStyleSection extends StatelessWidget {
               const SizedBox(height: 4),
               Text(
                 '仅定制该角色(助手)的气泡外观,不进对话上下文;用户气泡保持应用统一样式。',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.outline),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.outline),
               ),
               if (style != null)
                 Align(
@@ -632,26 +758,52 @@ class _BubbleStyleSection extends StatelessWidget {
   }
 
   /// 单个色块;[color] 为 null 表示"默认"(清除定制底色)。
-  Widget _swatch(BuildContext context, int? color, String tooltip, IconData? icon) {
+  Widget _swatch(
+    BuildContext context,
+    int? color,
+    String tooltip,
+    IconData? icon,
+  ) {
     final selected = style?.bubbleColor == color;
     return Tooltip(
       message: tooltip,
       child: GestureDetector(
-        onTap: () => _update((style ?? const BubbleStyle()).copyWith(bubbleColor: color)),
+        // copyWith 传 null 不清除旧值,整对象重建以支持「默认」清空底色。
+        onTap: () {
+          final base = style ?? const BubbleStyle();
+          _update(
+            BubbleStyle(
+              bubbleColor: color,
+              textColor: base.textColor,
+              radius: base.radius,
+              opacity: base.opacity,
+              fontFamily: base.fontFamily,
+              fontSize: base.fontSize,
+            ),
+          );
+        },
         child: Container(
           width: 34,
           height: 34,
           decoration: BoxDecoration(
-            color: color == null ? Theme.of(context).colorScheme.surfaceContainerHighest : Color(color),
+            color: color == null
+                ? Theme.of(context).colorScheme.surfaceContainerHighest
+                : Color(color),
             shape: BoxShape.circle,
             border: Border.all(
-              color: selected ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.outlineVariant,
+              color: selected
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.outlineVariant,
               width: selected ? 2.5 : 1,
             ),
           ),
           child: icon == null
               ? null
-              : Icon(icon, size: 18, color: Theme.of(context).colorScheme.outline),
+              : Icon(
+                  icon,
+                  size: 18,
+                  color: Theme.of(context).colorScheme.outline,
+                ),
         ),
       ),
     );
@@ -669,11 +821,28 @@ class _BubbleStyleSection extends StatelessWidget {
   }) {
     return Row(
       children: [
-        SizedBox(width: 64, child: Text(label, style: Theme.of(context).textTheme.bodyMedium)),
-        Expanded(
-          child: Slider(value: value.clamp(min, max), min: min, max: max, divisions: divisions, label: display, onChanged: onChanged),
+        SizedBox(
+          width: 64,
+          child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
         ),
-        SizedBox(width: 34, child: Text(display, textAlign: TextAlign.end, style: Theme.of(context).textTheme.bodySmall)),
+        Expanded(
+          child: Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            divisions: divisions,
+            label: display,
+            onChanged: onChanged,
+          ),
+        ),
+        SizedBox(
+          width: 34,
+          child: Text(
+            display,
+            textAlign: TextAlign.end,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
       ],
     );
   }

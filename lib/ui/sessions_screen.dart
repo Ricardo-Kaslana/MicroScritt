@@ -9,6 +9,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../data/session_repository.dart';
 import '../export/session_exporter.dart';
 import '../import/json_stream_reader.dart';
 import '../import/session_importer.dart';
@@ -16,13 +17,12 @@ import '../models/character_card.dart';
 import '../state/providers.dart';
 import 'chat_screen.dart';
 import 'common/app_menu.dart';
-import 'common/app_search_field.dart';
 import 'common/confirm_dialog.dart';
 import 'common/section_header.dart';
 import 'common/empty_state.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/progress_task.dart';
-import 'common/scroll_to_top_fab.dart';
+import 'common/searchable_list.dart';
 import 'common/session_file_helper.dart';
 import 'common/shrink_image.dart';
 
@@ -46,21 +46,18 @@ class SessionsScreen extends ConsumerStatefulWidget {
 }
 
 class _SessionsScreenState extends ConsumerState<SessionsScreen> {
-  final _search = TextEditingController();
-  final _scroll = ScrollController();
-  String _query = '';
-
-  @override
-  void dispose() {
-    _search.dispose();
-    _scroll.dispose();
-    super.dispose();
+  /// 会话增删改后失效列表数据:按角色的聚合供本页展示,跨角色的
+  /// [sessionGroupsProvider] 供桌面聊天页侧栏 —— 后者已缓存时若不失
+  /// 效,新建会话进入聊天页会在侧栏里「缺失」刚建的那条。
+  void _invalidateSessionLists(WidgetRef ref) {
+    ref.invalidate(sessionInfosProvider(widget.characterId));
+    ref.invalidate(sessionGroupsProvider);
   }
 
   Future<void> _createSession(BuildContext context, WidgetRef ref) async {
     final id = await ref
         .read(sessionRepositoryProvider)
-        .create(widget.characterId, '新会话');
+        .createWithDefaultTitle(widget.characterId);
     if (widget.character.firstMessage.isNotEmpty) {
       await ref
           .read(messageRepositoryProvider)
@@ -70,7 +67,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
             content: widget.character.firstMessage,
           );
     }
-    ref.invalidate(sessionInfosProvider(widget.characterId));
+    _invalidateSessionLists(ref);
     if (!context.mounted) return;
     Navigator.push(
       context,
@@ -116,11 +113,19 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
     // ChangeNotifier 用完即弃:对话框关闭(确认/取消/点外部)后必释放,
     // 此前每次重命名泄漏一个 controller。
     controller.dispose();
-    if (newTitle == null || newTitle.trim().isEmpty) return;
-    await ref
-        .read(sessionRepositoryProvider)
-        .rename(sessionId, newTitle.trim());
-    ref.invalidate(sessionInfosProvider(widget.characterId));
+    if (newTitle == null) return;
+    final title = newTitle.trim();
+    if (title.isEmpty) {
+      // 空标题不落库,但也不能静默关闭 —— 用户会以为改名成功了。
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(const SnackBar(content: Text('会话标题不能为空')));
+      }
+      return;
+    }
+    await ref.read(sessionRepositoryProvider).rename(sessionId, title);
+    _invalidateSessionLists(ref);
   }
 
   Future<void> _delete(
@@ -135,20 +140,24 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
     );
     if (!confirmed) return;
     await ref.read(sessionRepositoryProvider).deleteWithCascade(sessionId);
-    ref.invalidate(sessionInfosProvider(widget.characterId));
+    _invalidateSessionLists(ref);
   }
 
-  /// 导出会话归档:保存/分享通道交给 `saveSessionArchive`,取消与失败
+  /// 导出/分享会话归档:交付通道交给 `saveSessionArchive`,取消与失败
   /// 由其统一提示;归档内容由 `SessionExporter` 流式写出。
   Future<void> _export(
     BuildContext context,
     WidgetRef ref,
     int sessionId,
-    String title,
-  ) async {
+    String title, {
+    bool share = false,
+  }) async {
     await saveSessionArchive(
       context,
       fileName: '$title.json',
+      delivery: share
+          ? SessionArchiveDelivery.share
+          : SessionArchiveDelivery.save,
       build: (staging, {onProgress, isCancelled}) =>
           SessionExporter(ref.read(databaseProvider)).exportToFile(
             sessionId: sessionId,
@@ -167,7 +176,16 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
       allowedExtensions: ['json'],
       withData: false,
     );
-    final path = await pickedFilePath(picked?.files.single);
+    // 系统文件选择器的返回键是标准取消路径,取消不是失败。
+    if (picked == null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(const SnackBar(content: Text('已取消导入')));
+      }
+      return;
+    }
+    final path = await pickedFilePath(picked.files.single);
     if (path == null) {
       if (context.mounted) {
         ScaffoldMessenger.of(
@@ -198,6 +216,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
       // 会话可能落到其它(新建)角色名下,家族 provider 整体失效以覆盖所有角色。
       ref.invalidate(sessionInfosProvider);
       ref.invalidate(charactersProvider);
+      ref.invalidate(sessionGroupsProvider);
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -237,25 +256,23 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
       appBar: AppBar(
         title: Text(widget.character.name),
         actions: [
-          IconButton(
-            tooltip: '导入会话',
-            icon: const Icon(Icons.file_upload_outlined),
-            onPressed: () => _import(context, ref),
+          AppPopupMenuButton<String>(
+            tooltip: '更多操作',
+            onSelected: (_) => _import(context, ref),
+            actions: const [
+              MenuAction(
+                value: 'import',
+                label: '导入会话',
+                icon: Icons.file_upload_outlined,
+              ),
+            ],
           ),
         ],
       ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          ScrollToTopFab(controller: _scroll),
-          const SizedBox(height: 10),
-          FloatingActionButton.extended(
-            onPressed: () => _createSession(context, ref),
-            icon: const Icon(Icons.add_comment_outlined),
-            label: const Text('新建会话'),
-          ),
-        ],
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _createSession(context, ref),
+        icon: const Icon(Icons.add_comment_outlined),
+        label: const Text('新建会话'),
       ),
       body: infos.when(
         data: (list) {
@@ -270,114 +287,97 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
               ),
             );
           }
-          final query = _query.trim().toLowerCase();
-          final filtered = query.isEmpty
-              ? list
-              : list
-                    .where((s) {
-                      final title = s.title.isEmpty ? '会话 #${s.id}' : s.title;
-                      return title.toLowerCase().contains(query) ||
-                          (s.lastMessage?.toLowerCase().contains(query) ??
-                              false);
-                    })
-                    .toList(growable: false);
-          return Column(
-            children: [
-              AppSearchField(
-                controller: _search,
-                hint: '搜索会话标题或消息内容',
-                onChanged: (v) {
-                  if (_query != v) setState(() => _query = v);
-                },
-              ),
-              Expanded(
-                child: filtered.isEmpty
-                    ? const EmptyState(
-                        icon: Icons.search_off,
-                        title: '没有匹配的会话',
-                        message: '换一个关键词试试。',
-                      )
-                    // 按会话虚拟化:每个条目是独立卡片。旧实现把所有会话塞进
-                    // 单个 GroupCard(内部 Column)作为列表唯一 item,再长的
-                    // 会话列表也会一次性构建/布局,且列表刷新时全部重建。
-                    : ListView.builder(
-                        controller: _scroll,
-                        padding: const EdgeInsets.only(top: 4, bottom: 96),
-                        keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.onDrag,
-                        itemCount: filtered.length,
-                        itemBuilder: (context, index) {
-                          final s = filtered[index];
-                          final title = s.title.isEmpty
-                              ? '会话 #${s.id}'
-                              : s.title;
-                          return GroupCard(
-                            key: ValueKey('session-card-${s.id}'),
-                            children: [
-                              ListTile(
-                                leading: const Icon(Icons.chat_bubble_outline),
-                                title: Text(title),
-                                subtitle: Text(
-                                  s.messageCount == 0
-                                      ? '暂无消息'
-                                      : '${s.messageCount} 条消息'
-                                            '${s.imageCount == 0 ? '' : '：${s.messageCount - s.imageCount} 条文本 + ${s.imageCount} 条图片'}'
-                                            '${s.lastMessage == null ? '' : ' · ${_clip(s.lastMessage!)}'}',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                trailing: AppPopupMenuButton<String>(
-                                  tooltip: '更多操作',
-                                  onSelected: (action) {
-                                    switch (action) {
-                                      case 'rename':
-                                        _rename(context, ref, s.id, s.title);
-                                      case 'export':
-                                        _export(context, ref, s.id, title);
-                                      case 'delete':
-                                        _delete(context, ref, s.id);
-                                    }
-                                  },
-                                  actions: const [
-                                    MenuAction(
-                                      value: 'rename',
-                                      label: '重命名',
-                                      icon: Icons.edit_outlined,
-                                    ),
-                                    MenuAction(
-                                      value: 'export',
-                                      label: '导出',
-                                      icon: Icons.file_download_outlined,
-                                    ),
-                                    MenuAction(
-                                      value: 'delete',
-                                      label: '删除',
-                                      icon: Icons.delete_outline,
-                                      destructive: true,
-                                    ),
-                                  ],
-                                ),
-                                onTap: () => Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) => ChatScreen(
-                                      sessionId: s.id,
-                                      characterId: widget.characterId,
-                                      character: widget.character,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          );
-                        },
+          // 与其它管理页共用同一个检索外壳:无结果空态带「清除搜索」,
+          // 搜索时有命中计数,回顶钮由外壳统一提供。
+          return SearchableList<SessionInfo>(
+            items: list,
+            searchHint: '搜索会话标题或消息内容',
+            noMatchTitle: '没有匹配的会话',
+            searchText: (s) =>
+                '${s.title.isEmpty ? '会话 #${s.id}' : s.title} ${s.lastMessage ?? ''}',
+            itemBuilder: (context, s) {
+              final title = s.title.isEmpty ? '会话 #${s.id}' : s.title;
+              return GroupCard(
+                key: ValueKey('session-card-${s.id}'),
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.chat_bubble_outline),
+                    title: Text(title),
+                    subtitle: Text(
+                      s.messageCount == 0
+                          ? '暂无消息'
+                          : '${s.messageCount} 条消息'
+                                '${s.imageCount == 0 ? '' : '：${s.messageCount - s.imageCount} 条文本 + ${s.imageCount} 条图片'}'
+                                '${s.lastMessage == null ? '' : ' · ${_clip(s.lastMessage!)}'}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: AppPopupMenuButton<String>(
+                      tooltip: '更多操作',
+                      onSelected: (action) {
+                        switch (action) {
+                          case 'rename':
+                            _rename(context, ref, s.id, s.title);
+                          case 'export':
+                            _export(context, ref, s.id, title);
+                          case 'share':
+                            _export(context, ref, s.id, title, share: true);
+                          case 'delete':
+                            _delete(context, ref, s.id);
+                        }
+                      },
+                      actions: [
+                        const MenuAction(
+                          value: 'rename',
+                          label: '重命名',
+                          icon: Icons.edit_outlined,
+                        ),
+                        const MenuAction(
+                          value: 'export',
+                          label: '导出',
+                          icon: Icons.file_download_outlined,
+                        ),
+                        if (isMobileSessionExport)
+                          const MenuAction(
+                            value: 'share',
+                            label: '分享',
+                            icon: Icons.share_outlined,
+                          ),
+                        const MenuAction(
+                          value: 'delete',
+                          label: '删除',
+                          icon: Icons.delete_outline,
+                          destructive: true,
+                        ),
+                      ],
+                    ),
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ChatScreen(
+                          sessionId: s.id,
+                          characterId: widget.characterId,
+                          character: widget.character,
+                        ),
                       ),
-              ),
-            ],
+                    ),
+                  ),
+                ],
+              );
+            },
           );
         },
-        error: (e, _) =>
-            EmptyState(icon: Icons.error_outline, title: '加载失败', message: '$e'),
+        error: (e, _) => EmptyState(
+          icon: Icons.error_outline,
+          title: '加载失败',
+          message: '$e',
+          action: FilledButton.tonalIcon(
+            onPressed: () =>
+                ref.invalidate(sessionInfosProvider(widget.characterId)),
+            icon: const Icon(Icons.refresh),
+            label: const Text('重试'),
+          ),
+        ),
         loading: () => const Center(child: CircularProgressIndicator()),
       ),
     );

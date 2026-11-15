@@ -52,7 +52,12 @@ class MessageRepository {
   static List<Message>? _peek(Database db, int sessionId, bool includeImages) =>
       _cache[_MessageCacheKey(db, sessionId, includeImages)];
 
-  static void _store(Database db, int sessionId, bool includeImages, List<Message> messages) {
+  static void _store(
+    Database db,
+    int sessionId,
+    bool includeImages,
+    List<Message> messages,
+  ) {
     if (_cache.length >= _cacheCap) {
       _cache.remove(_cache.keys.first);
     }
@@ -85,7 +90,10 @@ class MessageRepository {
     late final Message appended;
     await db.db.transaction((txn) async {
       final next = Sqflite.firstIntValue(
-        await txn.rawQuery('SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?', [sessionId]),
+        await txn.rawQuery(
+          'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?',
+          [sessionId],
+        ),
       )!;
       final id = await txn.insert('messages', {
         'session_id': sessionId,
@@ -118,7 +126,11 @@ class MessageRepository {
 
   /// append 成功后的缓存维护(只在事务成功后调用)。轻量条目替换为
   /// 「旧列表 + 追加行」的新实例;带图条目整体失效。
-  static void _refreshCacheAfterAppend(Database db, int sessionId, Message appended) {
+  static void _refreshCacheAfterAppend(
+    Database db,
+    int sessionId,
+    Message appended,
+  ) {
     final lightKey = _MessageCacheKey(db, sessionId, false);
     final cached = _cache[lightKey];
     if (cached != null) {
@@ -155,7 +167,10 @@ class MessageRepository {
   /// 默认轻量:每张图片 2~4MB 的 base64,全量读会让聊天每次刷新都搬几十 MB,
   /// 故只回 has_image 标志,渲染层经 [imageBase64For] 按需读取。导出等确需
   /// 完整数据的调用方传 `includeImages: true`,图片同样逐条分块回填、不整列读。
-  Future<List<Message>> bySession(int sessionId, {bool includeImages = false}) async {
+  Future<List<Message>> bySession(
+    int sessionId, {
+    bool includeImages = false,
+  }) async {
     final cached = _peek(db.db, sessionId, includeImages);
     if (cached != null) return cached;
     final dbRows = await db.db.rawQuery(
@@ -170,7 +185,11 @@ class MessageRepository {
       final full = <Message>[];
       for (final m in rows) {
         final id = m.id;
-        full.add(m.hasImage && id != null ? m.copyWith(imageBase64: await imageBase64For(id)) : m);
+        full.add(
+          m.hasImage && id != null
+              ? m.copyWith(imageBase64: await imageBase64For(id))
+              : m,
+        );
       }
       rows = full;
     }
@@ -200,12 +219,14 @@ class MessageRepository {
     required int sessionId,
     required int displayCount,
   }) async {
-    return Sqflite.firstIntValue(await db.db.rawQuery(
-      'SELECT seq FROM messages '
-      "WHERE session_id = ? AND COALESCE(kind, 'chat') = 'chat' AND role != 'system' "
-      'ORDER BY seq DESC LIMIT 1 OFFSET ?',
-      [sessionId, displayCount - 1],
-    ));
+    return Sqflite.firstIntValue(
+      await db.db.rawQuery(
+        'SELECT seq FROM messages '
+        "WHERE session_id = ? AND COALESCE(kind, 'chat') = 'chat' AND role != 'system' "
+        'ORDER BY seq DESC LIMIT 1 OFFSET ?',
+        [sessionId, displayCount - 1],
+      ),
+    );
   }
 
   /// 单次往返的窗口读取:`sessionWindowFloor` + `bySessionSince` 的合并形态
@@ -255,12 +276,14 @@ class MessageRepository {
   /// 因此行数有界;未压缩过的会话读全量,长会话此时本就会被占用率驱动的
   /// 压缩接管。
   Future<List<Message>> activeWindow(int sessionId) async {
-    final floor = Sqflite.firstIntValue(await db.db.rawQuery(
-      'SELECT MIN(seq) FROM messages '
-      "WHERE session_id = ? AND role != 'system' AND COALESCE(is_compacted, 0) = 0 "
-      "AND content != ''",
-      [sessionId],
-    ));
+    final floor = Sqflite.firstIntValue(
+      await db.db.rawQuery(
+        'SELECT MIN(seq) FROM messages '
+        "WHERE session_id = ? AND role != 'system' AND COALESCE(is_compacted, 0) = 0 "
+        "AND content != ''",
+        [sessionId],
+      ),
+    );
     return bySessionSince(sessionId, sinceSeq: floor);
   }
 
@@ -332,7 +355,10 @@ class MessageRepository {
 
   /// 流式读取图片 base64:与 [imageBase64For] 同一分块策略,但逐块 yield,
   /// 供会话归档导出直接写给文件,避免把整张图(乃至整会话)拼进内存。
-  Stream<String> imageBase64Chunks(int id, {int chunkChars = _imageChunkChars}) async* {
+  Stream<String> imageBase64Chunks(
+    int id, {
+    int chunkChars = _imageChunkChars,
+  }) async* {
     final len = await _imageLength(id);
     if (len == null) return;
     for (var start = 1; start <= len; start += chunkChars) {
@@ -356,15 +382,109 @@ class MessageRepository {
 
   /// 删除单条消息(UI 长按删除)。seq 允许留洞,组装管线只按顺序读。
   Future<void> delete(int id) async {
-    final rows = await db.db.query('messages', columns: ['session_id'], where: 'id = ?', whereArgs: [id], limit: 1);
+    final rows = await db.db.query(
+      'messages',
+      columns: ['session_id'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
     if (rows.isNotEmpty) _invalidate(db.db, rows.first['session_id'] as int);
     await db.db.delete('messages', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 删除单条消息并返回可恢复快照(聊天页"撤销删除"用)。
+  ///
+  /// 快照取全部可写列;图片字节经 [imageBase64For] 分块回填 —— 整行 SELECT
+  /// 带 image_base64 在 Android 上会因 CursorWindow 2MB 上限抛 Row too big。
+  /// 行不存在时返回 null(已删/并发删除),调用方不弹撤销。
+  Future<DeletedMessageSnapshot?> deleteWithSnapshot(int id) async {
+    final rows = await db.db.query(
+      'messages',
+      columns: const [
+        'id',
+        'session_id',
+        'role',
+        'content',
+        'seq',
+        'is_compacted',
+        'compact_of',
+        'image_url',
+        'image_prompt',
+        'kind',
+        'ref_id',
+      ],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    final sessionId = row['session_id'] as int;
+    final image = await imageBase64For(id);
+    _invalidate(db.db, sessionId);
+    await db.db.delete('messages', where: 'id = ?', whereArgs: [id]);
+    return DeletedMessageSnapshot(
+      sessionId: sessionId,
+      role: row['role'] as String? ?? 'user',
+      content: row['content'] as String? ?? '',
+      seq: row['seq'] as int,
+      isCompacted: (row['is_compacted'] as int? ?? 0) != 0,
+      compactOf: row['compact_of'] as int?,
+      imageBase64: image,
+      imageUrl: row['image_url'] as String?,
+      imagePrompt: row['image_prompt'] as String?,
+      kind: row['kind'] as String? ?? 'chat',
+      refId: row['ref_id'] as String?,
+    );
+  }
+
+  /// 恢复 [deleteWithSnapshot] 删除的消息。
+  ///
+  /// 原 seq 已被撤销窗口内新落库的行占用时改排到末尾 —— seq 只保证会话内
+  /// 单调,重复 seq 会让排序/组装出现歧义,宁可变位置也不留脏数据。
+  Future<void> restoreDeleted(DeletedMessageSnapshot snapshot) async {
+    _invalidate(db.db, snapshot.sessionId);
+    final occupied = Sqflite.firstIntValue(
+      await db.db.rawQuery(
+        'SELECT COUNT(*) FROM messages WHERE session_id = ? AND seq = ?',
+        [snapshot.sessionId, snapshot.seq],
+      ),
+    );
+    var seq = snapshot.seq;
+    if ((occupied ?? 0) > 0) {
+      seq = Sqflite.firstIntValue(
+        await db.db.rawQuery(
+          'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?',
+          [snapshot.sessionId],
+        ),
+      )!;
+    }
+    await db.db.insert('messages', {
+      'session_id': snapshot.sessionId,
+      'role': snapshot.role,
+      'content': snapshot.content,
+      'seq': seq,
+      'is_compacted': snapshot.isCompacted ? 1 : 0,
+      'compact_of': snapshot.compactOf,
+      'image_base64': snapshot.imageBase64,
+      'image_url': snapshot.imageUrl,
+      'image_prompt': snapshot.imagePrompt,
+      'kind': snapshot.kind,
+      'ref_id': snapshot.refId,
+    });
   }
 
   /// 清空某条消息的图片(全屏查看器的"删除图片"):base64、URL 与描述一并置空,
   /// 正文保留(等价于"只删图不删话")。
   Future<void> clearImage(int id) async {
-    final rows = await db.db.query('messages', columns: ['session_id'], where: 'id = ?', whereArgs: [id], limit: 1);
+    final rows = await db.db.query(
+      'messages',
+      columns: ['session_id'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
     if (rows.isNotEmpty) _invalidate(db.db, rows.first['session_id'] as int);
     await db.db.update(
       'messages',
@@ -459,7 +579,13 @@ class MessageRepository {
     required String expectedPrompt,
     String? newImagePrompt,
   }) async {
-    final rows = await db.db.query('messages', columns: ['session_id'], where: 'id = ?', whereArgs: [id], limit: 1);
+    final rows = await db.db.query(
+      'messages',
+      columns: ['session_id'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
     if (rows.isEmpty) return false;
     final changed = await db.db.update(
       'messages',
@@ -468,7 +594,8 @@ class MessageRepository {
         'image_url': imageUrl,
         if (newImagePrompt != null) 'image_prompt': newImagePrompt,
       },
-      where: 'id = ? AND image_prompt = ? AND (image_base64 IS NOT NULL OR image_url IS NOT NULL)',
+      where:
+          'id = ? AND image_prompt = ? AND (image_base64 IS NOT NULL OR image_url IS NOT NULL)',
       whereArgs: [id, expectedPrompt],
     );
     if (changed > 0) _invalidate(db.db, rows.first['session_id'] as int);
@@ -477,9 +604,20 @@ class MessageRepository {
 
   /// 覆盖某条消息的内容(UI 编辑消息)。保留 role/seq/图片,只改写文本。
   Future<void> updateContent(int id, String content) async {
-    final rows = await db.db.query('messages', columns: ['session_id'], where: 'id = ?', whereArgs: [id], limit: 1);
+    final rows = await db.db.query(
+      'messages',
+      columns: ['session_id'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
     if (rows.isNotEmpty) _invalidate(db.db, rows.first['session_id'] as int);
-    await db.db.update('messages', {'content': content}, where: 'id = ?', whereArgs: [id]);
+    await db.db.update(
+      'messages',
+      {'content': content},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   /// 删除某条消息及其之后的所有消息(UI 重新生成时的"剪断尾巴")。
@@ -497,13 +635,21 @@ class MessageRepository {
     final sessionId = target.first['session_id'] as int;
     final seq = target.first['seq'] as int;
     _invalidate(db.db, sessionId);
-    return db.db.delete('messages', where: 'session_id = ? AND seq >= ?', whereArgs: [sessionId, seq]);
+    return db.db.delete(
+      'messages',
+      where: 'session_id = ? AND seq >= ?',
+      whereArgs: [sessionId, seq],
+    );
   }
 
   /// 清空某会话的全部消息(含压缩摘要与原文,`/clear` 命令用)。seq 重新从 0 开始。
   Future<void> clearSession(int sessionId) async {
     _invalidate(db.db, sessionId);
-    await db.db.delete('messages', where: 'session_id = ?', whereArgs: [sessionId]);
+    await db.db.delete(
+      'messages',
+      where: 'session_id = ?',
+      whereArgs: [sessionId],
+    );
   }
 
   /// 未被压缩折叠的附件行(attachments 去重记账用):返回按 seq 升序的
@@ -513,7 +659,17 @@ class MessageRepository {
   Future<List<Message>> activeAttachments(int sessionId) async {
     final rows = await db.db.query(
       'messages',
-      columns: ['id', 'session_id', 'role', 'content', 'seq', 'is_compacted', 'compact_of', 'kind', 'ref_id'],
+      columns: [
+        'id',
+        'session_id',
+        'role',
+        'content',
+        'seq',
+        'is_compacted',
+        'compact_of',
+        'kind',
+        'ref_id',
+      ],
       where: "session_id = ? AND kind = 'attachment' AND is_compacted = 0",
       whereArgs: [sessionId],
       orderBy: 'seq',
@@ -524,13 +680,24 @@ class MessageRepository {
   /// 追加一条 system 行(压缩摘要等),返回新行 id。
   ///
   /// seq 读-写与 [append] 同款事务模板,防止并发插入拿到相同 seq。
-  Future<int> insertSystem({required int sessionId, required String content}) async {
+  Future<int> insertSystem({
+    required int sessionId,
+    required String content,
+  }) async {
     _invalidate(db.db, sessionId);
     return db.db.transaction((txn) async {
       final next = Sqflite.firstIntValue(
-        await txn.rawQuery('SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?', [sessionId]),
+        await txn.rawQuery(
+          'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?',
+          [sessionId],
+        ),
       )!;
-      return txn.insert('messages', {'session_id': sessionId, 'role': 'system', 'content': content, 'seq': next});
+      return txn.insert('messages', {
+        'session_id': sessionId,
+        'role': 'system',
+        'content': content,
+        'seq': next,
+      });
     });
   }
 
@@ -549,10 +716,17 @@ class MessageRepository {
       whereArgs: [ids.first],
       limit: 1,
     );
-    if (sample.isNotEmpty) _invalidate(db.db, sample.first['session_id'] as int);
+    if (sample.isNotEmpty) {
+      _invalidate(db.db, sample.first['session_id'] as int);
+    }
     final batch = db.db.batch();
     for (final id in ids) {
-      batch.update('messages', {'is_compacted': 1, 'compact_of': compactOf}, where: 'id = ?', whereArgs: [id]);
+      batch.update(
+        'messages',
+        {'is_compacted': 1, 'compact_of': compactOf},
+        where: 'id = ?',
+        whereArgs: [id],
+      );
     }
     await batch.commit(noResult: true);
   }
@@ -584,7 +758,10 @@ class MessageRepository {
         });
       }
       final ids = await batch.commit(noResult: false);
-      return [for (final id in ids) if (id is int) id];
+      return [
+        for (final id in ids)
+          if (id is int) id,
+      ];
     });
   }
 
@@ -617,7 +794,10 @@ class MessageRepository {
   /// 是**归档数组内索引**(v4 导出语义):先批量插入拿到各行新 id,再把
   /// compact_of 换算回"摘要行新 id"(与生产写入 markCompacted 的行 id 语义
   /// 一致);越界索引按无指向处理。单事务完成。
-  Future<void> importMessages({required int sessionId, required List<Message> messages}) async {
+  Future<void> importMessages({
+    required int sessionId,
+    required List<Message> messages,
+  }) async {
     if (messages.isEmpty) return;
     _invalidate(db.db, sessionId);
     await db.db.transaction((txn) async {
@@ -664,7 +844,10 @@ class MessageRepository {
     _invalidate(db.db, sessionId);
     return db.db.transaction((txn) async {
       final next = Sqflite.firstIntValue(
-        await txn.rawQuery('SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?', [sessionId]),
+        await txn.rawQuery(
+          'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?',
+          [sessionId],
+        ),
       )!;
       final summaryId = await txn.insert('messages', {
         'session_id': sessionId,
@@ -674,7 +857,12 @@ class MessageRepository {
       });
       final batch = txn.batch();
       for (final id in compactIds) {
-        batch.update('messages', {'is_compacted': 1, 'compact_of': summaryId}, where: 'id = ?', whereArgs: [id]);
+        batch.update(
+          'messages',
+          {'is_compacted': 1, 'compact_of': summaryId},
+          where: 'id = ?',
+          whereArgs: [id],
+        );
       }
       await batch.commit(noResult: true);
       return summaryId;
@@ -699,7 +887,39 @@ class _MessageCacheKey {
       other.includeImages == includeImages;
 
   @override
-  int get hashCode => Object.hash(identityHashCode(db), sessionId, includeImages);
+  int get hashCode =>
+      Object.hash(identityHashCode(db), sessionId, includeImages);
+}
+
+/// 被删除消息的恢复快照(撤销删除用);图片字节为 null 表示无图。
+class DeletedMessageSnapshot {
+  final int sessionId;
+  final String role;
+  final String content;
+
+  /// 删除时的 seq;恢复时若已被占用则改排到末尾。
+  final int seq;
+  final bool isCompacted;
+  final int? compactOf;
+  final String? imageBase64;
+  final String? imageUrl;
+  final String? imagePrompt;
+  final String kind;
+  final String? refId;
+
+  const DeletedMessageSnapshot({
+    required this.sessionId,
+    required this.role,
+    required this.content,
+    required this.seq,
+    required this.isCompacted,
+    required this.compactOf,
+    required this.imageBase64,
+    required this.imageUrl,
+    required this.imagePrompt,
+    required this.kind,
+    required this.refId,
+  });
 }
 
 /// 会话文本搜索的一条命中(轻量投影,不含图片字节)。

@@ -18,22 +18,24 @@ import '../../models/message.dart';
 import '../../engine/display_regex.dart';
 import '../../engine/glossary.dart';
 import '../../models/bubble_style.dart';
+import '../common/chat_layout.dart';
 import '../common/image_header.dart';
-import '../skill_highlight.dart';
+import '../text_syntax.dart';
 import 'image_viewer.dart';
 import 'rich_message_text.dart';
 
-/// 助手气泡的最大宽度:桌面大幅加宽到 760;移动端占满整行(扣掉左右边距)。
-/// 气泡本身按内容宽度自适应(短消息是小气泡),只是不会超过这个上限。
-/// 用户气泡的对应上限见 [userBubbleMaxWidth]。
+/// 助手气泡的最大宽度:宽窗下与输入卡严格同宽(会话列内容宽 = 列宽 − 24,
+/// 输入卡同为列宽 − 24,两者左右缘逐像素对齐);移动/窄窗占满整行
+/// (扣掉左右边距)。气泡本身按内容宽度自适应(短消息是小气泡),只是
+/// 不会超过这个上限。用户气泡的对应上限见 [userBubbleMaxWidth]。
 double assistantBubbleMaxWidth(BuildContext context) {
   final available = MediaQuery.sizeOf(context).width;
-  final wanted = available >= 600 ? 760.0 : available - 24;
+  final wanted = chatColumnMaxWidth(available) - 24;
   return wanted.clamp(0.0, available - 24);
 }
 
-/// 用户气泡的最大宽度:桌面限到一个正常的聊天气泡宽度(不再被拉到 760),
-/// 移动端最多占满整行(内容自适应,短消息是小气泡)。
+/// 用户气泡的最大宽度:桌面限到一个正常的聊天气泡宽度(不跟助手气泡
+/// 一起拉到与输入卡同宽),移动端最多占满整行(内容自适应,短消息是小气泡)。
 double userBubbleMaxWidth(BuildContext context) {
   final available = MediaQuery.sizeOf(context).width;
   return available >= 600 ? 520.0 : available - 24;
@@ -170,18 +172,30 @@ class ChatBubbleFrame extends StatelessWidget {
   }
 }
 
-/// 气泡正文文字样式:15px + 1.4 行高,长对话更耐读;用户白字加一点字重提对比。
-/// [fontFamily] 随角色级气泡样式传入(如 serif 衬线/宋体风)。
+/// 角色级气泡字体的 Windows 落字:通用 `serif` 会回退到日文衬线字体,
+/// 「门」等简体字同样缺笔画;该选项本意是宋体风,Windows 直接落到系统宋体。
+String? _resolveBubbleFontFamily(String? fontFamily) {
+  if (fontFamily == 'serif' &&
+      defaultTargetPlatform == TargetPlatform.windows) {
+    return 'SimSun';
+  }
+  return fontFamily;
+}
+
+/// 气泡正文文字样式:默认 [kBubbleDefaultFontSize] + 1.4 行高,长对话更耐读;
+/// 用户白字加一点字重提对比。字体族/字号随角色级气泡样式传入(如 serif
+/// 衬线/宋体风),null 时用应用默认。
 TextStyle chatBubbleTextStyle(
   Color color, {
   bool bold = false,
   String? fontFamily,
+  double? fontSize,
 }) => TextStyle(
   color: color,
-  fontSize: 15,
+  fontSize: fontSize ?? kBubbleDefaultFontSize,
   height: 1.4,
   fontWeight: bold ? FontWeight.w500 : FontWeight.w400,
-  fontFamily: fontFamily,
+  fontFamily: _resolveBubbleFontFamily(fontFamily),
 );
 
 /// 助手气泡文字色解析:角色定制底色时 —— 显式文字色优先,否则按(叠透明度
@@ -223,15 +237,10 @@ class MessageBubble extends StatelessWidget {
   /// 角色名,用于**显示时**把正文里的 `{{char}}` 替换为角色名(仅影响显示)。
   final String? displayCharName;
 
-  /// 已启用技能名集合:用户气泡内 `@技能名` 记号以记号色高亮(与输入框同构,
-  /// 共用 skill_highlight 的正则与选色)。仅作用于**用户气泡**的普通正文段;
-  /// null/空集合 = 不高亮。不影响助手气泡与存储/上下文。
-  final Set<String>? skillNames;
-
-  /// 预先编译好的技能记号正则(由聊天页按技能集合编译一次后下传)。
-  /// 流式期间气泡会被高频重建,传这里可避免每个用户气泡每帧重新拼/编译
-  /// RegExp;null 时退回按 [skillNames] 现场编译(测试/独立使用)。
-  final RegExp? skillTokenPattern;
+  /// 共享语法(命令/@技能/宏/标签),与输入框同源;null = 默认命令语法。
+  /// 用户与助手气泡都会高亮 `@技能名` 与 `/命令`,配色由 [SyntaxSurface]
+  /// 按气泡底色区分。
+  final CompiledSyntax? syntax;
 
   /// 显示层正则脚本(气泡正文渲染管线用;null = 无脚本)。
   final List<CompiledRegexScript>? regexScripts;
@@ -282,8 +291,7 @@ class MessageBubble extends StatelessWidget {
     this.onTap,
     this.displayUserName,
     this.displayCharName,
-    this.skillNames,
-    this.skillTokenPattern,
+    this.syntax,
     this.regexScripts,
     this.glossary,
     this.onTermTap,
@@ -304,6 +312,7 @@ class MessageBubble extends StatelessWidget {
     final isUser = message.role == 'user';
     final imageUrl = message.imageUrl;
     final scheme = Theme.of(context).colorScheme;
+    final compiledSyntax = syntax ?? CompiledSyntax.compile();
     // 助手气泡文字色随角色样式解析(见 [resolveAssistantTextColor]);
     // 用户气泡恒为主题 onPrimary。
     final onBubble = isUser
@@ -332,7 +341,7 @@ class MessageBubble extends StatelessWidget {
           highlighted: highlighted,
           style: style,
           // 用户与助手气泡都按内容宽度自适应(短消息是小气泡),各自有最大宽度
-          // 上限:用户 520/移动满宽,助手 760/移动满宽。约束放在外壳上,
+          // 上限:用户 520/移动满宽,助手与输入卡同宽/移动满宽。约束放在外壳上,
           // 作用域是**可见气泡**(边距之外),不把外边距算进上限。
           constraints: BoxConstraints(
             maxWidth: isUser
@@ -400,8 +409,7 @@ class MessageBubble extends StatelessWidget {
                   glossary: glossary,
                   onTermTap: onTermTap,
                   highlightDialogue: highlightDialogue,
-                  skillNames: skillNames,
-                  skillTokenPattern: skillTokenPattern,
+                  syntax: compiledSyntax,
                 )
               else
                 RichMessageText(
@@ -409,6 +417,7 @@ class MessageBubble extends StatelessWidget {
                   style: chatBubbleTextStyle(
                     onBubble,
                     fontFamily: style?.fontFamily,
+                    fontSize: style?.fontSize,
                   ),
                   userName: displayUserName,
                   charName: displayCharName,
@@ -416,6 +425,8 @@ class MessageBubble extends StatelessWidget {
                   glossary: glossary,
                   onTermTap: onTermTap,
                   highlightDialogue: highlightDialogue,
+                  syntax: compiledSyntax,
+                  surface: SyntaxSurface.assistantBubble,
                 ),
             ],
           ),
@@ -455,8 +466,7 @@ class MessageBubble extends StatelessWidget {
 ///
 /// StatefulWidget + 记忆化:流式期间消息列表会以约 25FPS 重建可见气泡,
 /// 历史用户消息的入参全部未变,直接复用上次构建的子树,避免每个流式块
-/// 重扫 `<tag>` 标签、重建整段 Widget 树。技能正则由聊天页预编译下传,
-/// 未提供时才按 [skillNames] 现场编译。
+/// 重扫 `<tag>` 标签、重建整段 Widget 树。语法由聊天页编译一次下传。
 class _UserMessageBody extends StatefulWidget {
   final String content;
   final TextStyle baseStyle;
@@ -466,8 +476,7 @@ class _UserMessageBody extends StatefulWidget {
   final CompiledGlossary? glossary;
   final void Function(GlossaryTerm term)? onTermTap;
   final bool highlightDialogue;
-  final Set<String>? skillNames;
-  final RegExp? skillTokenPattern;
+  final CompiledSyntax syntax;
 
   const _UserMessageBody({
     required this.content,
@@ -478,8 +487,7 @@ class _UserMessageBody extends StatefulWidget {
     this.glossary,
     this.onTermTap,
     this.highlightDialogue = true,
-    this.skillNames,
-    this.skillTokenPattern,
+    required this.syntax,
   });
 
   @override
@@ -496,21 +504,12 @@ class _UserMessageBodyState extends State<_UserMessageBody> {
   CompiledGlossary? _cachedGlossary;
   void Function(GlossaryTerm term)? _cachedOnTermTap;
   bool? _cachedHighlight;
-  String? _cachedPatternSource;
-  Color? _cachedTokenColor;
+  String? _cachedSyntaxSignature;
   ColorScheme? _cachedScheme;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final pattern =
-        widget.skillTokenPattern ??
-        ((widget.skillNames == null || widget.skillNames!.isEmpty)
-            ? null
-            : skillTokenPattern(widget.skillNames!));
-    final tokenColor = pattern == null
-        ? null
-        : skillTokenColor(scheme, onPrimaryBubble: true);
 
     final canReuse =
         _cachedBody != null &&
@@ -522,8 +521,7 @@ class _UserMessageBodyState extends State<_UserMessageBody> {
         identical(_cachedGlossary, widget.glossary) &&
         _cachedOnTermTap == widget.onTermTap &&
         _cachedHighlight == widget.highlightDialogue &&
-        _cachedPatternSource == pattern?.pattern &&
-        _cachedTokenColor == tokenColor &&
+        _cachedSyntaxSignature == widget.syntax.signature &&
         _cachedScheme == scheme;
     if (canReuse) return _cachedBody!;
 
@@ -535,8 +533,7 @@ class _UserMessageBodyState extends State<_UserMessageBody> {
     _cachedGlossary = widget.glossary;
     _cachedOnTermTap = widget.onTermTap;
     _cachedHighlight = widget.highlightDialogue;
-    _cachedPatternSource = pattern?.pattern;
-    _cachedTokenColor = tokenColor;
+    _cachedSyntaxSignature = widget.syntax.signature;
     _cachedScheme = scheme;
 
     final content = widget.content;
@@ -555,15 +552,21 @@ class _UserMessageBodyState extends State<_UserMessageBody> {
           glossary: widget.glossary,
           onTermTap: widget.onTermTap,
           highlightDialogue: widget.highlightDialogue,
-          skillTokenPattern: pattern,
-          skillTokenColor: tokenColor,
+          syntax: widget.syntax,
+          surface: SyntaxSurface.userBubble,
         ),
       );
     }
 
     for (final m in kUserFoldableTagPattern.allMatches(content)) {
-      // 附件包裹标签不是"改写指令",不折叠 —— 留在普通段里被管线剥离。
-      if (m[1] == 'system-reminder') continue;
+      // 附件包裹标签不是"改写指令",不折叠 —— 留在普通段里被管线剥离;
+      // 行内样式标签与 chip 也必须留给 RichMessageText 渲染,不能折成便签。
+      final name = m[1];
+      if (name == 'system-reminder' ||
+          name == 'chip' ||
+          kStyleTagNames.contains(name)) {
+        continue;
+      }
       addPlain(last, m.start);
       widgets.add(
         _FoldableNote(
@@ -575,6 +578,7 @@ class _UserMessageBodyState extends State<_UserMessageBody> {
           glossary: widget.glossary,
           onTermTap: widget.onTermTap,
           highlightDialogue: widget.highlightDialogue,
+          syntax: widget.syntax,
         ),
       );
       last = m.end;
@@ -608,6 +612,7 @@ class _FoldableNote extends StatefulWidget {
   final CompiledGlossary? glossary;
   final void Function(GlossaryTerm term)? onTermTap;
   final bool highlightDialogue;
+  final CompiledSyntax syntax;
 
   const _FoldableNote({
     required this.inner,
@@ -618,6 +623,7 @@ class _FoldableNote extends StatefulWidget {
     this.glossary,
     this.onTermTap,
     this.highlightDialogue = true,
+    required this.syntax,
   });
 
   @override
@@ -703,6 +709,8 @@ class _FoldableNoteState extends State<_FoldableNote> {
                   glossary: widget.glossary,
                   onTermTap: widget.onTermTap,
                   highlightDialogue: widget.highlightDialogue,
+                  syntax: widget.syntax,
+                  surface: SyntaxSurface.userBubble,
                 ),
               ),
           ],
@@ -1148,10 +1156,8 @@ class _LazyMemoryImageState extends State<_LazyMemoryImage> {
           _bytes = cached.bytes;
           _initialAspect = cached.aspect;
           setState(
-            () => _provider = _downsampled(
-              cached.bytes,
-              size: widget.decodeSize,
-            ),
+            () =>
+                _provider = _downsampled(cached.bytes, size: widget.decodeSize),
           );
         }
         return;
@@ -1175,9 +1181,7 @@ class _LazyMemoryImageState extends State<_LazyMemoryImage> {
         bytes,
         aspect: _initialAspect,
       );
-      setState(
-        () => _provider = _downsampled(bytes, size: widget.decodeSize),
-      );
+      setState(() => _provider = _downsampled(bytes, size: widget.decodeSize));
     } catch (_) {
       // 读库/解码抛异常也必须落到失败态,否则占位转圈永远不停。
       if (mounted) setState(() => _failed = true);
@@ -1277,12 +1281,7 @@ class _LazyImageCache {
 
   /// 写入(同 id 旧条目先逐出),随后按字节总量裁到上限;单张超上限的
   /// 极端大图会被自身逐出,不做特判 —— 下次未命中再回库。
-  static void put(
-    int id,
-    int revision,
-    Uint8List bytes, {
-    double? aspect,
-  }) {
+  static void put(int id, int revision, Uint8List bytes, {double? aspect}) {
     remove(id);
     _map[id] = _LazyImageEntry(revision, bytes, aspect);
     _bytes += bytes.length;

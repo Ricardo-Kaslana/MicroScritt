@@ -13,12 +13,15 @@ import '../import/resource_importer.dart';
 import '../models/skill.dart';
 import '../models/worldbook_entry.dart';
 import '../state/providers.dart';
+import 'common/app_menu.dart';
 import 'common/confirm_dialog.dart';
+import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
 import 'common/form_field.dart';
+import 'common/list_page_scaffold.dart';
 import 'common/resource_io.dart';
-import 'common/searchable_list.dart';
 import 'common/section_header.dart';
+import 'common/toggle_delete_tile.dart';
 
 /// 技能列表页(设置页「内容与扩展 · 技能」入口)。
 ///
@@ -66,30 +69,43 @@ class SkillsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final skills = ref.watch(skillsProvider);
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('技能'),
-        actions: [
-          IconButton(
-            tooltip: '导出 JSON',
-            icon: const Icon(Icons.file_download_outlined),
-            onPressed: () => _exportJson(context, ref),
-          ),
-          IconButton(
-            tooltip: '导入 JSON',
-            icon: const Icon(Icons.file_upload_outlined),
-            onPressed: () => _importJson(context, ref),
-          ),
-          IconButton(
-            tooltip: '从世界书导入',
-            icon: const Icon(Icons.download_outlined),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const SkillImportScreen()),
+    return ListPageScaffold<Skill>(
+      title: '技能',
+      actions: [
+        AppPopupMenuButton<String>(
+          tooltip: '更多操作',
+          onSelected: (action) {
+            switch (action) {
+              case 'export':
+                _exportJson(context, ref);
+              case 'import':
+                _importJson(context, ref);
+              case 'importWorldbook':
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const SkillImportScreen()),
+                );
+            }
+          },
+          actions: const [
+            MenuAction(
+              value: 'export',
+              label: '导出 JSON',
+              icon: Icons.file_download_outlined,
             ),
-          ),
-        ],
-      ),
+            MenuAction(
+              value: 'import',
+              label: '导入 JSON',
+              icon: Icons.file_upload_outlined,
+            ),
+            MenuAction(
+              value: 'importWorldbook',
+              label: '从世界书导入',
+              icon: Icons.download_outlined,
+            ),
+          ],
+        ),
+      ],
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => Navigator.push(
           context,
@@ -98,68 +114,46 @@ class SkillsScreen extends ConsumerWidget {
         icon: const Icon(Icons.add),
         label: const Text('新建技能'),
       ),
-      body: skills.when(
-        data: (list) => list.isEmpty
-            ? const EmptyState(
-                icon: Icons.extension_outlined,
-                title: '暂无技能',
-                message: '技能由名称 + 描述 + 内容组成,启用后全局生效;也可从角色卡的世界书条目一键导入。',
-              )
-            : SearchableList<Skill>(
-                items: list,
-                searchHint: '搜索技能名称/描述/内容',
-                searchText: (s) => '${s.name} ${s.description} ${s.content}',
-                itemBuilder: (context, s) => GroupCard(
-                  children: [
-                    ListTile(
-                      leading: Icon(
-                        Icons.extension_outlined,
-                        color: s.enabled
-                            ? Theme.of(context).colorScheme.primary
-                            : null,
-                      ),
-                      title: Text(
-                        s.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Text(
-                        s.description.isEmpty ? '(无描述)' : s.description,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: '删除',
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () => _delete(context, ref, s),
-                          ),
-                          Switch(
-                            value: s.enabled,
-                            onChanged: (v) async {
-                              await ref
-                                  .read(skillRepositoryProvider)
-                                  .setEnabled(s.id!, v);
-                              ref.invalidate(skillsProvider);
-                            },
-                          ),
-                        ],
-                      ),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => SkillEditScreen(existing: s),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-        error: (e, _) =>
-            EmptyState(icon: Icons.error_outline, title: '加载失败', message: '$e'),
-        loading: () => const Center(child: CircularProgressIndicator()),
+      loading: skills.isLoading && !skills.hasValue,
+      error: skills.hasError && !skills.hasValue ? skills.error : null,
+      onRetry: () => ref.invalidate(skillsProvider),
+      items: skills.value,
+      emptyState: const EmptyState(
+        icon: Icons.extension_outlined,
+        title: '暂无技能',
+        message: '技能由名称 + 描述 + 内容组成,启用后全局生效;也可从角色卡的世界书条目一键导入。',
+      ),
+      searchHint: '搜索技能名称/描述/内容',
+      searchText: (s) => '${s.name} ${s.description} ${s.content}',
+      itemBuilder: (context, s) => GroupCard(
+        children: [
+          ToggleDeleteTile(
+            leading: Icon(
+              Icons.extension_outlined,
+              color: s.enabled ? Theme.of(context).colorScheme.primary : null,
+            ),
+            title: s.name,
+            subtitle: s.description.isEmpty ? '(无描述)' : s.description,
+            enabled: s.enabled,
+            onToggle: (v) async {
+              await ref.read(skillRepositoryProvider).setEnabled(s.id!, v);
+              ref.invalidate(skillsProvider);
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context)
+                ..hideCurrentSnackBar()
+                ..showSnackBar(
+                  SnackBar(
+                    content: Text(v ? '已启用「${s.name}」' : '已停用「${s.name}」'),
+                  ),
+                );
+            },
+            onDelete: () => _delete(context, ref, s),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => SkillEditScreen(existing: s)),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -185,6 +179,9 @@ class _SkillEditScreenState extends ConsumerState<SkillEditScreen> {
   late bool _enabled;
   bool _saving = false;
 
+  /// 打开编辑器时的表单快照(未保存修改的判定基准)。
+  late String _initialSignature;
+
   bool get _isNew => widget.existing == null;
 
   @override
@@ -195,7 +192,11 @@ class _SkillEditScreenState extends ConsumerState<SkillEditScreen> {
     _description = TextEditingController(text: s?.description ?? '');
     _content = TextEditingController(text: s?.content ?? '');
     _enabled = s?.enabled ?? true;
+    _initialSignature = _signature();
   }
+
+  String _signature() =>
+      '${_name.text}\u0000${_description.text}\u0000${_content.text}\u0000$_enabled';
 
   @override
   void dispose() {
@@ -208,6 +209,7 @@ class _SkillEditScreenState extends ConsumerState<SkillEditScreen> {
   /// 保存校验:名称与内容缺一即以提示中止(不落库、不关闭页面);
   /// 成功后失效技能列表并返回上一页。
   Future<void> _save() async {
+    if (_saving) return;
     final name = _name.text.trim();
     if (name.isEmpty) {
       ScaffoldMessenger.of(
@@ -253,56 +255,44 @@ class _SkillEditScreenState extends ConsumerState<SkillEditScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_isNew ? '新建技能' : '编辑技能'),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          GroupCard(
-            children: [
-              FormTextField(
-                controller: _name,
-                label: '名称 *',
-                hint: '技能名,如「战斗描写」',
-              ),
-              const SizedBox(height: 16),
-              FormTextField(
-                controller: _description,
-                label: '描述',
-                hint: '一句话说明技能的用途(可留空)',
-                lines: 2,
-              ),
-              const SizedBox(height: 16),
-              FormTextField(
-                controller: _content,
-                label: '内容 *',
-                hint: '技能的实际内容,启用后拼进上下文',
-                lines: 8,
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          SwitchListTile(
-            title: const Text('启用'),
-            subtitle: const Text('启用中的技能在所有会话全局生效'),
-            value: _enabled,
-            onChanged: (v) => setState(() => _enabled = v),
-          ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+    return EditFormScaffold(
+      title: _isNew ? '新建技能' : '编辑技能',
+      saving: _saving,
+      onSave: _save,
+      hasChanges: () => _signature() != _initialSignature,
+      changes: [_name, _description, _content],
+      children: [
+        GroupCard(
+          children: [
+            FormTextField(
+              controller: _name,
+              label: '名称 *',
+              hint: '技能名,如「战斗描写」',
+            ),
+            const SizedBox(height: 16),
+            FormTextField(
+              controller: _description,
+              label: '描述',
+              hint: '一句话说明技能的用途(可留空)',
+              lines: 2,
+            ),
+            const SizedBox(height: 16),
+            FormTextField(
+              controller: _content,
+              label: '内容 *',
+              hint: '技能的实际内容,启用后拼进上下文',
+              lines: 8,
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        SwitchListTile(
+          title: const Text('启用'),
+          subtitle: const Text('启用中的技能在所有会话全局生效'),
+          value: _enabled,
+          onChanged: (v) => setState(() => _enabled = v),
+        ),
+      ],
     );
   }
 }

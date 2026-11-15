@@ -1,5 +1,8 @@
-// 会话内搜索 UI:命中列表与内部注入剥离、空态、命中返 id、跳转旧消息并
-// 短暂高亮。
+// 会话内搜索 UI:命中列表与内部注入剥离、头像与排序提示、空态、命中返 id、
+// 跳转旧消息并短暂高亮。
+import 'dart:convert';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +11,7 @@ import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/message_repository.dart';
 import 'package:microscritt/data/session_repository.dart';
 import 'package:microscritt/models/character_card.dart';
+import 'package:microscritt/models/user.dart';
 import 'package:microscritt/state/chat_controller.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/chat_screen.dart';
@@ -51,6 +55,20 @@ double _bubbleBorderWidth(WidgetTester tester, String text) {
   final decoration =
       tester.widget<Container>(container).decoration as BoxDecoration;
   return (decoration.border! as Border).top.width;
+}
+
+/// 生成一张真实可解码的 PNG(纯色方块)base64:头像走平台解码器,硬编码的
+/// 极小 PNG 在测试环境不一定有帧。
+Future<String> _pngBase64() async {
+  final recorder = ui.PictureRecorder();
+  final canvas = ui.Canvas(recorder);
+  canvas.drawRect(
+    ui.Rect.fromLTWH(0, 0, 8, 8),
+    ui.Paint()..color = const ui.Color(0xff5577aa),
+  );
+  final img = await recorder.endRecording().toImage(8, 8);
+  final data = await img.toByteData(format: ui.ImageByteFormat.png);
+  return base64Encode(data!.buffer.asUint8List());
 }
 
 void main() {
@@ -128,9 +146,13 @@ void main() {
       () => find.textContaining('条结果').evaluate().isNotEmpty,
     );
     expect(find.text('2 条结果'), findsOneWidget);
+    expect(find.text('最新在前'), findsOneWidget);
     expect(find.textContaining('第三句'), findsOneWidget);
     expect(find.textContaining('第一句'), findsOneWidget);
     expect(find.textContaining('隐藏的魔法备忘'), findsNothing);
+    // 无头像时回退到用户/角色图标。
+    expect(find.byIcon(Icons.person_outline), findsOneWidget);
+    expect(find.byIcon(Icons.auto_awesome_outlined), findsOneWidget);
     expect(find.byKey(ValueKey('chat-search-hit-$firstId')), findsOneWidget);
     expect(find.byKey(ValueKey('chat-search-hit-$thirdId')), findsOneWidget);
 
@@ -143,7 +165,129 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('exactly 200 results are not reported as truncated', (tester) async {
+  testWidgets('reopens with the last query and searches immediately', (
+    tester,
+  ) async {
+    late AppDatabase db;
+    late int sessionId;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      final charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's');
+      final messages = MessageRepository(db);
+      await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: '魔法学院开学',
+      );
+      await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: '再次使用魔法',
+      );
+    });
+
+    String? lastQuery;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: MaterialApp(
+          home: ChatSearchScreen(
+            sessionId: sessionId,
+            characterName: 'Alice',
+            initialQuery: '魔法',
+            onQueryChanged: (q) => lastQuery = q,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await _pumpUntil(
+      tester,
+      () => find.textContaining('条结果').evaluate().isNotEmpty,
+    );
+    expect(find.text('2 条结果'), findsOneWidget);
+    expect(find.textContaining('魔法学院开学'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller?.text,
+      '魔法',
+    );
+
+    await tester.enterText(find.byType(TextField), '火焰');
+    await tester.pump();
+    expect(lastQuery, '火焰');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('search results show user and character avatars when available', (
+    tester,
+  ) async {
+    late AppDatabase db;
+    late int sessionId;
+    late String png;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      png = await _pngBase64();
+      final charId = await CharacterRepository(
+        db,
+      ).insert(CharacterCard(name: 'Alice', avatarBase64: png));
+      sessionId = await SessionRepository(db).create(charId, 's');
+      final messages = MessageRepository(db);
+      await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: '头像测试 用户',
+      );
+      await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: '头像测试 角色',
+      );
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          databaseProvider.overrideWithValue(db),
+          userProfileProvider.overrideWith(
+            (ref) => UserProfile(name: '小明', avatarBase64: png),
+          ),
+        ],
+        child: MaterialApp(
+          home: ChatSearchScreen(
+            sessionId: sessionId,
+            characterName: 'Alice',
+            characterAvatarBase64: png,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '头像测试');
+    await tester.pump(const Duration(milliseconds: 300));
+    await _pumpUntil(tester, () => find.text('2 条结果').evaluate().isNotEmpty);
+
+    final avatars = tester
+        .widgetList<CircleAvatar>(find.byType(CircleAvatar))
+        .toList();
+    expect(avatars, hasLength(2));
+    expect(avatars.every((a) => a.backgroundImage is MemoryImage), isTrue);
+    // 有头像时不再显示占位图标。
+    expect(find.byIcon(Icons.person_outline), findsNothing);
+    expect(find.byIcon(Icons.auto_awesome_outlined), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('exactly 200 results are not reported as truncated', (
+    tester,
+  ) async {
     late AppDatabase db;
     late int sessionId;
     await tester.runAsync(() async {

@@ -34,7 +34,10 @@ class AppDatabase {
   /// v65 起 messages 保存生图原始描述(`image_prompt`),供图片重新生成。
   /// v66 起变量支持三档后台权限、回收站与待确认删除;新增
   /// `variable_trash` / `variable_deletion_proposals` 两张表。
-  static const int schemaVersion = 66;
+  /// v67 起会话支持置顶(`pinned_at` 记录置顶时间,空值表示未置顶)。
+  /// v68 起自动压缩触发线可配置(`app_settings.auto_compact_threshold`,
+  /// 默认 0.6,范围 30%–90%)。
+  static const int schemaVersion = 68;
 
   /// 在单个事务里执行 [action](供编排器等跨多个 repository 的原子写入用)。
   Future<T> transaction<T>(Future<T> Function(Transaction txn) action) =>

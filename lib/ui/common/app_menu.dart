@@ -11,12 +11,15 @@ import '../theme/app_theme.dart';
 ///
 /// [subtitle] 仅在底部弹层渲染(三点菜单空间有限不显示);[destructive]
 /// 为真时图标与文字统一渲染 `scheme.error` 红,与 iOS 危险动作惯例一致。
+/// [enabled] 为假时项置灰且不可点(三点菜单与底部弹层一致),用于运行中
+/// 等需要保留入口但暂时禁用的动作。
 class MenuAction<T> {
   final T value;
   final String label;
   final IconData icon;
   final String? subtitle;
   final bool destructive;
+  final bool enabled;
 
   const MenuAction({
     required this.value,
@@ -24,6 +27,7 @@ class MenuAction<T> {
     required this.icon,
     this.subtitle,
     this.destructive = false,
+    this.enabled = true,
   });
 }
 
@@ -62,6 +66,7 @@ class AppPopupMenuButton<T> extends StatelessWidget {
         for (final a in actions)
           PopupMenuItem<T>(
             value: a.value,
+            enabled: a.enabled,
             child: Row(
               children: [
                 Icon(a.icon, size: 20, color: a.destructive ? scheme.error : null),
@@ -109,6 +114,7 @@ Future<T?> showAppActionSheet<T>(
                   color: scheme.outlineVariant.withValues(alpha: 0.6),
                 ),
               ListTile(
+                enabled: a.enabled,
                 leading: Icon(a.icon, color: a.destructive ? scheme.error : null),
                 title: Text(a.label, style: a.destructive ? TextStyle(color: scheme.error) : null),
                 subtitle: a.subtitle == null ? null : Text(a.subtitle!),

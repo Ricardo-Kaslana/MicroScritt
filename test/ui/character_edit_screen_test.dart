@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';
+import 'package:microscritt/models/bubble_style.dart';
 import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/character_edit_screen.dart';
@@ -111,6 +112,91 @@ void main() {
     );
     final scenarioField = tester.widget<TextField>(find.byKey(const ValueKey('field_场景')));
     expect(scenarioField.controller?.text, 'castle');
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('selecting the default bubble color clears a custom color', (tester) async {
+    late final AppDatabase db;
+    late final int charId;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(db).insert(const CharacterCard(
+        name: 'Alice',
+        bubbleStyle: BubbleStyle(bubbleColor: 0xFF283593, radius: 22),
+      ));
+    });
+    await tester.pumpWidget(_harness(db, characterId: charId));
+    await _open(tester);
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+
+    // 气泡色板在表单下方(懒加载 ListView),先滚到「默认」色块再点。
+    final defaultSwatch = find.byTooltip('默认');
+    await tester.scrollUntilVisible(
+      defaultSwatch,
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(defaultSwatch);
+    await tester.pump();
+
+    await tester.runAsync(() async {
+      await tester.tap(find.widgetWithText(TextButton, '保存'));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await tester.pumpAndSettle();
+    });
+
+    late final CharacterCard? card;
+    await tester.runAsync(() async {
+      card = await CharacterRepository(db).get(charId);
+    });
+    // 底色回到默认(null),其余定制字段保留;不再需要点「恢复默认」。
+    expect(card!.bubbleStyle, isNotNull);
+    expect(card!.bubbleStyle!.bubbleColor, isNull);
+    expect(card!.bubbleStyle!.radius, 22);
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('font size slider saves a custom bubble font size', (tester) async {
+    late final AppDatabase db;
+    late final int charId;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+    });
+    await tester.pumpWidget(_harness(db, characterId: charId));
+    await _open(tester);
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+
+    // 字号滑杆在表单下方(懒加载 ListView),先滚到标签再点滑轨右侧。
+    await tester.scrollUntilVisible(
+      find.text('正文字号'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    final sliderRect = tester.getRect(find.byType(Slider).first);
+    await tester.tapAt(Offset(sliderRect.left + sliderRect.width * 0.8, sliderRect.center.dy));
+    await tester.pump();
+
+    await tester.runAsync(() async {
+      await tester.tap(find.widgetWithText(TextButton, '保存'));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await tester.pumpAndSettle();
+    });
+
+    late final CharacterCard? card;
+    await tester.runAsync(() async {
+      card = await CharacterRepository(db).get(charId);
+    });
+    expect(card!.bubbleStyle?.fontSize, isNotNull);
+    expect(card!.bubbleStyle!.fontSize, greaterThan(kBubbleDefaultFontSize));
     await tester.runAsync(() => db.db.close());
   });
 }

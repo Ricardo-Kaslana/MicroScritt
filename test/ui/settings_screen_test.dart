@@ -7,6 +7,7 @@ import 'package:microscritt/data/app_settings_repository.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/image_config_repository.dart';
 import 'package:microscritt/data/llm_provider_repository.dart';
+import 'package:microscritt/data/user_repository.dart';
 import 'package:microscritt/models/image_config.dart';
 import 'package:microscritt/models/llm_provider.dart';
 import 'package:microscritt/state/providers.dart';
@@ -75,6 +76,28 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('image style manager is reachable from settings', (tester) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(harness());
+    await tester.pump();
+
+    final scrollable = find.byType(Scrollable).first;
+    await scrollToListSection(tester, scrollable, '管理自定义风格');
+    await tester.tap(find.text('管理自定义风格'));
+    // 目标页数据是真实异步读取,加载圈会让 pumpAndSettle 一直等;标题
+    // 在首帧即已就位。给真实 DB 查询留出收敛时间,避免关闭库时仍有在飞语句。
+    await tester.pump();
+    await settleProviders(tester);
+    expect(find.text('自定义生图风格'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await settleProviders(tester);
+    await tester.runAsync(() => db.db.close());
+  });
+
   testWidgets('chat background switch toggles and persists', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -125,15 +148,15 @@ void main() {
     expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
 
     // 副标题为短文案;点标题旁「查看说明」info 按钮(InfoButton)弹出三挡详情。
-    expect(find.text('按窗口占用率三挡自动压缩'), findsOneWidget);
+    expect(find.text('按窗口占用率自动压缩 · 触发线 60%'), findsOneWidget);
     expect(find.byType(AlertDialog), findsNothing);
     await tester.tap(find.byTooltip('查看说明'));
     await tester.pump();
     expect(find.byType(AlertDialog), findsOneWidget);
     expect(find.text('上下文自动压缩 · 三挡说明'), findsOneWidget);
     expect(find.textContaining('目标挡 20%'), findsOneWidget);
-    expect(find.textContaining('软挡 60%'), findsOneWidget);
-    expect(find.textContaining('硬挡 80%'), findsOneWidget);
+    expect(find.textContaining('• 自动触发线 60%'), findsOneWidget);
+    expect(find.textContaining('• 发送前强制线 80%'), findsOneWidget);
     // 点「知道了」关闭弹层,不改变开关状态。
     await tester.tap(find.text('知道了'));
     await tester.pump();
@@ -161,9 +184,10 @@ void main() {
     await tester.pump();
 
     // 开关默认关闭 → 滑块存在、禁用、值 18。
-    expect(find.byType(Slider), findsOneWidget);
-    expect(tester.widget<Slider>(find.byType(Slider)).value, 18.0);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
+    final blurSlider = find.byKey(const ValueKey('chatBackgroundBlurSlider'));
+    expect(blurSlider, findsOneWidget);
+    expect(tester.widget<Slider>(blurSlider).value, 18.0);
+    expect(tester.widget<Slider>(blurSlider).onChanged, isNull);
 
     // 打开聊天背景 → 滑块启用。
     await tester.tap(find.widgetWithText(SwitchListTile, '聊天背景'));
@@ -171,10 +195,10 @@ void main() {
       () => Future<void>.delayed(const Duration(milliseconds: 150)),
     );
     await tester.pump();
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+    expect(tester.widget<Slider>(blurSlider).onChanged, isNotNull);
 
     // 拖动滑块 → onChangeEnd 落库。
-    await tester.drag(find.byType(Slider), const Offset(150, 0));
+    await tester.drag(blurSlider, const Offset(150, 0));
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 150)),
@@ -186,6 +210,62 @@ void main() {
       persisted = (await AppSettingsRepository(db).load()).chatBackgroundBlur;
     });
     expect(persisted, isNot(18.0));
+
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('auto compact threshold slider adjusts and persists', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(harness());
+    await tester.pump();
+
+    final scrollable = find.byType(Scrollable).first;
+    await scrollToListSection(tester, scrollable, '自动压缩触发线');
+
+    final slider = find.byKey(const ValueKey('autoCompactThresholdSlider'));
+    expect(slider, findsOneWidget);
+    expect(tester.widget<Slider>(slider).value, 0.60);
+    expect(tester.widget<Slider>(slider).onChanged, isNotNull);
+
+    // 拖动 → 松手落库(默认 60% 向右拖到更高触发线)。
+    await tester.drag(slider, const Offset(120, 0));
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 150)),
+    );
+    await tester.pump();
+
+    late double persisted;
+    await tester.runAsync(() async {
+      persisted = (await AppSettingsRepository(db).load()).autoCompactThreshold;
+    });
+    expect(persisted, greaterThan(0.60));
+    expect(persisted, lessThanOrEqualTo(0.90));
+
+    // 回归:拖到最右端时 divisions 会算出 0.9000000000000001,归一化后
+    // Slider 不得越界断言,落库为 0.90。
+    await tester.drag(slider, const Offset(1000, 0));
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 150)),
+    );
+    await tester.pump();
+    await tester.runAsync(() async {
+      persisted = (await AppSettingsRepository(db).load()).autoCompactThreshold;
+    });
+    expect(persisted, 0.90);
+
+    // 关闭总开关 → 滑块禁用(值保持,不被重置)。
+    await tester.tap(find.widgetWithText(SwitchListTile, '上下文自动压缩'));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 150)),
+    );
+    await tester.pump();
+    expect(tester.widget<Slider>(slider).onChanged, isNull);
 
     await tester.runAsync(() => db.db.close());
   });
@@ -211,6 +291,38 @@ void main() {
     expect(find.text('选择头像'), findsOneWidget);
     expect(find.widgetWithText(TextField, '用户名'), findsOneWidget);
 
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('saving user management persists and returns to settings', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(harness());
+    await tester.pump();
+
+    await tester.tap(find.text('用户管理'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.enterText(find.widgetWithText(TextField, '用户名'), '小明');
+    await tester.runAsync(() async {
+      await tester.tap(find.text('保存'));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    });
+    await tester.pumpAndSettle();
+
+    // 保存后与其它设置项一致:回退到设置页并提示。
+    expect(find.byType(UserScreen), findsNothing);
+    expect(find.text('用户管理'), findsOneWidget);
+    expect(find.text('用户信息已保存'), findsOneWidget);
+    late String savedName;
+    await tester.runAsync(() async {
+      savedName = (await UserRepository(db).load()).name;
+    });
+    expect(savedName, '小明');
     await tester.runAsync(() => db.db.close());
   });
 
@@ -253,10 +365,18 @@ void main() {
       await tester.pumpWidget(harness());
       await settleProviders(tester);
       // 「对话与后台」新区块把 LLM 区挤到首屏之下,先滚到位。
-      await tester.scrollUntilVisible(
-        find.text('Anthropic'),
-        200,
-        scrollable: find.byType(Scrollable).first,
+      // 新增的设置项把 LLM 区推出 ListView 缓存区:先滚到区块标题触发
+      // providers 读取,等 FutureProvider 收敛后再定位 provider 名。
+      await scrollToListSection(
+        tester,
+        find.byType(Scrollable).first,
+        'LLM 后端',
+      );
+      await settleProviders(tester);
+      await scrollToListSection(
+        tester,
+        find.byType(Scrollable).first,
+        'Anthropic',
       );
       await tester.pump();
 
@@ -286,10 +406,16 @@ void main() {
     });
     await tester.pumpWidget(harness());
     await settleProviders(tester);
-    await tester.scrollUntilVisible(
-      find.text('DeepSeek 官网'),
-      200,
-      scrollable: find.byType(Scrollable).first,
+    await scrollToListSection(
+      tester,
+      find.byType(Scrollable).first,
+      'LLM 后端',
+    );
+    await settleProviders(tester);
+    await scrollToListSection(
+      tester,
+      find.byType(Scrollable).first,
+      'DeepSeek 官网',
     );
     await tester.pump();
 
@@ -311,12 +437,12 @@ void main() {
     });
     await tester.pumpWidget(harness());
     await settleProviders(tester);
-    await tester.scrollUntilVisible(
-      find.text('LLM 后端'),
-      200,
-      scrollable: find.byType(Scrollable).first,
+    await scrollToListSection(
+      tester,
+      find.byType(Scrollable).first,
+      'LLM 后端',
     );
-    await tester.pump();
+    await settleProviders(tester);
 
     // 空态提示。
     expect(find.textContaining('还没有配置任何 LLM provider'), findsOneWidget);
@@ -353,12 +479,8 @@ void main() {
       await tester.pumpWidget(harness());
       await settleProviders(tester);
 
-      final scrollable = find.byType(Scrollable).first;
-      await tester.scrollUntilVisible(
-        find.text('添加 Provider'),
-        200,
-        scrollable: scrollable,
-      );
+final scrollable = find.byType(Scrollable).first;
+    await scrollToListSection(tester, scrollable, '添加 Provider');
       // scrollUntilVisible 可能在按钮刚进入缓存区时停下(center 仍在屏外),先滚到视口
       // 中央并 pump 一帧,确保 tap 命中。
       await Scrollable.ensureVisible(
@@ -421,12 +543,8 @@ void main() {
 
       // 设置页不再有"设为当前 provider"开关:直接保存即可。
       expect(find.text('设为当前使用的 LLM provider'), findsNothing);
-      await tester.scrollUntilVisible(
-        find.text('保存'),
-        200,
-        scrollable: editorScroll,
-      );
-      await tester.tap(find.text('保存'));
+      // 编辑页有顶部与底部两个保存键:点顶部那颗,无需先滚到底。
+      await tester.tap(find.text('保存').first);
 
       // 落库轮询。
       late List<LlmProviderConfig> saved;

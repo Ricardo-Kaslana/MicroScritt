@@ -11,6 +11,11 @@ import '../models/llm_provider.dart';
 import '../models/llm_units.dart';
 import '../state/app_config_sync.dart';
 import '../state/providers.dart';
+import 'settings_screen.dart';
+import 'widgets/reasoning_slider.dart';
+
+/// 模型选择底单的最大高度占比:内容超出时列表在内部滚动,不占满屏高。
+const double _kPickerMaxHeightFactor = 0.6;
 
 /// 输入区上方的"模型选择条":左侧是当前模型 chip(点击弹出模型选择器 +
 /// 推理等级),右侧是当前上下文使用率的圆环(点击/悬停显示具体数值)。
@@ -107,6 +112,15 @@ class ModelSelectorChip extends ConsumerWidget {
     List<LlmProviderConfig> providers,
     ReasoningLevel reasoning,
   ) async {
+    // 还没有任何 provider:选择器里没有可选项,直接把用户送到设置页,
+    // 比打开一个只能看空列表的底单少一步。
+    if (providers.isEmpty) {
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute(builder: (_) => const SettingsScreen()),
+      );
+      return;
+    }
     final picked =
         await showModalBottomSheet<(LlmProviderConfig, LlmModelEntry)>(
           context: context,
@@ -138,12 +152,20 @@ class ContextLink {
 
   /// 上轮实际输入 token(精确);null = 尚无真实锚点(未发送过/网关未上报)。
   final int? actualInputTokens;
-  const ContextLink({required this.estimateTokens, this.actualInputTokens});
+
+  /// 上轮实际输入中命中提示缓存的部分;仅在 [actualInputTokens] 非空时有意义,
+  /// 供点击底单展示缓存命中率。
+  final int cachedInputTokens;
+  const ContextLink({
+    required this.estimateTokens,
+    this.actualInputTokens,
+    this.cachedInputTokens = 0,
+  });
 }
 
 /// 上下文使用率圆环:显示当前上下文 token 占模型上下文容量的比例。
 /// 有上轮真实计数时一律用真实值,只有拿不到锚点才退回字符估算。
-/// 鼠标悬停(Tooltip)显示精确数值;点击弹一个对话框显示精确明细。
+/// 悬停提示只显示已用百分比;点击底单展示容量用量与缓存命中率。
 /// 从当前 active model 读取容量,聊天页内嵌进输入框时与独立条共用。
 class ContextUsageRing extends ConsumerWidget {
   /// 上下文 token 口径(估算值 + 可选真实锚点)。
@@ -164,8 +186,7 @@ class ContextUsageRing extends ConsumerWidget {
     // 优先真实口径:上轮主写请求的服务端精确输入计数;仅当无有效锚点
     // (未发送过/历史被改写后未再发送)时退回字符估算。两者都可能偏离
     // "下一次请求"(真实值未计新增的下一轮内容,估算有 tokenizer 漂移),
-    // 以 tooltip/弹窗标注口径,各取所长:真实值锚定 provider 计数,估算值
-    // 跟随最新组装。
+    // 底单对估算值标 ≈,悬停提示只给百分比。
     final real = usage.actualInputTokens;
     final used = real ?? usage.estimateTokens;
     final capacity = activeModel?.contextCapacity ?? 0;
@@ -179,26 +200,35 @@ class ContextUsageRing extends ConsumerWidget {
         : fraction < 0.9
         ? theme.colorScheme.tertiary
         : theme.colorScheme.error;
-    final tooltipText = usable
-        ? (real != null
-              ? '上下文 ${formatTokenCount(real)} / ${formatTokenCount(capacity)} token(按上轮实际请求)'
-              : '上下文 ≈${formatTokenCount(used)} / ${formatTokenCount(capacity)} token(按字符估算)')
-        : (real != null
-              ? '上轮实际输入 ${formatTokenCount(real)} token(模型未设置容量)'
-              : '上下文 ≈${formatTokenCount(used)} token(按字符估算,模型未设置容量)');
+    final percentLabel = usable
+        ? '已用 ${(fraction * 100).toStringAsFixed(1)}%'
+        : '未设置上下文容量';
+    final cacheHitRate = real != null && real > 0
+        ? usage.cachedInputTokens / real
+        : null;
 
     final ringValue = usable ? fraction : 0.0;
     final ring = Tooltip(
-      message: tooltipText,
+      message: percentLabel,
       child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        onTap: () => showDialog<void>(
+        onTap: () => showModalBottomSheet<void>(
           context: context,
-          builder: (_) => _usageDialog(context, used, capacity, real),
+          showDragHandle: true,
+          useSafeArea: true,
+          builder: (_) => _UsageSheet(
+            usedTokens: used,
+            capacity: capacity,
+            fraction: ringValue,
+            estimated: real == null,
+            cacheHitRate: cacheHitRate,
+            barColor: color,
+          ),
         ),
         child: Container(
-          width: 26,
-          height: 26,
+          // 32 的逻辑命中区:26 的圆环在小屏上贴着发送键,容易点空。
+          width: 32,
+          height: 32,
           alignment: Alignment.center,
           // 输入框底色是 surfaceContainerHighest,圆环轨道默认也是同色,叠上去
           // 几乎看不见;用页面底色(surface)垫一个圆形底,让轨道与进度弧对比出来。
@@ -207,8 +237,8 @@ class ContextUsageRing extends ConsumerWidget {
             shape: BoxShape.circle,
           ),
           child: SizedBox(
-            width: 22,
-            height: 22,
+            width: 26,
+            height: 26,
             child: CircularProgressIndicator(
               // 恒为 determinate:无容量时给 0(空轨道),避免无限动画卡住 pumpAndSettle。
               value: ringValue,
@@ -223,42 +253,123 @@ class ContextUsageRing extends ConsumerWidget {
     );
     return ring;
   }
+}
 
-  Widget _usageDialog(
-    BuildContext context,
-    int used,
-    int capacity,
-    int? real,
-  ) => AlertDialog(
-    title: const Text('上下文使用情况'),
-    content: Text(_dialogBody(used, capacity, real)),
-    actions: [
-      FilledButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('知道了'),
+/// 上下文用量的明细底单:左指标名、右「已用/容量(百分比)」,下方通栏
+/// 进度条,再补一行缓存命中率。数值口径与圆环一致(真实锚点优先)。
+class _UsageSheet extends StatelessWidget {
+  final int usedTokens;
+  final int capacity;
+  final double fraction;
+
+  /// 无真实锚点时为 true,[usedTokens] 来自字符估算,数值前标 ≈。
+  final bool estimated;
+
+  /// 上轮缓存命中率;null = 尚无服务端计量,显示"—"。
+  final double? cacheHitRate;
+
+  /// 与圆环同色的进度条:占用越高越早切换到强调/错误色。
+  final Color barColor;
+  const _UsageSheet({
+    required this.usedTokens,
+    required this.capacity,
+    required this.fraction,
+    required this.estimated,
+    required this.cacheHitRate,
+    required this.barColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.query_stats_outlined,
+                  size: 20,
+                  color: scheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '上下文使用情况',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: '关闭',
+                  icon: const Icon(Icons.close, size: 20),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            _metricRow(context, label: '上下文容量', value: _capacityText()),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: fraction,
+                minHeight: 8,
+                color: barColor,
+                backgroundColor: scheme.surfaceContainerHighest,
+              ),
+            ),
+            const SizedBox(height: 16),
+            _metricRow(
+              context,
+              label: '缓存命中率',
+              value: cacheHitRate == null
+                  ? '—'
+                  : '${(cacheHitRate! * 100).toStringAsFixed(1)}%',
+            ),
+          ],
+        ),
       ),
-    ],
-  );
+    );
+  }
 
-  String _dialogBody(int used, int capacity, int? real) {
-    final buffer = StringBuffer();
-    if (real != null) {
-      // 已有服务端精确计数时不再并列字符估算:两种口径同屏只会让人来回对照,
-      // 而估算(÷3.2)在真实值面前没有展示价值。
-      buffer.writeln('上轮实际输入:${formatTokenCount(real)} token($real)');
-    } else {
-      buffer.writeln('当前上下文(按字符估算):≈${formatTokenCount(used)} token');
-    }
-    if (capacity > 0) {
-      buffer
-        ..writeln('模型上下文容量:${formatTokenCount(capacity)} token($capacity)')
-        ..write(
-          '已用 ${((used / capacity) * 100).clamp(0, 100).toStringAsFixed(1)}%',
-        );
-    } else {
-      buffer.write('(该模型未设置上下文容量)');
-    }
-    return buffer.toString();
+  /// 指标行:左侧名称 + 右侧数值(等宽数字,长数值自动换行靠右)。
+  Widget _metricRow(
+    BuildContext context, {
+    required String label,
+    required String value,
+  }) {
+    final theme = Theme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: theme.textTheme.bodyLarge),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _capacityText() {
+    if (capacity <= 0) return '未设置';
+    final used = '${estimated ? '≈' : ''}${formatTokenCountZh(usedTokens)}';
+    return '$used/${formatTokenCountZh(capacity)}'
+        '（${(fraction * 100).toStringAsFixed(1)}%）';
   }
 }
 
@@ -267,8 +378,8 @@ class ContextUsageRing extends ConsumerWidget {
 ///
 /// 推理四档(关/低/中/高)只改设置、不关闭底单;后端各自映射为请求参数
 /// (OpenAI 兼容为 `reasoning_effort`,anthropic 为 thinking 预算),off 时
-/// 两者都不发送相关字段。列表行按需懒构建,模型较多的 provider 不会在
-/// 打开底单时一次性构建全部行。
+/// 两者都不发送相关字段。底单高度贴合内容(模型少时不留空白),模型多时
+/// 封顶 0.6 屏高;列表行按需懒构建,不会一次性构建全部行。
 class ModelPickerSheet extends ConsumerStatefulWidget {
   /// 可选 provider 目录快照;底单自身不刷新列表。
   final List<LlmProviderConfig> providers;
@@ -310,9 +421,9 @@ class _ModelPickerSheetState extends ConsumerState<ModelPickerSheet> {
       );
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('保存推理等级失败,请重试')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('保存推理等级失败,请重试')));
       return;
     }
     if (mounted) setState(() => _reasoning = level);
@@ -320,131 +431,113 @@ class _ModelPickerSheetState extends ConsumerState<ModelPickerSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    // 扁平化成「provider 分组头 / 模型行」,用 builder 懒构建;
+    // 标题与推理等级固定在列表上方,不随长列表滚走。
+    final rows = <(LlmProviderConfig, LlmModelEntry?)>[
+      for (final p in widget.providers) ...[
+        (p, null),
+        for (final m in p.models) (p, m),
+      ],
+    ];
     return SafeArea(
-      child: DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.6,
-        minChildSize: 0.4,
-        maxChildSize: 0.9,
-        builder: (context, scrollController) {
-          // 扁平化成「标题 / provider 分组头 / 模型行 / 底部推理设置」,
-          // 用 builder 懒构建。模型较多的 provider 不再一打开底单就构建全部行。
-          final rows = <(LlmProviderConfig, LlmModelEntry?)>[
-            for (final p in widget.providers) ...[
-              (p, null),
-              for (final m in p.models) (p, m),
+      child: ConstrainedBox(
+        // 内容少时底单贴合内容(模型只有一两个时不再留半屏空白);
+        // 模型多时封顶 0.6 屏高,列表在封顶内滚动。
+        constraints: BoxConstraints(
+          maxHeight:
+              MediaQuery.sizeOf(context).height * _kPickerMaxHeightFactor,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                '选择模型',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                '推理等级',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              ReasoningSlider(value: _reasoning, onSelected: _saveReasoning),
+              const Divider(height: 24),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  padding: EdgeInsets.zero,
+                  itemCount: widget.providers.isEmpty ? 1 : rows.length,
+                  itemBuilder: (context, index) {
+                    if (widget.providers.isEmpty) {
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '还没有配置任何 provider,请先到设置里添加。',
+                          style: TextStyle(color: scheme.outline),
+                        ),
+                      );
+                    }
+                    final (p, m) = rows[index];
+                    if (m == null) {
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 8, bottom: 4),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.dns_outlined,
+                              size: 16,
+                              color: scheme.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              p.displayName,
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            if (p.isActive)
+                              Text(
+                                ' · 当前',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: scheme.primary,
+                                ),
+                              ),
+                          ],
+                        ),
+                      );
+                    }
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.only(left: 16),
+                      leading: Icon(
+                        (p.isActive && m.isActive)
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                        size: 20,
+                        color: (p.isActive && m.isActive)
+                            ? scheme.primary
+                            : scheme.outline,
+                      ),
+                      title: Text(m.displayName),
+                      subtitle: Text(
+                        '${m.modelId} · 上下文 ${formatTokenCount(m.contextCapacity)} tok'
+                        '${m.maxOutput != null ? ' · 输出 ${formatTokenCount(m.maxOutput!)} tok' : ''}',
+                      ),
+                      onTap: () => Navigator.pop(context, (p, m)),
+                    );
+                  },
+                ),
+              ),
             ],
-          ];
-          final footer = <Widget>[
-            const Divider(height: 28),
-            Text(
-              '推理等级',
-              style: Theme.of(
-                context,
-              ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            SegmentedButton<ReasoningLevel>(
-              segments: const [
-                ButtonSegment(value: ReasoningLevel.off, label: Text('关闭')),
-                ButtonSegment(value: ReasoningLevel.low, label: Text('低')),
-                ButtonSegment(value: ReasoningLevel.medium, label: Text('中')),
-                ButtonSegment(value: ReasoningLevel.high, label: Text('高')),
-              ],
-              selected: {_reasoning},
-              onSelectionChanged: (sel) => _saveReasoning(sel.first),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '推理等级会透传到请求;OpenAI 兼容后端映射为 reasoning_effort。',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: scheme.outline),
-            ),
-          ];
-          return ListView.builder(
-            controller: scrollController,
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-            itemCount:
-                1 +
-                (widget.providers.isEmpty ? 1 : rows.length) +
-                footer.length,
-            itemBuilder: (context, index) {
-              if (index == 0) {
-                return Text(
-                  '选择模型',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                );
-              }
-              if (widget.providers.isEmpty) {
-                // 标题之后是空态提示,再之后才是底部推理设置。
-                if (index == 1) {
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(
-                      '还没有配置任何 provider,请先到设置里添加。',
-                      style: TextStyle(color: scheme.outline),
-                    ),
-                  );
-                }
-                return footer[index - 2];
-              }
-              final rowIndex = index - 1;
-              if (rowIndex < rows.length) {
-                final (p, m) = rows[rowIndex];
-                if (m == null) {
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 8, bottom: 4),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.dns_outlined,
-                          size: 16,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          p.displayName,
-                          style: Theme.of(context).textTheme.titleSmall
-                              ?.copyWith(fontWeight: FontWeight.bold),
-                        ),
-                        if (p.isActive)
-                          Text(
-                            ' · 当前',
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: scheme.primary),
-                          ),
-                      ],
-                    ),
-                  );
-                }
-                return ListTile(
-                  dense: true,
-                  contentPadding: const EdgeInsets.only(left: 16),
-                  leading: Icon(
-                    (p.isActive && m.isActive)
-                        ? Icons.radio_button_checked
-                        : Icons.radio_button_unchecked,
-                    size: 20,
-                    color: (p.isActive && m.isActive)
-                        ? scheme.primary
-                        : scheme.outline,
-                  ),
-                  title: Text(m.displayName),
-                  subtitle: Text(
-                    '${m.modelId} · 上下文 ${formatTokenCount(m.contextCapacity)} tok'
-                    '${m.maxOutput != null ? ' · 输出 ${formatTokenCount(m.maxOutput!)} tok' : ''}',
-                  ),
-                  onTap: () => Navigator.pop(context, (p, m)),
-                );
-              }
-              return footer[rowIndex - rows.length];
-            },
-          );
-        },
+          ),
+        ),
       ),
     );
   }

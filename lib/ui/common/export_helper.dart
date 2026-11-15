@@ -1,8 +1,9 @@
-/// 导出落盘通道:桌面 `file_picker` 直写,移动端临时文件 + 系统另存为。
+/// 导出落盘与分享通道:桌面 `file_picker` 直写,移动端临时文件 + 系统另存为
+/// 或分享面板。
 ///
 /// 导出内容不做加密 —— 配置快照含明文 API Key,角色卡/会话可能含图片,
 /// 保存位置由用户选择;临时文件在成功/取消/异常时立即清理,异常退出遗留的
-/// 目录一天后回收。
+/// 目录一天后回收。分享档不随返回删除,同样交给一天后的清扫。
 library;
 
 import 'dart:convert';
@@ -14,6 +15,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_file_dialog/flutter_file_dialog.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 /// 把导出 JSON 存到用户选择的位置。用户取消返回 false;成功/失败均有 SnackBar 反馈。
 /// 平台差异与移动端临时文件通道见 [saveBytesFile]。
@@ -67,6 +69,56 @@ Future<bool> saveBytesFile(
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败:$e')));
     }
+    return false;
+  }
+}
+
+/// 系统分享面板是否可用:仅移动端提供;桌面端菜单不显示「分享」。
+/// 测试宿主没有移动端平台,用调试开关覆盖分支。
+@visibleForTesting
+bool? debugMobileShareOverride;
+
+bool get isMobileShareAvailable =>
+    debugMobileShareOverride ?? (Platform.isAndroid || Platform.isIOS);
+
+/// 把导出字节写成临时文件后交给系统分享面板(仅移动端)。
+///
+/// 分享档不在返回后删除:接收方可能稍后才读,交给一天后的清扫回收。
+Future<bool> shareBytesFile(
+  BuildContext context, {
+  required String fileName,
+  required Uint8List bytes,
+  required String mimeType,
+}) async {
+  if (!isMobileShareAvailable) return false;
+  try {
+    final base = await getTemporaryDirectory();
+    final root = Directory(p.join(base.path, 'exports'));
+    await root.create(recursive: true);
+    await _purgeOldExports(root);
+    final tempDir = Directory(
+      p.join(root.path, DateTime.now().microsecondsSinceEpoch.toString()),
+    );
+    await tempDir.create(recursive: true);
+    final safeName = _safeFileName(fileName);
+    final file = File(p.join(tempDir.path, safeName));
+    await file.writeAsBytes(bytes, flush: true);
+    if (!context.mounted) return false;
+    final box = context.findRenderObject();
+    final origin = box is RenderBox
+        ? box.localToGlobal(Offset.zero) & box.size
+        : null;
+    await SharePlus.instance.share(
+      ShareParams(
+        files: [XFile(file.path, mimeType: mimeType)],
+        fileNameOverrides: [safeName],
+        sharePositionOrigin: origin,
+      ),
+    );
+    if (context.mounted) _toast(context, '已打开分享面板');
+    return true;
+  } catch (e) {
+    if (context.mounted) _toast(context, '分享失败:$e');
     return false;
   }
 }

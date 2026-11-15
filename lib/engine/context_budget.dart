@@ -5,6 +5,7 @@
 /// `estimateTokensFromChars`,与上下文圆环同一把尺子。
 library;
 
+import '../models/app_settings.dart';
 import '../models/chat_message.dart';
 import '../models/llm_units.dart';
 import '../models/message.dart';
@@ -12,23 +13,42 @@ import '../models/message.dart';
 /// 上下文窗口预算策略 —— 自动压缩(auto compact)的三个挡位。
 ///
 /// 触发依据是**上下文窗口占用量**(输入估算 / 容量),不再按掉出窗口的
-/// 消息条数计算;三挡固定协作:
+/// 消息条数计算;三挡协作:
 ///
 /// - **目标挡 target 20%**:每次压缩把活跃历史(消息部分)压回 ≈20% 占用,
-///   压缩后到下一次触发之间有 40 个百分点的自然滞回,不会轮轮压缩;
-/// - **软挡 soft 60%**:回复落库后估算占用 ≥60% → 主动执行一次 LLM 摘要压缩
-///   (事后路径,best-effort);
-/// - **硬挡 hard 80%**:API 发送前预算检测 —— 估算输入 + 输出预留超过容量×80%
-///   时必须先压缩再发送;摘要重试仍失败则机械截断窗口兜底,保证请求一定发得出去。
+///   压缩后到下一次触发之间有自然滞回,不会轮轮压缩;
+/// - **软挡 soft(默认 60%,用户可配 30%–90%)**:回复落库后估算占用 ≥ 该值
+///   → 主动执行一次 LLM 摘要压缩(事后路径,best-effort);
+/// - **硬挡 hard = max(80%, 软挡 + 5%)**:API 发送前预算检测 —— 估算输入 +
+///   输出预留超过容量×硬挡时必须先压缩再发送;摘要重试仍失败则机械截断
+///   窗口兜底,保证请求一定发得出去。
 abstract final class ContextBudgetPolicy {
   /// 目标挡:压缩后活跃历史的目标占用(≈20%)。
   static const double target = 0.20;
 
-  /// 软挡:回复落库后达到该占用即触发一次自动压缩。
-  static const double soft = 0.60;
+  /// 默认软挡:回复落库后达到该占用即触发一次自动压缩。
+  /// 实际触发线由 `AppSettings.autoCompactThreshold` 决定(可调)。
+  static const double soft = AppSettings.defaultAutoCompactThreshold;
 
-  /// 硬挡:API 发送前预算检测的强制线。
+  /// 硬挡:API 发送前预算检测的强制线(不低于软挡 + [hardGap])。
   static const double hard = 0.80;
+
+  /// 硬挡相对软挡的最小缓冲:用户把触发线调到 80% 以上时,强制线顺延,
+  /// 保证发送前检测始终晚于事后压缩。
+  static const double hardGap = 0.05;
+
+  /// 给定软挡触发线时的实际硬挡:max(80%, 触发线 + 5%)。
+  ///
+  /// 结果按百分比精度取整,避免 0.90 + 0.05 的浮点尾差让边界判定失真
+  /// (0.95 会小于 0.9500000000000001)。
+  static double hardFor(double soft) {
+    final s = soft.clamp(
+      AppSettings.minAutoCompactThreshold,
+      AppSettings.maxAutoCompactThreshold,
+    );
+    final shifted = ((s + hardGap) * 100).round() / 100;
+    return shifted > hard ? shifted : hard;
+  }
 
   /// 输出预留默认值:配置未设 maxTokens 时按此为回复预留输出空间。
   static const int defaultOutputReserveTokens = 2048;
@@ -63,11 +83,18 @@ enum ContextBudgetLevel {
   hard,
 }
 
-/// 占用率 → 挡位。≥hard 为 [ContextBudgetLevel.hard],≥soft 为
+/// 占用率 → 挡位。≥[hard] 为 [ContextBudgetLevel.hard],≥[soft] 为
 /// [ContextBudgetLevel.soft],否则 [ContextBudgetLevel.ok]。
-ContextBudgetLevel budgetLevelFor(double occupancy) {
-  if (occupancy >= ContextBudgetPolicy.hard) return ContextBudgetLevel.hard;
-  if (occupancy >= ContextBudgetPolicy.soft) return ContextBudgetLevel.soft;
+///
+/// [soft]/[hard] 允许调用方传入用户配置的触发线与派生硬挡;不传时用默认策略
+/// (60% / 80%),与历史行为一致。
+ContextBudgetLevel budgetLevelFor(
+  double occupancy, {
+  double soft = ContextBudgetPolicy.soft,
+  double hard = ContextBudgetPolicy.hard,
+}) {
+  if (occupancy >= hard) return ContextBudgetLevel.hard;
+  if (occupancy >= soft) return ContextBudgetLevel.soft;
   return ContextBudgetLevel.ok;
 }
 

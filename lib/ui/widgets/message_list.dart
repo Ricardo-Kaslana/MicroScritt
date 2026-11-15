@@ -12,12 +12,17 @@ import '../../engine/display_regex.dart';
 import '../../engine/glossary.dart';
 import '../../models/bubble_style.dart';
 import '../../models/message.dart';
+import '../common/chat_layout.dart';
+import '../common/motion.dart';
+import '../text_syntax.dart';
 import 'message_bubble.dart';
 import 'rich_message_text.dart';
 
 /// 消息气泡的操作入口:复制 / 编辑 / 删除 / 重新生成(仅助手)/
-/// 重新发送(仅用户,把该条输入原样重发一遍)/ 重新生成图片(带原始描述的图片)。
-enum MessageAction { copy, edit, delete, regenerate, resend, regenerateImage }
+/// 按要求重写(仅最新一条有正文的助手回复,其后允许跟图片消息)/
+/// 重新发送(仅用户,把该条输入原样重发一遍)/
+/// 重新生成图片(带原始描述的图片)。
+enum MessageAction { copy, edit, delete, regenerate, rewrite, resend, regenerateImage }
 
 /// 聊天消息列表。
 ///
@@ -26,6 +31,9 @@ enum MessageAction { copy, edit, delete, regenerate, resend, regenerateImage }
 class MessageList extends StatefulWidget {
   /// 时间序(旧 → 新)消息;system 摘要与附件行在渲染前被过滤掉。
   final List<Message> messages;
+
+  /// 没有可显示消息时的内容区(角色引导/开场白);null = 一行灰字提示。
+  final Widget? emptyState;
 
   /// 流式草稿正文;为空且 [streaming] 时草稿气泡显示打字指示器。
   final String draft;
@@ -73,11 +81,8 @@ class MessageList extends StatefulWidget {
   /// 角色名(显示时替换正文里的 `{{char}}`;仅影响显示)。
   final String? displayCharName;
 
-  /// 已启用技能名集合:用户气泡内 `@技能名` 记号高亮(与输入框共用同一集合)。
-  final Set<String>? skillNames;
-
-  /// 聊天页预编译好的技能记号正则(见 [MessageBubble.skillTokenPattern])。
-  final RegExp? skillTokenPattern;
+  /// 聊天页编译好的共享语法(命令/@技能/宏/标签),气泡与输入框同源。
+  final CompiledSyntax? syntax;
 
   /// 显示层正则脚本(正文渲染管线用;null = 无脚本)。
   final List<CompiledRegexScript>? regexScripts;
@@ -113,6 +118,7 @@ class MessageList extends StatefulWidget {
   const MessageList({
     super.key,
     required this.messages,
+    this.emptyState,
     required this.draft,
     this.streaming = false,
     required this.controller,
@@ -127,8 +133,7 @@ class MessageList extends StatefulWidget {
     this.onAssistantAvatarTap,
     this.displayUserName,
     this.displayCharName,
-    this.skillNames,
-    this.skillTokenPattern,
+    this.syntax,
     this.regexScripts,
     this.glossary,
     this.onTermTap,
@@ -286,6 +291,11 @@ class MessageListState extends State<MessageList> {
     final target = offset.clamp(0.0, pos.maxScrollExtent);
     final distance = (pos.pixels - target).abs();
     if (distance < 1.0) return;
+    // 减弱动态效果:爬楼直接落位,不播放长距离滚动动画。
+    if (reduceMotionOf(context)) {
+      widget.controller.jumpTo(target);
+      return;
+    }
     widget.controller.animateTo(
       target,
       duration: crawlAnimationDuration(distance, pos.viewportDimension),
@@ -482,6 +492,8 @@ class MessageListState extends State<MessageList> {
       glossary: widget.glossary,
       onTermTap: widget.onTermTap,
       highlightDialogue: widget.highlightDialogue,
+      syntax: widget.syntax,
+      surface: SyntaxSurface.assistantBubble,
     );
   }
 
@@ -521,18 +533,28 @@ class MessageListState extends State<MessageList> {
       }
     }
     final visible = _visibleMessages ?? const <Message>[];
+    // 按修改要求重写只对「最新一条有正文的助手回复」开放:其后允许跟后台
+    // 生图落库的图片消息;更旧的回复后面若还有用户消息或其他有正文回复,
+    // 重写会连带剪掉它们,不给入口。
+    final rewritable = latestRewritableAssistantReply(visible);
     final hasDraft = widget.draft.isNotEmpty || widget.streaming;
     final hasHistoryLoader = widget.canLoadOlder || widget.loadingOlder;
     final leading = hasDraft ? 1 : 0;
     final total = visible.length + leading + (hasHistoryLoader ? 1 : 0);
+    final windowWidth = MediaQuery.sizeOf(context).width;
     if (total == 0) {
-      return Center(
-        child: Text(
-          '发一条消息开始对话',
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: Theme.of(context).colorScheme.outline,
-          ),
-        ),
+      return _columnRow(
+        windowWidth,
+        child:
+            widget.emptyState ??
+            Center(
+              child: Text(
+                '发一条消息开始对话',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+              ),
+            ),
       );
     }
     // reverse:true —— 下标 0 在**底部**(最新),下标增大向上(更旧),offset 0
@@ -579,9 +601,10 @@ class MessageListState extends State<MessageList> {
       itemBuilder: (context, index) {
         // 最远端(视觉顶部)是分页提示/加载行。
         if (hasHistoryLoader && index == total - 1) {
-          return _HistoryLoadRow(
+          return _columnRow(
+            windowWidth,
             key: const ValueKey('history-loader'),
-            loading: widget.loadingOlder,
+            child: _HistoryLoadRow(loading: widget.loadingOlder),
           );
         }
         final logical = visible.length - 1 - (index - leading);
@@ -596,38 +619,41 @@ class MessageListState extends State<MessageList> {
               : null;
           // 稳定 key(消息 id):配合上面的 findChildIndexCallback 完成按下标
           // 平移时的 Element 搬迁(见该处注释)。
-          return _MessageItem(
+          return _columnRow(
+            windowWidth,
             key: ValueKey('msg-${m.id ?? 'idx-$logical'}'),
-            message: m,
-            selectedId: _selectedId,
-            userAvatarImage: widget.userAvatarImage,
-            assistantAvatarImage: widget.assistantAvatarImage,
-            onAvatarTap: m.role == 'user'
-                ? widget.onUserAvatarTap
-                : widget.onAssistantAvatarTap,
-            displayUserName: widget.displayUserName,
-            displayCharName: widget.displayCharName,
-            skillNames: widget.skillNames,
-            skillTokenPattern: widget.skillTokenPattern,
-            regexScripts: widget.regexScripts,
-            glossary: widget.glossary,
-            onTermTap: widget.onTermTap,
-            highlightDialogue: widget.highlightDialogue,
-            assistantBubbleStyle: widget.assistantBubbleStyle,
-            imageLoader: widget.imageLoader,
-            onImageDelete: widget.onImageDelete,
-            regenerating: widget.regeneratingImageId == m.id,
-            imageRevision: widget.imageRevisions[m.id] ?? 0,
-            highlighted: widget.highlightedMessageId == m.id,
-            groupStart: prev == null || prev.role != m.role,
-            groupEnd: next == null || next.role != m.role,
-            onTap: m.id == null ? null : () => _toggle(m.id!),
-            onLongPress: widget.onMessageLongPress == null
-                ? null
-                : () => widget.onMessageLongPress!(m),
-            onAction: widget.onMessageAction == null
-                ? null
-                : (a) => widget.onMessageAction!(m, a),
+            child: _MessageItem(
+              message: m,
+              selectedId: _selectedId,
+              userAvatarImage: widget.userAvatarImage,
+              assistantAvatarImage: widget.assistantAvatarImage,
+              onAvatarTap: m.role == 'user'
+                  ? widget.onUserAvatarTap
+                  : widget.onAssistantAvatarTap,
+              displayUserName: widget.displayUserName,
+              displayCharName: widget.displayCharName,
+              syntax: widget.syntax,
+              regexScripts: widget.regexScripts,
+              glossary: widget.glossary,
+              onTermTap: widget.onTermTap,
+              highlightDialogue: widget.highlightDialogue,
+              assistantBubbleStyle: widget.assistantBubbleStyle,
+              imageLoader: widget.imageLoader,
+              onImageDelete: widget.onImageDelete,
+              regenerating: widget.regeneratingImageId == m.id,
+              canRewrite: m.id != null && m.id == rewritable?.id,
+              imageRevision: widget.imageRevisions[m.id] ?? 0,
+              highlighted: widget.highlightedMessageId == m.id,
+              groupStart: prev == null || prev.role != m.role,
+              groupEnd: next == null || next.role != m.role,
+              onTap: m.id == null ? null : () => _toggle(m.id!),
+              onLongPress: widget.onMessageLongPress == null
+                  ? null
+                  : () => widget.onMessageLongPress!(m),
+              onAction: widget.onMessageAction == null
+                  ? null
+                  : (a) => widget.onMessageAction!(m, a),
+            ),
           );
         }
         // 流式草稿:助手方向的输入气泡 —— 与持久化助手气泡共用 ChatBubbleFrame
@@ -637,49 +663,77 @@ class MessageListState extends State<MessageList> {
         final draftIsUser = lastVisible?.role == 'user';
         // 草稿伪条目同样给稳定 key:上方消息被删除时不因位置平移被重建,
         // 打字指示器动画不重头播。
-        return Align(
+        return _columnRow(
+          windowWidth,
           key: const ValueKey('draft-bubble'),
-          alignment: Alignment.centerLeft,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 2, 12, 0),
-                child: GestureDetector(
-                  onTap: widget.onAssistantAvatarTap,
-                  child: widget.assistantAvatarImage != null
-                      ? CircleAvatar(
-                          radius: kMessageAvatarRadius,
-                          backgroundImage: widget.assistantAvatarImage,
-                          onBackgroundImageError: (_, __) {},
-                        )
-                      : CircleAvatar(
-                          radius: kMessageAvatarRadius,
-                          child: const Icon(Icons.person_outline, size: 20),
-                        ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 2, 12, 0),
+                  child: GestureDetector(
+                    onTap: widget.onAssistantAvatarTap,
+                    child: CircleAvatar(
+                      radius: kMessageAvatarRadius,
+                      // foregroundImage 失败时下方 child 占位自然露出,
+                      // 坏图不会再留一个空白圆。
+                      foregroundImage: widget.assistantAvatarImage,
+                      onForegroundImageError:
+                          widget.assistantAvatarImage == null
+                          ? null
+                          : (_, __) {},
+                      child: const Icon(Icons.person_outline, size: 20),
+                    ),
+                  ),
                 ),
-              ),
-              ChatBubbleFrame(
-                isUser: false,
-                // 草稿紧跟用户消息 → 是新的一组;跟在助手消息后 → 并入该组。
-                groupStart: draftIsUser || lastVisible == null,
-                groupEnd: true,
-                style: widget.assistantBubbleStyle,
-                // 草稿气泡复用助手气泡的宽度上限(桌面 760/移动满宽)。
-                constraints: BoxConstraints(
-                  maxWidth: assistantBubbleMaxWidth(context),
+                ChatBubbleFrame(
+                  isUser: false,
+                  // 草稿紧跟用户消息 → 是新的一组;跟在助手消息后 → 并入该组。
+                  groupStart: draftIsUser || lastVisible == null,
+                  groupEnd: true,
+                  style: widget.assistantBubbleStyle,
+                  // 草稿气泡复用助手气泡的宽度上限(与输入卡同宽/移动满宽)。
+                  constraints: BoxConstraints(
+                    maxWidth: assistantBubbleMaxWidth(context),
+                  ),
+                  child: widget.draft.isEmpty && widget.streaming
+                      ? const _TypingDots(key: ValueKey('typing-dots'))
+                      : _draftBody(context),
                 ),
-                child: widget.draft.isEmpty && widget.streaming
-                    ? const _TypingDots(key: ValueKey('typing-dots'))
-                    : _draftBody(context),
-              ),
-            ],
+              ],
+            ),
           ),
         );
       },
     );
   }
+}
+
+/// 宽窗行收敛:消息列表本身铺满可用宽(桌面滚动条因此贴在窗口最右缘),
+/// 每行内容再收敛到居中的会话列 —— 与输入卡同列。
+///
+/// 行内容必须经 `SizedBox(width: double.infinity)` 强制铺满列宽:列内
+/// Column 按最宽子项收缩时,右对齐的用户气泡会失去列右缘的对齐基准。
+///
+/// [key] 必须落在这层包装上:sliver 的直接子项才是 `findChildIndexCallback`
+/// 的匹配对象,key 埋在行内容里会退回按下标匹配(删消息后幸存图片条目被
+/// 销毁重建、已解码帧丢失)。
+Widget _columnRow(double windowWidth, {Key? key, required Widget child}) {
+  final columnWidth = chatColumnMaxWidth(windowWidth);
+  if (columnWidth == double.infinity) {
+    return key == null ? child : KeyedSubtree(key: key, child: child);
+  }
+  return Align(
+    key: key,
+    alignment: Alignment.topCenter,
+    child: ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: columnWidth),
+      child: SizedBox(width: double.infinity, child: child),
+    ),
+  );
 }
 
 /// 头像半径(气泡上方的小头像)。
@@ -729,8 +783,7 @@ class _MessageItem extends StatefulWidget {
 
   final String? displayUserName;
   final String? displayCharName;
-  final Set<String>? skillNames;
-  final RegExp? skillTokenPattern;
+  final CompiledSyntax? syntax;
   final List<CompiledRegexScript>? regexScripts;
   final CompiledGlossary? glossary;
   final void Function(GlossaryTerm term)? onTermTap;
@@ -739,6 +792,9 @@ class _MessageItem extends StatefulWidget {
   final Future<String?> Function(int messageId)? imageLoader;
   final Future<void> Function(int messageId)? onImageDelete;
   final bool regenerating;
+
+  /// 本条是列表里最新一条可见对话行且为助手回复:显示「按要求重写」入口。
+  final bool canRewrite;
   final int imageRevision;
   final bool highlighted;
   final VoidCallback? onTap;
@@ -746,7 +802,6 @@ class _MessageItem extends StatefulWidget {
   final void Function(MessageAction action)? onAction;
 
   const _MessageItem({
-    super.key,
     required this.message,
     required this.selectedId,
     required this.groupStart,
@@ -756,8 +811,7 @@ class _MessageItem extends StatefulWidget {
     this.onAvatarTap,
     this.displayUserName,
     this.displayCharName,
-    this.skillNames,
-    this.skillTokenPattern,
+    this.syntax,
     this.regexScripts,
     this.glossary,
     this.onTermTap,
@@ -766,6 +820,7 @@ class _MessageItem extends StatefulWidget {
     this.imageLoader,
     this.onImageDelete,
     this.regenerating = false,
+    this.canRewrite = false,
     this.imageRevision = 0,
     this.highlighted = false,
     this.onTap,
@@ -826,8 +881,7 @@ class _MessageItemState extends State<_MessageItem> {
       onLongPress: widget.onLongPress,
       displayUserName: widget.displayUserName,
       displayCharName: widget.displayCharName,
-      skillNames: widget.skillNames,
-      skillTokenPattern: widget.skillTokenPattern,
+      syntax: widget.syntax,
       regexScripts: widget.regexScripts,
       glossary: widget.glossary,
       onTermTap: widget.onTermTap,
@@ -863,19 +917,15 @@ class _MessageItemState extends State<_MessageItem> {
           ),
           child: GestureDetector(
             onTap: widget.onAvatarTap,
-            child: avatarImage != null
-                ? CircleAvatar(
-                    radius: kMessageAvatarRadius,
-                    backgroundImage: avatarImage,
-                    onBackgroundImageError: (_, __) {},
-                  )
-                : CircleAvatar(
-                    radius: kMessageAvatarRadius,
-                    child: Icon(
-                      isUser ? Icons.person : Icons.person_outline,
-                      size: 20,
-                    ),
-                  ),
+            child: CircleAvatar(
+              radius: kMessageAvatarRadius,
+              foregroundImage: avatarImage,
+              onForegroundImageError: avatarImage == null ? null : (_, __) {},
+              child: Icon(
+                isUser ? Icons.person : Icons.person_outline,
+                size: 20,
+              ),
+            ),
           ),
         ),
         bubble,
@@ -883,7 +933,11 @@ class _MessageItemState extends State<_MessageItem> {
           _MessageActionsRow(
             message: message,
             regenerating: widget.regenerating,
+            canRewrite: widget.canRewrite,
             onAction: widget.onAction!,
+            // 长按/右键菜单的显式入口:选中后的操作排里给一颗「更多」,
+            // 不必先发现长按手势。
+            onMore: widget.onLongPress,
           ),
       ],
     );
@@ -891,19 +945,27 @@ class _MessageItemState extends State<_MessageItem> {
 }
 
 /// 气泡下方的操作按钮排:复制 / 编辑(有正文时)/ 删除 + 文本重新生成或重新发送;
+/// 最新一条有正文助手回复(其后允许跟图片消息)另给「按要求重写」,
 /// 带原始描述的图片另给「重新生成图片」。
 class _MessageActionsRow extends StatelessWidget {
   final Message message;
   final bool regenerating;
+  final bool canRewrite;
   final void Function(MessageAction action) onAction;
+
+  /// 打开完整操作菜单(长按/右键的同一入口);null 时不渲染。
+  final VoidCallback? onMore;
   const _MessageActionsRow({
     required this.message,
     required this.regenerating,
+    required this.canRewrite,
     required this.onAction,
+    this.onMore,
   });
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final isUser = message.role == 'user';
     final hasText = message.content.trim().isNotEmpty;
     final canRegenerateImage =
@@ -939,6 +1001,13 @@ class _MessageActionsRow extends StatelessWidget {
                   '重新发送',
                   MessageAction.resend,
                 ),
+              if (!isUser && hasText && canRewrite)
+                _action(
+                  context,
+                  Icons.edit_note,
+                  '按要求重写',
+                  MessageAction.rewrite,
+                ),
               if (!isUser && hasText)
                 _action(
                   context,
@@ -953,6 +1022,14 @@ class _MessageActionsRow extends StatelessWidget {
                   '重新生成图片',
                   MessageAction.regenerateImage,
                   enabled: !regenerating,
+                ),
+              if (onMore != null)
+                IconButton(
+                  tooltip: '更多操作',
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 18,
+                  onPressed: onMore,
+                  icon: Icon(Icons.more_horiz, color: scheme.onSurfaceVariant),
                 ),
             ],
           ),
@@ -986,7 +1063,7 @@ class _MessageActionsRow extends StatelessWidget {
 /// 列表最远端(视觉顶部)的历史分页提示行:加载中转圈,空闲时提示上滑。
 class _HistoryLoadRow extends StatelessWidget {
   final bool loading;
-  const _HistoryLoadRow({super.key, required this.loading});
+  const _HistoryLoadRow({required this.loading});
 
   @override
   Widget build(BuildContext context) {
@@ -1037,7 +1114,19 @@ class _TypingDotsState extends State<_TypingDots>
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1200),
-  )..repeat();
+  );
+  bool _reduceMotion = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reduceMotion = reduceMotionOf(context);
+    if (_reduceMotion) {
+      if (_controller.isAnimating) _controller.stop();
+    } else if (!_controller.isAnimating) {
+      _controller.repeat();
+    }
+  }
 
   @override
   void dispose() {
@@ -1048,6 +1137,25 @@ class _TypingDotsState extends State<_TypingDots>
   @override
   Widget build(BuildContext context) {
     final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    if (_reduceMotion) {
+      // 呼吸动画停住,仍用三点表示「正在输入」,不闪动。
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var i = 0; i < 3; i++) ...[
+            if (i > 0) const SizedBox(width: 5),
+            Opacity(
+              opacity: 0.7,
+              child: Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
+            ),
+          ],
+        ],
+      );
+    }
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {

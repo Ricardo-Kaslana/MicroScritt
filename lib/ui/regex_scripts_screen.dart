@@ -14,12 +14,15 @@ import '../models/regex_script.dart';
 import '../models/regex_script_seeds.dart';
 import '../state/providers.dart';
 import '../ui/widgets/rich_message_text.dart';
+import 'common/app_menu.dart';
 import 'common/confirm_dialog.dart';
+import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
 import 'common/form_field.dart';
+import 'common/list_page_scaffold.dart';
 import 'common/resource_io.dart';
-import 'common/searchable_list.dart';
 import 'common/section_header.dart';
+import 'common/toggle_delete_tile.dart';
 
 /// 正则脚本列表页(设置页「内容与扩展 · 正则脚本」入口)。
 ///
@@ -30,13 +33,22 @@ class RegexScriptsScreen extends ConsumerWidget {
   const RegexScriptsScreen({super.key});
 
   /// 切换脚本启用状态:整条更新后失效列表(停用脚本不再参与替换)。
-  Future<void> _toggle(WidgetRef ref, RegexScript s) async {
+  Future<void> _toggle(BuildContext context, WidgetRef ref, RegexScript s) async {
     final id = s.id;
     if (id == null) return;
+    final enabled = !s.enabled;
     await ref
         .read(regexScriptRepositoryProvider)
-        .update(s.copyWith(enabled: !s.enabled));
+        .update(s.copyWith(enabled: enabled));
     ref.invalidate(regexScriptsProvider);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(enabled ? '已启用「${s.name}」' : '已停用「${s.name}」'),
+        ),
+      );
   }
 
   /// 删除脚本:确认后直接删行,不再参与任何气泡的显示层替换。
@@ -97,22 +109,33 @@ class RegexScriptsScreen extends ConsumerWidget {
     final dialogueHighlight = ref
         .watch(appSettingsProvider)
         .dialogueHighlightEnabled;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('正则脚本'),
-        actions: [
-          IconButton(
-            tooltip: '导出 JSON',
-            icon: const Icon(Icons.file_download_outlined),
-            onPressed: () => _exportJson(context, ref),
-          ),
-          IconButton(
-            tooltip: '导入 JSON',
-            icon: const Icon(Icons.file_upload_outlined),
-            onPressed: () => _importJson(context, ref),
-          ),
-        ],
-      ),
+    return ListPageScaffold<RegexScript>(
+      title: '正则脚本',
+      actions: [
+        AppPopupMenuButton<String>(
+          tooltip: '更多操作',
+          onSelected: (action) {
+            switch (action) {
+              case 'export':
+                _exportJson(context, ref);
+              case 'import':
+                _importJson(context, ref);
+            }
+          },
+          actions: const [
+            MenuAction(
+              value: 'export',
+              label: '导出 JSON',
+              icon: Icons.file_download_outlined,
+            ),
+            MenuAction(
+              value: 'import',
+              label: '导入 JSON',
+              icon: Icons.file_upload_outlined,
+            ),
+          ],
+        ),
+      ],
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => Navigator.push(
           context,
@@ -121,82 +144,48 @@ class RegexScriptsScreen extends ConsumerWidget {
         icon: const Icon(Icons.add),
         label: const Text('新建'),
       ),
-      body: Column(
+      // 引号台词的斜体+强调色是渲染管线内建行为而非正则脚本 —— 关掉全部
+      // 脚本关不掉它,故在此单独提供总开关(随 app_settings 持久化)。
+      header: GroupCard(
         children: [
-          // 引号台词的斜体+强调色是渲染管线内建行为而非正则脚本 —— 关掉全部
-          // 脚本关不掉它,故在此单独提供总开关(随 app_settings 持久化)。
-          GroupCard(
-            children: [
-              SwitchListTile(
-                secondary: Icon(
-                  Icons.format_quote,
-                  color: scheme.onSurfaceVariant,
-                ),
-                title: const Text('内置对话高亮'),
-                subtitle: const Text('引号台词(“…”/「…」)斜体+强调色;非正则脚本,独立开关'),
-                value: dialogueHighlight,
-                onChanged: (v) => _toggleDialogueHighlight(ref, v),
-              ),
-            ],
+          SwitchListTile(
+            secondary: Icon(Icons.format_quote, color: scheme.onSurfaceVariant),
+            title: const Text('内置对话高亮'),
+            subtitle: const Text('引号台词(“…”/「…」)斜体+强调色;非正则脚本,独立开关'),
+            value: dialogueHighlight,
+            onChanged: (v) => _toggleDialogueHighlight(ref, v),
           ),
-          Expanded(
-            child: scripts.when(
-              data: (list) => list.isEmpty
-                  ? const EmptyState(
-                      icon: Icons.manage_search_outlined,
-                      title: '暂无脚本',
-                      message: '脚本对气泡显示文本做查找替换(如把 *动作* 变斜体、给关键词上色),不影响对话内容本身。',
-                    )
-                  : SearchableList<RegexScript>(
-                      items: list,
-                      searchHint: '搜索脚本名称/正则/替换串',
-                      searchText: (s) =>
-                          '${s.name} ${s.findRegex} ${s.replace}',
-                      itemBuilder: (context, s) => GroupCard(
-                        children: [
-                          ListTile(
-                            leading: const Icon(Icons.manage_search),
-                            title: Text(s.name),
-                            subtitle: Text(
-                              '${s.findRegex} → ${s.replace}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                              ),
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  tooltip: '删除',
-                                  icon: const Icon(Icons.delete_outline),
-                                  onPressed: () => _delete(context, ref, s),
-                                ),
-                                Switch(
-                                  value: s.enabled,
-                                  onChanged: (_) => _toggle(ref, s),
-                                ),
-                              ],
-                            ),
-                            onTap: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) =>
-                                    RegexScriptEditScreen(script: s),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-              error: (e, _) => EmptyState(
-                icon: Icons.error_outline,
-                title: '加载失败',
-                message: '$e',
+        ],
+      ),
+      loading: scripts.isLoading && !scripts.hasValue,
+      error: scripts.hasError && !scripts.hasValue ? scripts.error : null,
+      onRetry: () => ref.invalidate(regexScriptsProvider),
+      items: scripts.value,
+      emptyState: const EmptyState(
+        icon: Icons.manage_search_outlined,
+        title: '暂无脚本',
+        message: '脚本对气泡显示文本做查找替换(如把 *动作* 变斜体、给关键词上色),不影响对话内容本身。',
+      ),
+      searchHint: '搜索脚本名称/正则/替换串',
+      searchText: (s) => '${s.name} ${s.findRegex} ${s.replace}',
+      itemBuilder: (context, s) => GroupCard(
+        children: [
+          ToggleDeleteTile(
+            leading: const Icon(Icons.manage_search),
+            title: s.name,
+            subtitle: '${s.findRegex} → ${s.replace}',
+            subtitleStyle: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 12,
+            ),
+            enabled: s.enabled,
+            onToggle: (_) => _toggle(context, ref, s),
+            onDelete: () => _delete(context, ref, s),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => RegexScriptEditScreen(script: s),
               ),
-              loading: () => const Center(child: CircularProgressIndicator()),
             ),
           ),
         ],
@@ -235,6 +224,9 @@ class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
   late bool _enabled;
   bool _saving = false;
 
+  /// 打开编辑器时的表单快照(未保存修改的判定基准)。
+  late String _initialSignature;
+
   bool get _isNew => widget.script == null;
 
   @override
@@ -248,7 +240,11 @@ class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
       text: _defaultSample(s?.replace ?? _templateReplace),
     );
     _enabled = s?.enabled ?? true;
+    _initialSignature = _signature();
   }
+
+  String _signature() =>
+      '${_name.text}\u0000${_find.text}\u0000${_replace.text}\u0000${_sample.text}\u0000$_enabled';
 
   /// 示例文本随脚本类型走:替换串输出什么标记,示例就给能命中该脚本的原文,
   /// 让「试一试」预览打开即有结果,而不是写死斜体示例让加粗/胶囊脚本空跑。
@@ -295,6 +291,7 @@ class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
   /// 保存前校验名字非空与正则可编译;position 沿用既有行(新脚本由仓库
   /// 排到列表末尾),保存后失效列表并返回。
   Future<void> _save() async {
+    if (_saving) return;
     if (_name.text.trim().isEmpty) {
       ScaffoldMessenger.of(
         context,
@@ -334,127 +331,117 @@ class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final compiled = _liveCompiled;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_isNew ? '新建脚本' : '编辑脚本'),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          FormTextField(controller: _name, label: '名字 *', hint: '脚本名称'),
-          FormTextField(
-            controller: _find,
-            label: '查找正则 * (Dart RegExp)',
-            hint: r'如 \*([\s\S]+?)\*',
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-            onChanged: (_) => setState(() {}),
-          ),
-          FormTextField(
-            controller: _replace,
-            label: '替换为 *',
-            hint: '支持 \$1–\$9、\$& 与样式标记',
-            lines: 2,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-            onChanged: (_) => setState(() {}),
-          ),
-          if (compiled == null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-              child: Text(
-                '正则无效:${validateRegexPattern(_find.text)}',
-                style: TextStyle(color: scheme.error, fontSize: 13),
-              ),
-            ),
+    return EditFormScaffold(
+      title: _isNew ? '新建脚本' : '编辑脚本',
+      saving: _saving,
+      onSave: _save,
+      hasChanges: () => _signature() != _initialSignature,
+      changes: [_name, _find, _replace, _sample],
+      children: [
+        FormTextField(controller: _name, label: '名字 *', hint: '脚本名称'),
+        FormTextField(
+          controller: _find,
+          label: '查找正则 * (Dart RegExp)',
+          hint: r'如 \*([\s\S]+?)\*',
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+          onChanged: (_) => setState(() {}),
+        ),
+        FormTextField(
+          controller: _replace,
+          label: '替换为 *',
+          hint: '支持 \$1–\$9、\$& 与样式标记',
+          lines: 2,
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+          onChanged: (_) => setState(() {}),
+        ),
+        if (compiled == null)
           Padding(
             padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
             child: Text(
-              '样式标记:<i>斜体</i> <b>加粗</b> <u>下划线</u> <s>删除线</s> '
-              '<c=RRGGBB>颜色</c> <mark>高亮</mark> <chip>居中胶囊</chip>'
-              '(写在替换串里,标记本身不显示)',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: scheme.outline),
+              '正则无效:${validateRegexPattern(_find.text)}',
+              style: TextStyle(color: scheme.error, fontSize: 13),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-            child: Wrap(
-              spacing: 8,
-              children: [
-                for (final seed in kDefaultRegexScriptSeeds)
-                  ActionChip(
-                    avatar: Icon(
-                      seed.replace.startsWith('<b>')
-                          ? Icons.format_bold
-                          : seed.replace.startsWith('<chip>')
-                          ? Icons.schedule
-                          : Icons.auto_awesome,
-                      size: 16,
-                    ),
-                    label: Text('${seed.name}模板'),
-                    onPressed: () => _applyTemplate(
-                      seed.findRegex,
-                      seed.replace,
-                      _defaultSample(seed.replace),
-                    ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+          child: Text(
+            '样式标记:<i>斜体</i> <b>加粗</b> <u>下划线</u> <s>删除线</s> '
+            '<c=RRGGBB>颜色</c> <mark>高亮</mark> <chip>居中胶囊</chip>'
+            '(写在替换串里,标记本身不显示)',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: scheme.outline),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+          child: Wrap(
+            spacing: 8,
+            children: [
+              for (final seed in kDefaultRegexScriptSeeds)
+                ActionChip(
+                  avatar: Icon(
+                    seed.replace.startsWith('<b>')
+                        ? Icons.format_bold
+                        : seed.replace.startsWith('<chip>')
+                        ? Icons.schedule
+                        : Icons.auto_awesome,
+                    size: 16,
                   ),
-              ],
+                  label: Text('${seed.name}模板'),
+                  onPressed: () => _applyTemplate(
+                    seed.findRegex,
+                    seed.replace,
+                    _defaultSample(seed.replace),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        SwitchListTile(
+          title: const Text('启用'),
+          value: _enabled,
+          onChanged: (v) => setState(() => _enabled = v),
+        ),
+        const SizedBox(height: 8),
+        SectionHeader('试一试'),
+        FormTextField(
+          controller: _sample,
+          label: '示例文本',
+          lines: 3,
+          onChanged: (_) => setState(() {}),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
+              borderRadius: BorderRadius.circular(12),
             ),
-          ),
-          SwitchListTile(
-            title: const Text('启用'),
-            value: _enabled,
-            onChanged: (v) => setState(() => _enabled = v),
-          ),
-          const SizedBox(height: 8),
-          SectionHeader('试一试'),
-          FormTextField(
-            controller: _sample,
-            label: '示例文本',
-            lines: 3,
-            onChanged: (_) => setState(() {}),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: compiled == null
-                  ? Text(
-                      '修正查找正则后这里显示预览',
-                      style: TextStyle(color: scheme.outline, fontSize: 14),
-                    )
-                  : RichMessageText(
-                      key: ValueKey(
-                        'preview-${_find.text}|${_replace.text}|${_sample.text}',
-                      ),
-                      text: _sample.text,
-                      style: const TextStyle(
-                        fontSize: 15,
-                        height: 1.4,
-                        color: Colors.black,
-                      ),
-                      scripts: compiled,
+            child: compiled == null
+                ? Text(
+                    '修正查找正则后这里显示预览',
+                    style: TextStyle(color: scheme.outline, fontSize: 14),
+                  )
+                : RichMessageText(
+                    key: ValueKey(
+                      'preview-${_find.text}|${_replace.text}|${_sample.text}',
                     ),
-            ),
+                    text: _sample.text,
+                    // 预览底色跟随主题:写死黑字在深色主题下与深底叠成
+                    // 一片,预览等于不可读。
+                    style: TextStyle(
+                      fontSize: 15,
+                      height: 1.4,
+                      color: Theme.of(context).colorScheme.onSurface,
+                    ),
+                    scripts: compiled,
+                  ),
           ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

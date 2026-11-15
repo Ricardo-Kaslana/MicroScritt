@@ -4,6 +4,7 @@
 /// 另立色值与圆角,避免亮暗两套观感漂移。
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 /// 全局间距刻度(4 的倍数);布局留白从这里取,不写魔法数字。
@@ -35,6 +36,17 @@ class AppTheme {
   // 派生色过艳。
   static const Color _accent = Color(0xFF0A7CFF);
 
+  /// Windows 桌面端的默认字体。
+  ///
+  /// Windows 的 Material 字体是 Segoe UI,它没有中文字形;Flutter 在 Windows
+  /// 上的缺字回退会落到日文字体,把「门」这类字的细竖画渲染成近乎不可见的
+  /// 浅灰线(正文缺笔画)。显式指定系统自带的微软雅黑,让中文字形由字体自身
+  /// 提供;移动端继续用系统默认字体(Android Noto / iOS 苹方)。
+  static String? get _defaultFontFamily =>
+      defaultTargetPlatform == TargetPlatform.windows
+      ? 'Microsoft YaHei'
+      : null;
+
   /// 浅色主题。
   static ThemeData light() => _build(Brightness.light);
 
@@ -46,7 +58,9 @@ class AppTheme {
     final isDark = brightness == Brightness.dark;
     // iOS 分组背景:浅色 #F2F2F7 / 深色 #000000。卡片在浅色里是白、深色里是
     // surface 阶的深灰 —— 靠背景灰度差把小卡「浮」出来。
-    final groupedBg = isDark ? const Color(0xFF000000) : const Color(0xFFF2F2F7);
+    final groupedBg = isDark
+        ? const Color(0xFF000000)
+        : const Color(0xFFF2F2F7);
     final scheme = ColorScheme.fromSeed(
       seedColor: _accent,
       brightness: brightness,
@@ -54,10 +68,17 @@ class AppTheme {
       // 时是「浅墨水色块」而非大块主色,观感更现代干净(少用浓渐变/大色块)。
       surface: isDark ? const Color(0xFF1C1C1E) : const Color(0xFFFFFFFF),
       surfaceBright: isDark ? const Color(0xFF2C2C2E) : const Color(0xFFFFFFFF),
-      surfaceContainerLowest: isDark ? const Color(0xFF141414) : const Color(0xFFFFFFFF),
+      surfaceContainerLowest: isDark
+          ? const Color(0xFF141414)
+          : const Color(0xFFFFFFFF),
     );
 
-    final base = ThemeData(colorScheme: scheme, brightness: brightness, useMaterial3: true);
+    final base = ThemeData(
+      colorScheme: scheme,
+      brightness: brightness,
+      useMaterial3: true,
+      fontFamily: _defaultFontFamily,
+    );
 
     final textColor = scheme.onSurface;
     final textTheme = base.textTheme
@@ -76,6 +97,11 @@ class AppTheme {
     const cardRadius = 16.0;
     const buttonRadius = 14.0;
 
+    // 组件级文字样式(按钮 / 浮动提示 / 三点菜单)会替换 Material 默认的
+    // DefaultTextStyle,不继承 ThemeData.fontFamily;统一从这里取主题字体,
+    // 否则 Windows 中文会落到系统回退字体,出现字重/字形不一致。
+    final fontFamily = textTheme.bodyLarge?.fontFamily;
+
     return base.copyWith(
       scaffoldBackgroundColor: groupedBg,
       canvasColor: groupedBg,
@@ -91,7 +117,9 @@ class AppTheme {
         elevation: 0,
         color: scheme.surface,
         margin: EdgeInsets.zero,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(cardRadius)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(cardRadius),
+        ),
         surfaceTintColor: Colors.transparent,
         shadowColor: Colors.transparent,
       ),
@@ -105,8 +133,14 @@ class AppTheme {
         style: FilledButton.styleFrom(
           backgroundColor: scheme.primary,
           foregroundColor: scheme.onPrimary,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(buttonRadius)),
-          textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(buttonRadius),
+          ),
+          textStyle: TextStyle(
+            fontFamily: fontFamily,
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
@@ -115,10 +149,30 @@ class AppTheme {
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        contentTextStyle: const TextStyle(color: Color(0xFFFFFFFF)),
+        contentTextStyle: TextStyle(
+          fontFamily: fontFamily,
+          color: const Color(0xFFFFFFFF),
+        ),
+      ),
+      // 桌面滚动条:细圆角拇指取自主题色(静置发丝灰、悬停/拖动转主色),
+      // 与 iOS 式轻层级一致,不用系统默认的粗灰块。
+      scrollbarTheme: ScrollbarThemeData(
+        radius: const Radius.circular(4),
+        thickness: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.dragged) ? 6.0 : 4.0,
+        ),
+        thumbColor: WidgetStateProperty.resolveWith(
+          (states) =>
+              states.contains(WidgetState.hovered) ||
+                  states.contains(WidgetState.dragged)
+              ? scheme.primary.withValues(alpha: 0.55)
+              : scheme.outlineVariant,
+        ),
+        crossAxisMargin: 3,
+        mainAxisMargin: 6,
       ),
       dividerTheme: const DividerThemeData(space: 1, thickness: 0.5),
-      popupMenuTheme: _popupMenuTheme(scheme),
+      popupMenuTheme: _popupMenuTheme(scheme, fontFamily),
       bottomSheetTheme: _bottomSheetTheme(scheme),
     );
   }
@@ -126,8 +180,18 @@ class AppTheme {
   /// 三点菜单 / PopupMenu 的统一外观:与卡片同色的白面、按钮级圆角 14
   /// (输入 12 < 按钮 14 < 卡片 16)、GroupCard 同款 hairline 描边把菜单从
   /// 灰底上分出来,层级靠描边而非重阴影。
-  static PopupMenuThemeData _popupMenuTheme(ColorScheme scheme) {
-    const itemTextStyle = TextStyle(fontSize: 14, fontWeight: FontWeight.w500);
+  static PopupMenuThemeData _popupMenuTheme(
+    ColorScheme scheme,
+    String? fontFamily,
+  ) {
+    // 字体必须显式带上主题字体:PopupMenuTheme 的 labelTextStyle 会直接
+    // 覆盖 DefaultTextStyle,不继承 ThemeData.fontFamily —— 漏掉它时菜单
+    // 中文会走 Windows 的日文回退字体,与页面其它文字观感不一致。
+    final itemTextStyle = TextStyle(
+      fontSize: 14,
+      fontWeight: FontWeight.w500,
+      fontFamily: fontFamily,
+    );
     return PopupMenuThemeData(
       color: scheme.surface,
       surfaceTintColor: Colors.transparent,
@@ -138,7 +202,9 @@ class AppTheme {
       ),
       menuPadding: const EdgeInsets.symmetric(vertical: 6),
       textStyle: itemTextStyle.copyWith(color: scheme.onSurface),
-      labelTextStyle: WidgetStatePropertyAll(itemTextStyle.copyWith(color: scheme.onSurface)),
+      labelTextStyle: WidgetStatePropertyAll(
+        itemTextStyle.copyWith(color: scheme.onSurface),
+      ),
       iconColor: scheme.onSurfaceVariant,
       iconSize: 20,
     );
@@ -147,12 +213,17 @@ class AppTheme {
   /// 底部弹层统一外观:卡片白面、顶部 20 圆角(面积最大的表面配最大圆角)、
   /// 无 tint。drag handle 不在此全局开启——重型滚动 sheet(模型选择器等)自带
   /// 拖动交互,全局把手会重复;操作菜单类弹层在调用处显式开启。
+  /// 宽窗桌面封顶 640 居中(showModalBottomSheet 对受限弹层水平居中),
+  /// 不再把底单拉成整窗宽;窄于封顶的移动窗口不受影响。
   static BottomSheetThemeData _bottomSheetTheme(ColorScheme scheme) {
     return BottomSheetThemeData(
       backgroundColor: scheme.surface,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      constraints: const BoxConstraints(maxWidth: 640),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       clipBehavior: Clip.antiAlias,
     );
   }
@@ -189,7 +260,10 @@ class AppTheme {
       ),
       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
       labelStyle: TextStyle(color: scheme.onSurfaceVariant, fontSize: 14),
-      hintStyle: TextStyle(color: scheme.onSurfaceVariant.withValues(alpha: 0.7), fontSize: 14),
+      hintStyle: TextStyle(
+        color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+        fontSize: 14,
+      ),
     );
   }
 }

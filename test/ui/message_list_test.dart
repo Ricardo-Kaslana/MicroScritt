@@ -87,10 +87,11 @@ void main() {
 
       await tester.tap(find.text('hello'));
       await tester.pumpAndSettle();
-      // 助手消息:复制/编辑/删除/重新生成 4 个按钮都出现。
+      // 助手消息:复制/编辑/删除/按要求重写/重新生成 5 个按钮都出现。
       expect(find.byIcon(Icons.copy_outlined), findsOneWidget);
       expect(find.byIcon(Icons.edit_outlined), findsOneWidget);
       expect(find.byIcon(Icons.delete_outline), findsOneWidget);
+      expect(find.byIcon(Icons.edit_note), findsOneWidget);
       expect(find.byIcon(Icons.refresh), findsOneWidget);
 
       await tester.tap(find.text('hello'));
@@ -208,6 +209,7 @@ void main() {
     await tester.tap(find.byIcon(Icons.copy_outlined));
     await tester.tap(find.byIcon(Icons.edit_outlined));
     await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.tap(find.byIcon(Icons.edit_note));
     await tester.tap(find.byIcon(Icons.refresh));
     await tester.pumpAndSettle();
 
@@ -215,8 +217,64 @@ void main() {
       MessageAction.copy,
       MessageAction.edit,
       MessageAction.delete,
+      MessageAction.rewrite,
       MessageAction.regenerate,
     ]);
+  });
+
+  testWidgets('rewrite action appears only on the latest assistant reply', (
+    tester,
+  ) async {
+    const user = Message(
+      sessionId: 1,
+      role: 'user',
+      content: 'hi',
+      id: 1,
+      seq: 0,
+    );
+    const olderReply = Message(
+      sessionId: 1,
+      role: 'assistant',
+      content: 'older',
+      id: 2,
+      seq: 1,
+    );
+    const secondUser = Message(
+      sessionId: 1,
+      role: 'user',
+      content: 'again',
+      id: 3,
+      seq: 2,
+    );
+    const latestReply = Message(
+      sessionId: 1,
+      role: 'assistant',
+      content: 'latest',
+      id: 4,
+      seq: 3,
+    );
+    await tester.pumpWidget(
+      _harness(
+        messages: const [user, olderReply, secondUser, latestReply],
+        onAction: (_, _) {},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 更旧的助手回复后面还有用户消息:重写会连带剪掉它们,不提供入口。
+    await tester.tap(find.text('older'));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.edit_note), findsNothing);
+
+    // 用户消息不是重写对象。
+    await tester.tap(find.text('again'));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.edit_note), findsNothing);
+
+    // 最新一条助手回复才显示「按要求重写」。
+    await tester.tap(find.text('latest'));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.edit_note), findsOneWidget);
   });
 
   testWidgets('pure image messages offer delete and image regeneration only', (
@@ -455,7 +513,7 @@ void main() {
     expect(
       tester
           .widgetList<CircleAvatar>(find.byType(CircleAvatar))
-          .where((a) => a.backgroundImage != null)
+          .where((a) => a.foregroundImage != null)
           .length,
       1,
     );
@@ -564,7 +622,7 @@ void main() {
       expect(
         tester
             .widgetList<CircleAvatar>(find.byType(CircleAvatar))
-            .where((a) => a.backgroundImage != null)
+            .where((a) => a.foregroundImage != null)
             .length,
         1,
       );

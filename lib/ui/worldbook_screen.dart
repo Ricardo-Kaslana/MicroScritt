@@ -16,9 +16,10 @@ import 'common/confirm_dialog.dart';
 import 'common/empty_state.dart';
 import 'common/export_helper.dart';
 import 'common/form_field.dart';
+import 'common/list_page_scaffold.dart';
 import 'common/pick_file_bytes.dart';
-import 'common/searchable_list.dart';
 import 'common/section_header.dart';
+import 'common/toggle_delete_tile.dart';
 
 /// 角色的世界书管理:条目触发(关键词/常驻)后拼进上下文;从角色操作菜单
 /// 「世界书」进入,新建/编辑跳 `WorldbookEntryEditScreen`。
@@ -65,6 +66,23 @@ class WorldbookScreen extends ConsumerWidget {
     ref.invalidate(worldbookProvider(characterId));
   }
 
+  /// 拖拽排序:按松手后的列表顺序重写 position(0..n-1),条目 id 保持不变 ——
+  /// 附件去重账本以 `wb:<id>` 记账,重排不能让 id 漂移。
+  Future<bool> _reorder(
+    WidgetRef ref,
+    List<WorldbookEntry> reordered,
+  ) async {
+    final updated = [
+      for (var i = 0; i < reordered.length; i++)
+        reordered[i].copyWith(position: i),
+    ];
+    await ref
+        .read(worldbookRepositoryProvider)
+        .replaceForCharacter(characterId, updated);
+    ref.invalidate(worldbookProvider(characterId));
+    return true;
+  }
+
   Future<void> _delete(
     BuildContext context,
     WidgetRef ref,
@@ -100,13 +118,18 @@ class WorldbookScreen extends ConsumerWidget {
     WidgetRef ref,
     List<WorldbookEntry> current,
   ) async {
-    _snack(context, '正在导入…');
     try {
       final result = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['json'],
       );
-      final bytes = await pickedFileBytes(result?.files.single);
+      // 系统文件选择器只有返回键可退出(界面由系统绘制,应用无法加取消键),
+      // 返回 null 是正常的「用户取消」,不能当成读取失败。
+      if (result == null) {
+        if (context.mounted) _snack(context, '已取消导入');
+        return;
+      }
+      final bytes = await pickedFileBytes(result.files.single);
       if (bytes == null) {
         if (context.mounted) _snack(context, '导入失败:未读取到所选文件');
         return;
@@ -180,6 +203,15 @@ class WorldbookScreen extends ConsumerWidget {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
+  void _openNewEntry(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => WorldbookEntryEditScreen(characterId: characterId),
+      ),
+    );
+  }
+
   /// 文件名里不能出现路径分隔符等字符;名字为空时兜底占位。
   static String _safeFileName(String name) {
     final cleaned = name
@@ -192,121 +224,93 @@ class WorldbookScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final entries = ref.watch(worldbookProvider(characterId));
     final list = entries.value ?? const <WorldbookEntry>[];
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('世界书 · $characterName'),
-        actions: [
-          AppPopupMenuButton<String>(
-            tooltip: '更多操作',
-            onSelected: (action) {
-              switch (action) {
-                case 'import':
-                  _import(context, ref, list);
-                case 'export':
-                  _export(context, list);
-                case 'enableAll':
-                  _setAllEnabled(ref, list, true);
-                case 'disableAll':
-                  _setAllEnabled(ref, list, false);
-              }
-            },
-            actions: [
+    return ListPageScaffold<WorldbookEntry>(
+      title: '世界书 · $characterName',
+      actions: [
+        AppPopupMenuButton<String>(
+          tooltip: '更多操作',
+          onSelected: (action) {
+            switch (action) {
+              case 'import':
+                _import(context, ref, list);
+              case 'export':
+                _export(context, list);
+              case 'enableAll':
+                _setAllEnabled(ref, list, true);
+              case 'disableAll':
+                _setAllEnabled(ref, list, false);
+            }
+          },
+          actions: [
+            const MenuAction(
+              value: 'import',
+              label: '导入条目',
+              icon: Icons.file_upload_outlined,
+            ),
+            if (list.isNotEmpty) ...[
               const MenuAction(
-                value: 'import',
-                label: '导入条目',
-                icon: Icons.file_upload_outlined,
+                value: 'export',
+                label: '导出条目(JSON)',
+                icon: Icons.file_download_outlined,
               ),
-              if (list.isNotEmpty) ...[
-                const MenuAction(
-                  value: 'export',
-                  label: '导出条目(JSON)',
-                  icon: Icons.file_download_outlined,
-                ),
-                const MenuAction(
-                  value: 'enableAll',
-                  label: '全部启用',
-                  icon: Icons.done_all,
-                ),
-                const MenuAction(
-                  value: 'disableAll',
-                  label: '全部停用',
-                  icon: Icons.block,
-                ),
-              ],
+              const MenuAction(
+                value: 'enableAll',
+                label: '全部启用',
+                icon: Icons.done_all,
+              ),
+              const MenuAction(
+                value: 'disableAll',
+                label: '全部停用',
+                icon: Icons.block,
+              ),
             ],
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => WorldbookEntryEditScreen(characterId: characterId),
-          ),
+          ],
         ),
+      ],
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _openNewEntry(context),
         icon: const Icon(Icons.add),
         label: const Text('新建条目'),
       ),
-      body: entries.when(
-        data: (list) => list.isEmpty
-            ? EmptyState(
-                icon: Icons.book_outlined,
-                title: '暂无世界书条目',
-                message: '条目在消息命中关键词(或设为常驻)时拼进上下文。导入角色卡时会自动带入,也可以直接导入世界书文件。',
-                action: FilledButton.tonalIcon(
-                  onPressed: () => _import(context, ref, const []),
-                  icon: const Icon(Icons.file_upload_outlined),
-                  label: const Text('导入条目'),
-                ),
-              )
-            : SearchableList<WorldbookEntry>(
-                items: list,
-                searchHint: '搜索条目名称/关键词/内容',
-                searchText: (e) =>
-                    '${e.displayLabel} ${e.keys.join(' ')} ${e.content}',
-                itemBuilder: (context, e) => GroupCard(
-                  children: [
-                    ListTile(
-                      leading: Icon(
-                        e.constant
-                            ? Icons.anchor_outlined
-                            : Icons.menu_book_outlined,
-                      ),
-                      title: Text(
-                        e.displayLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: '删除',
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () => _delete(context, ref, list, e),
-                          ),
-                          Switch(
-                            value: e.enabled,
-                            onChanged: (_) => _toggle(ref, list, e),
-                          ),
-                        ],
-                      ),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => WorldbookEntryEditScreen(
-                            characterId: characterId,
-                            entry: e,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+      loading: entries.isLoading && !entries.hasValue,
+      error: entries.hasError && !entries.hasValue ? entries.error : null,
+      onRetry: () => ref.invalidate(worldbookProvider(characterId)),
+      items: entries.value,
+      onReorder: (reordered) => _reorder(ref, reordered),
+      reorderKey: (e) => 'wb-${e.id ?? e.position}',
+      emptyState: EmptyState(
+        icon: Icons.book_outlined,
+        title: '暂无世界书条目',
+        message: '条目在消息命中关键词(或设为常驻)时拼进上下文。导入角色卡时会自动带入,也可以直接导入世界书文件。',
+        action: FilledButton.tonalIcon(
+          onPressed: () => _openNewEntry(context),
+          icon: const Icon(Icons.add),
+          label: const Text('新建条目'),
+        ),
+      ),
+      searchHint: '搜索条目名称/关键词/内容',
+      searchText: (e) => '${e.displayLabel} ${e.keys.join(' ')} ${e.content}',
+      itemBuilder: (context, e) => GroupCard(
+        children: [
+          ToggleDeleteTile(
+            leading: Icon(
+              e.constant ? Icons.anchor_outlined : Icons.menu_book_outlined,
+            ),
+            title: e.displayLabel,
+            enabled: e.enabled,
+            onToggle: (_) => _toggle(ref, list, e),
+            onDelete: () => _delete(context, ref, list, e),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => WorldbookEntryEditScreen(
+                  characterId: characterId,
+                  entry: e,
                 ),
               ),
-        error: (e, _) =>
-            EmptyState(icon: Icons.error_outline, title: '加载失败', message: '$e'),
-        loading: () => const Center(child: CircularProgressIndicator()),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -318,8 +322,8 @@ enum _ImportMode { append, replace }
 /// 世界书条目新建/编辑屏,从 `WorldbookScreen` 的列表项或「新建条目」进入;
 /// 保存走 `replaceForCharacter`(整组重写)。
 ///
-/// 表单只覆盖名称/关键词/内容/位置与三个开关,其余 ST 匹配字段随原条目
-/// `copyWith` 原样带回。
+/// 表单只覆盖名称/关键词/内容与三个开关,其余 ST 匹配字段随原条目
+/// `copyWith` 原样带回;顺序只在列表页拖拽调整(新建条目排到末尾)。
 class WorldbookEntryEditScreen extends ConsumerStatefulWidget {
   final int characterId;
   final WorldbookEntry? entry;
@@ -339,7 +343,6 @@ class _WorldbookEntryEditScreenState
   late final TextEditingController _name;
   late final TextEditingController _keys;
   late final TextEditingController _content;
-  late final TextEditingController _position;
   late bool _useRegex;
   late bool _constant;
   late bool _enabled;
@@ -354,7 +357,6 @@ class _WorldbookEntryEditScreenState
     _name = TextEditingController(text: e?.name ?? '');
     _keys = TextEditingController(text: e?.keys.join(', ') ?? '');
     _content = TextEditingController(text: e?.content ?? '');
-    _position = TextEditingController(text: (e?.position ?? 0).toString());
     _useRegex = e?.useRegex ?? false;
     _constant = e?.constant ?? false;
     _enabled = e?.enabled ?? true;
@@ -365,7 +367,6 @@ class _WorldbookEntryEditScreenState
     _name.dispose();
     _keys.dispose();
     _content.dispose();
-    _position.dispose();
     super.dispose();
   }
 
@@ -396,6 +397,9 @@ class _WorldbookEntryEditScreenState
       final current = await ref
           .read(worldbookRepositoryProvider)
           .byCharacter(widget.characterId);
+      // 新建条目排到末尾;编辑时 position 由列表拖拽维护,保存表单不动它。
+      final nextPosition =
+          current.fold<int>(-1, (m, e) => e.position > m ? e.position : m) + 1;
       final entry =
           (widget.entry ??
                   WorldbookEntry(characterId: widget.characterId, content: ''))
@@ -407,7 +411,7 @@ class _WorldbookEntryEditScreenState
                 useRegex: _useRegex,
                 constant: _constant,
                 content: _content.text,
-                position: int.tryParse(_position.text.trim()) ?? 0,
+                position: widget.entry?.position ?? nextPosition,
                 enabled: _enabled,
               );
       final updated = _isNew
@@ -453,12 +457,6 @@ class _WorldbookEntryEditScreenState
               ),
               const SizedBox(height: 16),
               FormTextField(controller: _content, label: '内容 *', lines: 6),
-              const SizedBox(height: 16),
-              FormTextField(
-                controller: _position,
-                label: '位置',
-                keyboardType: TextInputType.number,
-              ),
             ],
           ),
           const SizedBox(height: 16),

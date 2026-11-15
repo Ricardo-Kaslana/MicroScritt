@@ -25,10 +25,13 @@ abstract class ChatControllerSession extends ChatControllerContext {
   }
 
   /// 使会话列表的消息数/末条预览失效(消息增删/清空/压缩后调用)。
+  /// 桌面侧栏读的是跨角色的 [sessionGroupsProvider],同样要失效,
+  /// 否则可见时条数与排序停在进入聊天页那一刻。
   void _invalidateSessionList() {
     final characterId = state.characterId;
     if (characterId == null || !ref.mounted) return;
     ref.invalidate(sessionInfosProvider(characterId));
+    ref.invalidate(sessionGroupsProvider);
   }
 
   /// 加载会话并原子切换聊天页状态。

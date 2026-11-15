@@ -1,8 +1,8 @@
 /// 大会话归档的保存与分享通道。
 ///
-/// 归档含完整对话、变量与图片,体积可达数百 MB:移动端先流式写临时文件,再让
-/// 用户选「保存到本地」(原生按流复制)或系统分享;桌面端写同目录 `.part` 后
-/// 原子替换,失败不留截断的目标文件。
+/// 归档含完整对话、变量与图片,体积可达数百 MB:移动端先流式写临时文件,再
+/// 按 [SessionArchiveDelivery] 交给系统另存为或分享面板;桌面端写同目录
+/// `.part` 后原子替换,失败不留截断的目标文件。
 library;
 
 import 'dart:io';
@@ -15,6 +15,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../export/session_archive_writer.dart';
+import 'chat_layout.dart';
 import 'progress_task.dart';
 
 /// 归档写入回调:把归档流式写到 [staging] 文件,支持取消。
@@ -29,14 +30,19 @@ typedef SessionArchiveBuilder =
 @visibleForTesting
 bool? debugMobileSessionExportOverride;
 
-bool get _isMobileExport =>
+/// 归档是否走移动端通道;会话菜单据此决定是否显示「分享」。
+bool get isMobileSessionExport =>
     debugMobileSessionExportOverride ?? (Platform.isAndroid || Platform.isIOS);
 
+/// 归档交付方式:保存到用户选择的位置,或交给系统分享面板(仅移动端)。
+enum SessionArchiveDelivery { save, share }
+
 /// 大会话归档的落盘通道:
-/// - Android/iOS:先流式写临时文件,再让用户选择「保存到本地」(系统另存为
-///   对话框,由原生侧按流复制)或「分享」(系统分享面板);
+/// - Android/iOS:先流式写临时文件,再按 [delivery] 交系统另存为(原生按流
+///   复制)或系统分享面板;
 /// - 桌面:`saveFile(bytes: null)` 只返回用户选择的路径(不写文件),归档
 ///   流式写到同目录 `.part` 后再 rename 替换,失败不会留下截断的目标文件。
+///   分享面板只在移动端提供,桌面端显式请求分享时回落到保存。
 ///
 /// 返回 false 表示用户取消或失败(已有 SnackBar 反馈)。
 ///
@@ -46,14 +52,13 @@ Future<bool> saveSessionArchive(
   BuildContext context, {
   required String fileName,
   required SessionArchiveBuilder build,
+  SessionArchiveDelivery delivery = SessionArchiveDelivery.save,
 }) async {
   try {
-    if (_isMobileExport) {
-      final target = await _chooseMobileTarget(context);
-      if (target == null || !context.mounted) return false;
-      return target == _MobileExportTarget.save
-          ? await _saveOnMobile(context, fileName: fileName, build: build)
-          : await _shareOnMobile(context, fileName: fileName, build: build);
+    if (isMobileSessionExport) {
+      return delivery == SessionArchiveDelivery.share
+          ? await _shareOnMobile(context, fileName: fileName, build: build)
+          : await _saveOnMobile(context, fileName: fileName, build: build);
     }
     return await _saveOnDesktop(context, fileName: fileName, build: build);
   } on SessionExportCancelled {
@@ -63,48 +68,6 @@ Future<bool> saveSessionArchive(
     _toast(context, '导出失败:$e');
     return false;
   }
-}
-
-enum _MobileExportTarget { save, share }
-
-Future<_MobileExportTarget?> _chooseMobileTarget(BuildContext context) {
-  return showModalBottomSheet<_MobileExportTarget>(
-    context: context,
-    showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      top: false,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                '导出会话',
-                style: Theme.of(sheetContext).textTheme.titleMedium,
-              ),
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.save_alt),
-            title: const Text('保存到本地'),
-            subtitle: const Text('选择设备上的位置保存 JSON 归档'),
-            onTap: () =>
-                Navigator.of(sheetContext).pop(_MobileExportTarget.save),
-          ),
-          ListTile(
-            leading: const Icon(Icons.share_outlined),
-            title: const Text('分享'),
-            subtitle: const Text('发送到其他应用,或经系统分享面板转存'),
-            onTap: () =>
-                Navigator.of(sheetContext).pop(_MobileExportTarget.share),
-          ),
-          const SizedBox(height: 8),
-        ],
-      ),
-    ),
-  );
 }
 
 Future<File?> _exportToStaging(
@@ -271,5 +234,7 @@ String _safeName(String name) => name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
 
 void _toast(BuildContext context, String message) {
   if (!context.mounted) return;
-  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(width: chatSnackBarWidth(context), content: Text(message)),
+  );
 }

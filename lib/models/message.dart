@@ -173,3 +173,22 @@ class Message {
     refId: m['ref_id'] as String?,
   );
 }
+
+/// 「按要求重写」的可重写候选:最新一条**有正文**的助手回复,其后只允许跟
+/// 图片消息(后台生图独立落库的空正文助手行)。单趟顺序扫描:遇到用户行即
+/// 作废候选(重写从目标行起整段剪断,绝不能连带剪掉其后的用户消息),遇到
+/// 有正文的助手行则刷新候选 —— 图片行不刷新也不作废。无候选(尾巴是用户
+/// 消息/全为图片行且无前置正文回复)返回 null。控制器与聊天流操作排、
+/// 长按菜单三处门控共用,保证"能不能重写"只有一把尺子。
+Message? latestRewritableAssistantReply(Iterable<Message> rows) {
+  Message? candidate;
+  for (final m in rows) {
+    if (!m.isChat || m.role == 'system') continue;
+    if (m.role == 'user') {
+      candidate = null;
+    } else if (m.content.trim().isNotEmpty) {
+      candidate = m;
+    }
+  }
+  return candidate;
+}

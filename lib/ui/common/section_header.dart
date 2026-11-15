@@ -15,7 +15,12 @@ class SectionHeader extends StatelessWidget {
   final IconData? icon;
   final EdgeInsets padding;
 
-  const SectionHeader(this.text, {super.key, this.icon, this.padding = const EdgeInsets.only(bottom: 10)});
+  const SectionHeader(
+    this.text, {
+    super.key,
+    this.icon,
+    this.padding = const EdgeInsets.only(bottom: 10),
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -36,7 +41,7 @@ class SectionHeader extends StatelessWidget {
 }
 
 /// iOS inset-grouped 风格的分组卡片:一段连续的分组,内部用 hairline 分隔条目,
-/// 整体一张白卡、14 圆角,宽度随父级。
+/// 整体一张白卡、16 圆角(与主题卡片圆角一致),宽度随父级。
 ///
 /// 传入子组件应为同一竖向分组内的 `ListTile`(或自定义行);卡片只带纵向
 /// 外边距,左右留白由页面提供。
@@ -51,7 +56,7 @@ class GroupCard extends StatelessWidget {
     required this.children,
     this.margin = const EdgeInsets.symmetric(vertical: 4),
     this.padding,
-    this.radius = const BorderRadius.all(Radius.circular(14)),
+    this.radius = const BorderRadius.all(Radius.circular(16)),
   });
 
   @override
@@ -64,7 +69,9 @@ class GroupCard extends StatelessWidget {
         color: scheme.surface,
         borderRadius: radius,
         // 弱化阴影,用 hairline 描边把分组从灰底上分出来,层级干净。
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.45)),
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.45),
+        ),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -110,7 +117,9 @@ class SurfaceCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: scheme.surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.45)),
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.45),
+        ),
       ),
       child: child,
     );

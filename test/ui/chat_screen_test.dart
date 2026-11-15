@@ -15,10 +15,12 @@ import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/memory_repository.dart';
 import 'package:microscritt/data/message_repository.dart';
 import 'package:microscritt/data/session_repository.dart';
+import 'package:microscritt/engine/background_status.dart';
 import 'package:microscritt/engine/hook_runtime.dart';
 import 'package:microscritt/models/app_settings.dart';
 import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/models/image_result.dart';
+import 'package:microscritt/models/message.dart';
 import 'package:microscritt/models/user.dart';
 import 'package:microscritt/state/chat_controller.dart';
 import 'package:microscritt/state/providers.dart';
@@ -122,6 +124,32 @@ class _QueuedWidgetBackend implements LlmBackend {
   }
 }
 
+/// 记录主写请求的假后端:后台请求返回可解析的空状态,主写逐轮返回不同文本;
+/// 「按要求重写」用例据此断言临时要求与旧稿确实进入了当次请求。
+class _RewriteWidgetBackend implements LlmBackend {
+  final requests = <LlmRequest>[];
+  int mainCalls = 0;
+
+  @override
+  String get id => 'rewrite-widget';
+
+  @override
+  Stream<LlmEvent> generate(LlmRequest request) {
+    if (request.systemPrompt.contains('<background_task>')) {
+      return Stream.fromIterable(const [
+        TextDelta('{"variables":{}}'),
+        DoneEvent(),
+      ]);
+    }
+    requests.add(request);
+    mainCalls++;
+    return Stream.fromIterable([
+      TextDelta('reply $mainCalls'),
+      DoneEvent(),
+    ]);
+  }
+}
+
 /// 生图挂起直到 [release] 放行:模拟真实云端慢生图(后台轮早已 succeeded,
 /// 图片才姗姗落库)—— 生图与轮次解耦后图片就绪得最晚的那条路径。
 class _WidgetGatedImageBackend implements ImageBackend {
@@ -186,11 +214,13 @@ void main() {
     ));
     await _settleChat(tester);
     await tester.enterText(find.byType(TextField), 'first');
+    await tester.pump(); // 发送键在文本变化后随下一帧启用
     await tester.runAsync(() => tester.tap(find.byTooltip('发送')));
     await _pumpUntil(tester, () => backend.backgroundCalls == 1);
     expect(find.byTooltip('发送'), findsOneWidget);
     expect(find.byTooltip('中断生成'), findsNothing);
     await tester.enterText(find.byType(TextField), 'second');
+    await tester.pump();
     await tester.runAsync(() => tester.tap(find.byTooltip('发送')));
     final container = ProviderScope.containerOf(tester.element(find.byType(ChatScreen)));
     await _pumpUntil(tester, () =>
@@ -387,7 +417,7 @@ void main() {
           matching: find.byType(CircleAvatar),
         ),
       );
-      await _pumpUntil(tester, () => appbarAvatar().backgroundImage != null);
+      await _pumpUntil(tester, () => appbarAvatar().foregroundImage != null);
 
       await tester.runAsync(() => db.db.close());
     },
@@ -737,8 +767,10 @@ void main() {
     double chipWidth() =>
         tester.getSize(find.byKey(const ValueKey('model_selector'))).width;
 
+    // 1150:宽窗居中列布局,但在 1200 的侧栏阈值之下 —— 本用例只守输入行,
+    // 不引入侧栏占位(侧栏布局由 chat_sidebar_test 覆盖)。
     tester.view
-      ..physicalSize = const Size(1280, 800)
+      ..physicalSize = const Size(1150, 800)
       ..devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
@@ -755,7 +787,7 @@ void main() {
     );
     await _settleChat(tester);
     // 宽行:chip 不再定宽 280,而是按模型名自适应收窄,与使用率圆环一起靠右;
-    // 推理徽标(if any)紧贴 chip 右侧。输入区整体封顶 760 居中,不再拉满聊天区。
+    // 推理徽标(if any)紧贴 chip 右侧。输入区与会话列同宽收敛,不再拉满聊天区。
     expect(chipWidth(), lessThan(280.0), reason: '宽行 chip 应按模型名自适应,不再定宽 280');
     final ringLeft = tester.getTopLeft(find.byType(ContextUsageRing)).dx;
     final chipRight = tester
@@ -763,14 +795,19 @@ void main() {
         .dx;
     expect(ringLeft - chipRight, closeTo(6, 0.5), reason: 'chip 应右靠且紧贴右侧组件组');
     final fieldRight = tester.getTopRight(find.byType(TextField)).dx;
-    expect(fieldRight, lessThan(1024.0), reason: '输入框应封顶 760 居中,右侧留出大片空白');
+    expect(fieldRight, lessThan(1024.0), reason: '输入框与会话列同宽收敛,右侧留出留白');
 
     tester.view
       ..physicalSize = const Size(390, 844)
       ..devicePixelRatio = 1.0;
     await tester.pumpAndSettle();
-    // 窄行(手机)布局不变:chip 吃满中段剩余宽度(收缩省略),全宽铺满。
-    expect(chipWidth(), greaterThan(120), reason: '窄屏 chip 应吃满中段剩余宽度');
+    // 窄行(手机):chip 按模型名收缩省略,不再定宽撑满中段;右侧组件组
+    // (chip → 圆环 → 发送键)依旧贴边,输入框继续占满整行。
+    expect(chipWidth(), greaterThan(80), reason: '窄屏 chip 仍完整显示模型名');
+    expect(chipWidth(), lessThan(280), reason: 'chip 不再定宽 280 撑满中段');
+    final narrowRingLeft = tester.getTopLeft(find.byType(ContextUsageRing)).dx;
+    final narrowChipRight = tester.getTopRight(find.byKey(const ValueKey('model_selector'))).dx;
+    expect(narrowRingLeft - narrowChipRight, closeTo(6, 0.5), reason: '窄屏 chip 仍紧贴右侧组件组');
     final narrowFieldRight = tester.getTopRight(find.byType(TextField)).dx;
     expect(narrowFieldRight, greaterThan(390 - 24), reason: '窄屏输入框仍占满整行');
   });
@@ -930,7 +967,7 @@ void main() {
       matching: find.byType(CircleAvatar),
     );
     expect(userAvatar, findsOneWidget);
-    expect(tester.widget<CircleAvatar>(userAvatar).backgroundImage, isNull);
+    expect(tester.widget<CircleAvatar>(userAvatar).foregroundImage, isNull);
     expect(
       find.descendant(of: userAvatar, matching: find.byIcon(Icons.person)),
       findsOneWidget,
@@ -947,6 +984,118 @@ void main() {
       ),
     );
     expect(sheetAvatar.foregroundImage, isNull);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('按要求重写:要求只进当次请求并替换最新回复', (tester) async {
+    late final AppDatabase db;
+    late final int charId;
+    late final int sessionId;
+    late final _RewriteWidgetBackend backend;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      backend = _RewriteWidgetBackend();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's');
+      await MessageRepository(
+        db,
+      ).append(sessionId: sessionId, role: 'user', content: 'hi');
+      await MessageRepository(
+        db,
+      ).append(sessionId: sessionId, role: 'assistant', content: 'old reply');
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          databaseProvider.overrideWithValue(db),
+          backendConfigProvider.overrideWith(
+            (ref) => const BackendConfig(
+              provider: BackendProvider.openai,
+              baseUrl: 'http://127.0.0.1',
+              apiKey: 'test',
+              model: 'test',
+            ),
+          ),
+          backendProvider.overrideWith((ref) => backend),
+          hookRuntimeProvider.overrideWith((ref) => _NoopHookRuntime()),
+        ],
+        child: MaterialApp(
+          home: ChatScreen(
+            sessionId: sessionId,
+            characterId: charId,
+            character: const CharacterCard(name: 'Alice'),
+          ),
+        ),
+      ),
+    );
+    await _settleChat(tester);
+    await _pumpUntil(
+      tester,
+      () => find.text('old reply').evaluate().isNotEmpty,
+    );
+
+    // 选中最新助手气泡 → 操作排「按要求重写」→ 底单输入修改要求。
+    await tester.tap(find.text('old reply'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('按要求重写'));
+    await tester.pumpAndSettle();
+    final sheetField = find.descendant(
+      of: find.byType(BottomSheet),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(sheetField, '更短一些');
+    await tester.pump();
+    await tester.tap(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('重写'),
+      ),
+    );
+
+    await _pumpUntil(tester, () => backend.requests.isNotEmpty);
+    await _pumpUntil(
+      tester,
+      () => find.text('reply 1').evaluate().isNotEmpty,
+    );
+
+    // 修改要求与旧稿随当次请求发出;旧回复被新回复替换,要求不落库。
+    final sent = backend.requests.single.messages
+        .map((m) => m.content)
+        .join('\n');
+    expect(sent, contains('更短一些'));
+    expect(sent, contains('old reply'));
+    // 流式草稿先出现,落库与后台收敛在流结束之后:轮询到消息落库、主写停止
+    // 且后台轮不再运行,再销毁控制器,避免销毁期还有在飞去写状态。
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ChatScreen)),
+    );
+    var rows = <Message>[];
+    for (var i = 0; i < 200; i++) {
+      await tester.runAsync(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        rows = await MessageRepository(db).bySession(sessionId);
+      });
+      await tester.pump();
+      final chat = container.read(chatControllerProvider);
+      if (rows.length >= 2 &&
+          !chat.streaming &&
+          chat.messages.length >= 2 &&
+          chat.backgroundStatus != BackgroundStatus.running) {
+        break;
+      }
+    }
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+    expect(rows.map((m) => m.role).toList(), ['user', 'assistant']);
+    expect(rows.last.content, 'reply 1');
+    expect(rows.any((m) => m.content.contains('更短一些')), isFalse);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.runAsync(() => db.db.close());

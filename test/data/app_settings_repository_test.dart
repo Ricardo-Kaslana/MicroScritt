@@ -191,4 +191,28 @@ void main() {
     await db.db.update('app_settings', {'max_auto_attachments': -3}, where: 'id = 1');
     expect((await repo.load()).maxAutoAttachments, 5);
   });
+
+  test('roundtrips the auto compact threshold (default 60%)', () async {
+    // 未保存过 → 默认 60%,与历史硬编码软挡一致。
+    expect((await repo.load()).autoCompactThreshold, 0.60);
+
+    await repo.save(const AppSettings(autoCompactThreshold: 0.85));
+    expect((await repo.load()).autoCompactThreshold, 0.85);
+
+    // 越界/脏值读入回落默认,坏值不阻断启动。
+    await db.db.update('app_settings', {'auto_compact_threshold': 1.5}, where: 'id = 1');
+    expect((await repo.load()).autoCompactThreshold, 0.60);
+    await db.db.update('app_settings', {'auto_compact_threshold': 0.1}, where: 'id = 1');
+    expect((await repo.load()).autoCompactThreshold, 0.60);
+    await db.db.update('app_settings', {'auto_compact_threshold': 'oops'}, where: 'id = 1');
+    expect((await repo.load()).autoCompactThreshold, 0.60);
+
+    // Slider 浮点尾差不按越界处理:归一到两位小数后仍是合法值。
+    await db.db.update(
+      'app_settings',
+      {'auto_compact_threshold': 0.9000000000000001},
+      where: 'id = 1',
+    );
+    expect((await repo.load()).autoCompactThreshold, 0.90);
+  });
 }

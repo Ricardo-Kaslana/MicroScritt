@@ -4,7 +4,12 @@ part of 'chat_controller.dart';
 
 /// 斜杠命令:/test /continue /clear /compact /rerun 与压缩用量记账。
 abstract class ChatControllerCommands extends ChatControllerPipeline {
-  /// 执行一个快捷命令(斜杠输入或命令按钮共用)。
+  /// 消费一次性瞬态通知([ChatState.notice]):UI 闪示后调用,避免重复展示。
+  void clearNotice() {
+    if (state.notice != null) state = state.copyWith(notice: null);
+  }
+
+  /// 执行一个快捷命令(发送端斜杠命令,命令按钮填入输入框后同样走这里)。
   /// [args] 是命令名之后的文本,当前仅 `/rerun` 消费为修改方向。
   /// 忙碌期拒绝并给出可见错误;返回一段给 UI 展示的反馈文本
   /// (null 表示无需提示)。
@@ -29,6 +34,29 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
       case SlashCommand.rerun:
         return _runRerun(args);
     }
+  }
+
+  /// 空会话从一条开场白起笔:把用户选中的开场白作为助手首条消息落库,
+  /// 不发 LLM 请求。仅在会话仍为空、无生成/耗时命令时接受;返回是否写入。
+  Future<bool> startWithGreeting(String content) async {
+    final sessionId = state.sessionId;
+    final text = content.trim();
+    if (sessionId == null ||
+        text.isEmpty ||
+        state.streaming ||
+        _busy ||
+        state.messages.any((m) => m.role != 'system' && m.isChat)) {
+      return false;
+    }
+    await ref
+        .read(messageRepositoryProvider)
+        .append(sessionId: sessionId, role: 'assistant', content: text);
+    await _refreshMessages();
+    // 历史从空到一条:上下文面板与圆环立即跟上,不必等下一轮发送。
+    // 上轮真实输入计数对新上下文已失效,圆环退回估算。
+    state = state.copyWith(lastSentInputTokens: null);
+    await _reassembleContext();
+    return true;
   }
 
   /// `/test`:追加一条测试消息走生成,验证 LLM 链路。
@@ -96,7 +124,7 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
   }
 
   /// `/compact`:主动压缩历史(比自动阈值更激进,保留最近若干条并做摘要)。
-  /// 返回给 UI 展示的成功反馈文本;无操作时置 error。
+  /// 返回给 UI 展示的成功反馈文本;无操作或失败时置 error。
   Future<String?> _runCompact() async {
     final sessionId = state.sessionId;
     final backend = ref.read(backendProvider);
@@ -113,33 +141,52 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
     // 的话活动态要等事件循环推进才可见(tap 后首帧不出「压缩中」)。
     state = state.copyWith(busyCommand: 'compact');
 
-    // 压缩前统计待压缩的活跃消息数,用于给用户可见的"压缩成功"反馈。
-    // 窗口读即可:显示口径与活跃计数都只关心尾部窗口,此前为一个数字
-    // 全量读了整条会话(超长会话一次搬全部行)。
     final messageRepo = ref.read(messageRepositoryProvider);
-    final before = await messageRepo.bySessionSince(
-      sessionId,
-      sinceSeq: _windowFloor,
-    );
-    final activeBefore = before
-        .where((m) => m.role != 'system' && !m.isCompacted)
-        .length;
-
-    final done = await CompactService(backend, messageRepo).compact(
-      sessionId: sessionId,
-      model: config.model,
-      keep: 6,
-      onUsage: _accumulateCompactUsage,
-      stripSkillNames: await enabledSkillNames(),
-      cancelSignal: token.whenCancelled,
-    );
-    final interrupted = token.cancelled;
-    if (ref.mounted) state = state.copyWith(busyCommand: null);
+    var done = false;
+    var failed = false;
+    var activeBefore = 0;
+    try {
+      // 压缩前统计待压缩的活跃消息数,用于给用户可见的"压缩成功"反馈。
+      // 窗口读即可:显示口径与活跃计数都只关心尾部窗口,此前为一个数字
+      // 全量读了整条会话(超长会话一次搬全部行)。
+      final before = await messageRepo.bySessionSince(
+        sessionId,
+        sinceSeq: _windowFloor,
+      );
+      activeBefore = before
+          .where((m) => m.role != 'system' && !m.isCompacted)
+          .length;
+      done = await CompactService(backend, messageRepo).compact(
+        sessionId: sessionId,
+        model: config.model,
+        keep: 6,
+        onUsage: _accumulateCompactUsage,
+        stripSkillNames: await enabledSkillNames(),
+        cancelSignal: token.whenCancelled,
+      );
+    } catch (_) {
+      // 命令内联的 DB/网络异常不能让 busyCommand 永久停留在「压缩中」
+      // (旧实现没有 try/finally,事务抛错后灵动岛与发送键会一直卡住)。
+      failed = true;
+    } finally {
+      if (ref.mounted) state = state.copyWith(busyCommand: null);
+    }
     if (!ref.mounted) return null;
+    final interrupted = token.cancelled;
+    if (failed) {
+      state = state.copyWith(error: '压缩失败(未生成摘要,历史保持原样)');
+      return null;
+    }
     if (done) {
-      // 手动压缩同样走通知 + 记忆刷新:下一次用户输入注入压缩 system-reminder,
-      // 第 0 条记忆换成库中最新版(压缩是缓存断点,顺带刷新不伤缓存)。
-      _compactNoticePending = true;
+      // 立即落库压缩通知,而不是等到下一次用户输入:通知属于"压缩后的第一次
+      // 组装",延迟发送会在切换会话时丢失(`load` 会清空待发标志)。通知行由
+      // 组装期的位置校正排在所属用户消息之前。
+      try {
+        await _persistCompactNotice(sessionId);
+      } catch (_) {
+        // 通知是辅助信息:写入失败不影响已完成的摘要压缩。
+      }
+      // 压缩是缓存断点,顺带把第 0 条记忆换成库中最新版。
       await _refreshFrozenMemory(sessionId);
       // 历史被压缩改写且本命令不生成 —— 上轮实际计数对压缩后的请求失效,
       // 圆环退回估算,下一轮发送后重新锚定。

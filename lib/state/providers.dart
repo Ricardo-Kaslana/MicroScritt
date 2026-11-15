@@ -154,6 +154,14 @@ final characterLayoutProvider = StateProvider<CharacterLayout>(
   (ref) => CharacterLayout.list,
 );
 
+/// 桌面聊天页侧栏是否折叠:main() 按 [UiPrefsFile] 恢复,聊天页切换时
+/// 回写文件(与角色布局共用同一份偏好文件,写入时互相保留对方字段)。
+final sidebarCollapsedProvider = StateProvider<bool>((ref) => false);
+
+/// 牌堆布局当前正面的角色 id:main() 按 [UiPrefsFile] 恢复,翻牌时回写
+/// 文件;角色被删除/过滤后由牌堆按当前列表回落。
+final deckFrontCharacterIdProvider = StateProvider<int?>((ref) => null);
+
 /// Hook 的 JS 运行时。main() 注入真实实现;测试默认 null,
 /// 此时 Hook 求值被跳过(不执行任何 JS)。
 final hookRuntimeProvider = Provider<HookRuntime?>((ref) => null);
@@ -190,6 +198,12 @@ final appSettingsProvider = StateProvider<AppSettings>(
 final userProfileProvider = StateProvider<UserProfile>(
   (ref) => const UserProfile(),
 );
+
+/// 本次运行内用户手动关闭过「初始化记忆」提示条的会话集合。
+///
+/// 只存内存:同一会话重复进入不再打扰;重启应用后若记忆仍为空会重新提醒
+/// (不为一条提示条改数据库 schema)。
+final memoryInitDismissedProvider = StateProvider<Set<int>>((ref) => const {});
 
 /// 后台 agent(每轮状态维护)启用开关,随 AppSettings 持久化。
 /// 读取 appSettingsProvider 派生;UI 切换时经 [persistBackgroundEnabled] 写回设置并落库。
@@ -365,6 +379,51 @@ final sessionInfosProvider = FutureProvider.family<List<SessionInfo>, int>(
   (ref, characterId) =>
       ref.watch(sessionRepositoryProvider).infosByCharacter(characterId),
 );
+
+/// 桌面会话侧栏的一组:一个角色卡与其全部会话(组内按最近活动倒序)。
+class SessionGroup {
+  final CharacterRecord character;
+  final List<SessionInfo> sessions;
+  const SessionGroup(this.character, this.sessions);
+}
+
+/// 全部会话按角色卡分组(桌面宽窗侧栏)。
+///
+/// 组序:有会话的角色按各自最近活动排前([SessionInfo] 查询已按活动倒序,
+/// 首次出现即组序),尚无会话的角色按角色列表顺序排在后面 —— 每组的
+/// 「新建会话」入口因此对空角色同样可用。
+///
+/// 角色数据直接读仓库,刻意**不** watch `charactersProvider(.future)`:
+/// Riverpod 3.3.2 在 TickerMode 恢复被暂停的订阅时会 flush 被 watch 的
+/// provider,provider 之间的异步依赖会在 widget build 期间触发
+/// `scheduleRefresh` → `setState during build`(riverpod#4805,3.4+ 才修,
+/// 其 Dart SDK 要求高于本项目)。角色增删改的各入口负责显式失效本
+/// provider(见角色列表/编辑页的 `charactersProvider` 失效点)。
+final sessionGroupsProvider = FutureProvider<List<SessionGroup>>((ref) async {
+  final characters = await ref
+      .watch(characterRepositoryProvider)
+      .all(hydrateOversized: true);
+  final infos = await ref.watch(sessionRepositoryProvider).infosAll();
+  final byCharacter = <int, List<SessionInfo>>{};
+  for (final info in infos) {
+    (byCharacter[info.characterId] ??= []).add(info);
+  }
+  final recordById = {for (final c in characters) c.id: c};
+  final groups = <SessionGroup>[];
+  final placed = <int>{};
+  for (final info in infos) {
+    if (!placed.add(info.characterId)) continue;
+    final record = recordById[info.characterId];
+    if (record == null) continue;
+    groups.add(SessionGroup(record, byCharacter[info.characterId]!));
+  }
+  for (final record in characters) {
+    if (!placed.contains(record.id)) {
+      groups.add(SessionGroup(record, const []));
+    }
+  }
+  return groups;
+});
 
 /// 全局提示词项列表(管理页)。
 final promptItemsProvider = FutureProvider<List<PromptItem>>(

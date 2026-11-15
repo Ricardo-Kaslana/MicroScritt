@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/disk_image_cache.dart';
 import 'package:microscritt/models/message.dart';
 import 'package:microscritt/ui/skill_highlight.dart';
+import 'package:microscritt/ui/text_syntax.dart';
 import 'package:microscritt/ui/widgets/message_bubble.dart';
 import 'package:microscritt/ui/widgets/message_list.dart';
 
@@ -282,7 +283,7 @@ void main() {
     );
     final width = tester.getSize(find.byWidget(container)).width;
     expect(width, lessThanOrEqualTo(520 + 24 + 0.5)); // 520 上限 + 左右 12 边距
-    expect(width, lessThan(760));
+    expect(width, lessThan(880)); // 远窄于助手上限(与输入卡同宽 856 + 边距)
   });
 
   testWidgets('secondary tap (right-click, desktop) invokes the callback', (tester) async {
@@ -305,7 +306,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    // 短消息:按内容自适应,远小于桌面上限 784。
+    // 短消息:按内容自适应,远小于桌面上限 880。
     const short = Message(sessionId: 1, role: 'assistant', content: 'hi', seq: 0);
     await tester.pumpWidget(const MaterialApp(home: Scaffold(body: MessageBubble(message: short))));
     final shortBox = tester.widget<Container>(
@@ -315,17 +316,17 @@ void main() {
     expect(shortWidth, lessThan(400));
     expect(shortWidth, greaterThan(0));
 
-    // 长文本:被封顶在桌面助手上限 760(含左右 12 边距 = 784)。
-    final longText = '这是一条非常长的助手消息,用于验证桌面端助手气泡在内容超出时封顶在 760 上限,而不是无限撑开。' * 8;
+    // 长文本:被封顶在与输入卡同宽的 856(含左右 12 边距 = 880)。
+    final longText = '这是一条非常长的助手消息,用于验证桌面端助手气泡在内容超出时封顶在与输入卡同宽的上限,而不是无限撑开。' * 8;
     final long = Message(sessionId: 1, role: 'assistant', content: longText, seq: 1);
     await tester.pumpWidget(MaterialApp(home: Scaffold(body: MessageBubble(message: long))));
     final longBox = tester.widget<Container>(
       find.ancestor(of: find.textContaining('这是一条非常长'), matching: find.byType(Container)).first,
     );
-    expect(tester.getSize(find.byWidget(longBox)).width, 784);
+    expect(tester.getSize(find.byWidget(longBox)).width, 880);
   });
 
-  testWidgets('user bubble stays at normal width on a desktop surface (not stretched to 760)', (tester) async {
+  testWidgets('user bubble stays at normal width on a desktop surface (not stretched to the assistant cap)', (tester) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -341,19 +342,19 @@ void main() {
     final container = tester.widget<Container>(
       find.ancestor(of: find.text('hi'), matching: find.byType(Container)).first,
     );
-    // 用户气泡不强制撑到 760(助手那档),而是按内容自适应、最多 520。
+    // 用户气泡不跟助手一起撑到输入卡同宽,而是按内容自适应、最多 520。
     final width = tester.getSize(find.byWidget(container)).width;
-    expect(width, lessThan(760));
+    expect(width, lessThan(880));
     expect(width, lessThanOrEqualTo(520 + 24 + 0.5)); // 520 上限 + 左右 12 边距
   });
 
-  testWidgets('assistant bubble caps wider than the user bubble on desktop (760 vs 520)', (tester) async {
+  testWidgets('assistant bubble caps at the input width, wider than the user bubble (856 vs 520)', (tester) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    // 用同样长的长文本:用户封顶 520、助手封顶 760,助手明显更宽。
+    // 用同样长的长文本:用户封顶 520、助手封顶与输入卡同宽的 856,助手明显更宽。
     final longText = '这是一条非常非常长的消息,用来验证桌面端助手与用户气泡在内容超出时各自封顶在不同的最大宽度。' * 8;
     final user = Message(sessionId: 1, role: 'user', content: longText, seq: 0);
     final ai = Message(sessionId: 1, role: 'assistant', content: longText, seq: 1);
@@ -376,7 +377,7 @@ void main() {
     final aiWidth = tester
         .getSize(find.ancestor(of: find.textContaining('这是一条非常非常长').last, matching: find.byType(Container)).first)
         .width;
-    expect(aiWidth, closeTo(784, 0.5)); // 助手封顶 760 + 边距
+    expect(aiWidth, closeTo(880, 0.5)); // 助手封顶 856(与输入卡同宽)+ 边距
     expect(userWidth, lessThan(aiWidth)); // 用户封顶更窄(520)
     expect(userWidth, lessThanOrEqualTo(520 + 24 + 0.5));
   });
@@ -492,7 +493,7 @@ void main() {
   });
 
   testWidgets('a wide image still fills the bubble width on desktop (no needless shrink)', (tester) async {
-    // 2:1 横图:自然高 732/2 = 366 < 520 上限 → 维持满宽,只是不再裁切。
+    // 2:1 横图:自然高 826/2 = 413 < 520 上限 → 维持满宽,只是不再裁切。
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -508,8 +509,8 @@ void main() {
     });
 
     final size = tester.getSize(find.byType(RawImage));
-    expect(size.width, closeTo(732, 2)); // 满气泡内容宽
-    expect(size.height, closeTo(366, 2)); // 2:1 比例
+    expect(size.width, closeTo(826, 2)); // 满气泡内容宽(输入卡同宽 856 − 内边距/描边)
+    expect(size.height, closeTo(413, 2)); // 2:1 比例
   });
 
   testWidgets('a tall portrait image keeps its shape on mobile (no side letterbox)', (tester) async {
@@ -868,24 +869,119 @@ void main() {
     expect(find.textContaining('正文内容', findRichText: true), findsOneWidget);
   });
 
-  testWidgets('user bubble renders @skill tokens in the token color', (tester) async {
+  testWidgets('user bubble renders style tags and chips instead of folding', (
+    tester,
+  ) async {
     const msg = Message(
       sessionId: 1,
       role: 'user',
-      content: '@剑术 我拔剑了',
+      content: '前<b>粗</b>后<chip>时间</chip>',
       seq: 0,
     );
     await tester.pumpWidget(
-      const MaterialApp(
+      const MaterialApp(home: Scaffold(body: MessageBubble(message: msg))),
+    );
+
+    final spans = <TextSpan>[];
+    void collect(InlineSpan span) {
+      if (span is! TextSpan) return;
+      if (span.text != null) spans.add(span);
+      span.children?.forEach(collect);
+    }
+    for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+      collect(rt.text);
+    }
+
+    // <b> 走行内样式而不是 hook 便签;chip 走胶囊而不是折叠块。
+    expect(
+      spans.firstWhere((s) => s.text == '粗').style?.fontWeight,
+      FontWeight.bold,
+    );
+    expect(find.text('时间'), findsOneWidget);
+    expect(find.textContaining('<b>', findRichText: true), findsNothing);
+    expect(find.textContaining('<chip>', findRichText: true), findsNothing);
+  });
+
+  testWidgets('foldable note body highlights skill and command tokens', (
+    tester,
+  ) async {
+    const msg = Message(
+      sessionId: 1,
+      role: 'user',
+      content: '<note>说明\n@剑术 /rerun 正文</note>',
+      seq: 0,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
         home: Scaffold(
-          body: MessageBubble(message: msg, skillNames: {'剑术'}),
+          body: MessageBubble(
+            message: msg,
+            syntax: CompiledSyntax.compile(skillNames: {'剑术'}),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.textContaining('正文', findRichText: true), findsNothing);
+    await tester.tap(find.text('说明'));
+    await tester.pumpAndSettle();
+
+    final element = tester.element(find.byType(MessageBubble));
+    final scheme = Theme.of(element).colorScheme;
+    final palette = SyntaxPalette.of(
+      scheme,
+      SyntaxSurface.userBubble,
+      baseTextColor: scheme.onPrimary,
+    );
+    final spans = <TextSpan>[];
+    void collect(InlineSpan span) {
+      if (span is! TextSpan) return;
+      if (span.text != null) spans.add(span);
+      span.children?.forEach(collect);
+    }
+    for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+      collect(rt.text);
+    }
+
+    final skill = spans.where((s) => s.text == '@剑术').toList();
+    expect(skill, hasLength(1));
+    expect(
+      skill.single.style?.color,
+      skillTokenColor(scheme, onPrimaryBubble: true),
+    );
+    final command = spans.where((s) => s.text == '/rerun').toList();
+    expect(command, hasLength(1));
+    expect(command.single.style?.color, palette.command);
+    expect(command.single.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('user bubble highlights skill and command tokens', (
+    tester,
+  ) async {
+    const msg = Message(
+      sessionId: 1,
+      role: 'user',
+      content: '@剑术 /rerun 我拔剑了',
+      seq: 0,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageBubble(
+            message: msg,
+            syntax: CompiledSyntax.compile(skillNames: {'剑术'}),
+          ),
         ),
       ),
     );
 
     final element = tester.element(find.byType(MessageBubble));
     final scheme = Theme.of(element).colorScheme;
-    final expected = skillTokenColor(scheme, onPrimaryBubble: true);
+    final palette = SyntaxPalette.of(
+      scheme,
+      SyntaxSurface.userBubble,
+      baseTextColor: scheme.onPrimary,
+    );
 
     // 收集气泡内全部富文本叶 span。
     final spans = <TextSpan>[];
@@ -898,30 +994,51 @@ void main() {
       collect(rt.text);
     }
 
-    // 记号段染记号色:与共享选色助手一致(蓝底上取紫色对比色),且与白字正文可区分。
-    final colored = spans.where((s) => s.text == '@剑术').toList();
-    expect(colored, hasLength(1));
-    expect(colored.single.style?.color, expected);
-    expect(colored.single.style?.color, isNot(scheme.onPrimary));
+    // 技能段沿用蓝底紫色对比色;命令名单独染色并加粗。
+    final skill = spans.where((s) => s.text == '@剑术').toList();
+    expect(skill, hasLength(1));
+    expect(
+      skill.single.style?.color,
+      skillTokenColor(scheme, onPrimaryBubble: true),
+    );
+    final command = spans.where((s) => s.text == '/rerun').toList();
+    expect(command, hasLength(1));
+    expect(command.single.style?.color, palette.command);
+    expect(command.single.style?.fontWeight, FontWeight.w600);
     // 记号外的正文仍是气泡正文色。
-    final plain = spans.where((s) => s.text?.contains('我拔剑了') ?? false).toList();
+    final plain = spans
+        .where((s) => s.text?.contains('我拔剑了') ?? false)
+        .toList();
     expect(plain, hasLength(1));
     expect(plain.single.style?.color, scheme.onPrimary);
   });
 
-  testWidgets('assistant bubble does not highlight @skill tokens', (tester) async {
+  testWidgets('assistant bubble highlights skill and command tokens', (
+    tester,
+  ) async {
     const msg = Message(
       sessionId: 1,
       role: 'assistant',
-      content: '@剑术 你拔剑了',
+      content: '@剑术 /rerun 你拔剑了',
       seq: 0,
     );
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
         home: Scaffold(
-          body: MessageBubble(message: msg, skillNames: {'剑术'}),
+          body: MessageBubble(
+            message: msg,
+            syntax: CompiledSyntax.compile(skillNames: {'剑术'}),
+          ),
         ),
       ),
+    );
+
+    final element = tester.element(find.byType(MessageBubble));
+    final scheme = Theme.of(element).colorScheme;
+    final palette = SyntaxPalette.of(
+      scheme,
+      SyntaxSurface.assistantBubble,
+      baseTextColor: scheme.onSurface,
     );
 
     final spans = <TextSpan>[];
@@ -934,8 +1051,16 @@ void main() {
       collect(rt.text);
     }
 
-    // 助手气泡不拆分记号:整条正文是单个原色段,无独立染色记号段。
-    expect(spans.where((s) => s.text == '@剑术'), isEmpty);
-    expect(spans.where((s) => s.text?.contains('你拔剑了') ?? false), hasLength(1));
+    final skill = spans.where((s) => s.text == '@剑术').toList();
+    expect(skill, hasLength(1));
+    expect(skill.single.style?.color, palette.skill);
+    final command = spans.where((s) => s.text == '/rerun').toList();
+    expect(command, hasLength(1));
+    expect(command.single.style?.color, palette.command);
+    expect(command.single.style?.fontWeight, FontWeight.w600);
+    expect(
+      spans.where((s) => s.text?.contains('你拔剑了') ?? false),
+      hasLength(1),
+    );
   });
 }

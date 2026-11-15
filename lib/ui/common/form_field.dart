@@ -57,6 +57,9 @@ class FormTextField extends StatelessWidget {
   final Key? innerKey;
   final bool? copyable;
 
+  /// 外部焦点节点:校验失败时用于把焦点/视口带回该字段。
+  final FocusNode? focusNode;
+
   const FormTextField({
     super.key,
     required this.controller,
@@ -71,6 +74,7 @@ class FormTextField extends StatelessWidget {
     this.suffixIcon,
     this.innerKey,
     this.copyable,
+    this.focusNode,
   });
 
   @override
@@ -94,6 +98,7 @@ class FormTextField extends StatelessWidget {
           TextField(
             key: innerKey ?? ValueKey('field_$label'),
             controller: controller,
+            focusNode: focusNode,
             obscureText: obscureText,
             minLines: minLines ?? lines,
             maxLines: lines > 1 ? null : 1,

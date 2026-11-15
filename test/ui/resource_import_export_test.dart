@@ -31,6 +31,18 @@ Future<void> pumpUntil(WidgetTester tester, bool Function() condition, {int poll
   await tester.pump();
 }
 
+/// 右上角操作全部收在三点菜单里:先打开菜单,再点动作文案。
+Future<void> openMenu(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('更多操作'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> tapMenuItem(WidgetTester tester, String label) async {
+  await openMenu(tester);
+  await tester.tap(find.text(label));
+  await tester.pump();
+}
+
 void main() {
   late AppDatabase db;
   late Directory tmp;
@@ -60,7 +72,7 @@ void main() {
     await tester.pumpWidget(skillsHarness());
     await pumpUntil(tester, () => find.text('导出技能').evaluate().isNotEmpty);
 
-    await tester.tap(find.byTooltip('导出 JSON'));
+    await tapMenuItem(tester, '导出 JSON');
     await pumpUntil(tester, () => fake.savedBytes != null);
     final exported = jsonDecode(utf8.decode(fake.savedBytes!)) as Map<String, dynamic>;
     expect(exported['format'], ResourceExporter.skillsFormat);
@@ -74,7 +86,7 @@ void main() {
       ]),
     );
     FakeFilePicker.install(pickedPath: importPath);
-    await tester.tap(find.byTooltip('导入 JSON'));
+    await tapMenuItem(tester, '导入 JSON');
     await pumpUntil(tester, () => find.text('导入技能').evaluate().isNotEmpty);
     expect(find.textContaining('已导入 1 项技能,跳过 1 项'), findsOneWidget);
 
@@ -97,7 +109,7 @@ void main() {
     ));
     await pumpUntil(tester, () => find.text('导出风格').evaluate().isNotEmpty);
 
-    await tester.tap(find.byTooltip('导出 JSON'));
+    await tapMenuItem(tester, '导出 JSON');
     await pumpUntil(tester, () => fake.savedBytes != null);
     final exported = jsonDecode(utf8.decode(fake.savedBytes!)) as Map<String, dynamic>;
     expect(exported['format'], ResourceExporter.imageStylesFormat);
@@ -115,10 +127,22 @@ void main() {
       ]),
     );
     FakeFilePicker.install(pickedPath: importPath);
-    await tester.tap(find.byTooltip('导入 JSON'));
+    await tapMenuItem(tester, '导入 JSON');
     await pumpUntil(tester, () => find.text('新风格').evaluate().isNotEmpty);
     expect(find.textContaining('已导入 1 项生图风格,跳过 1 项'), findsOneWidget);
     final styles = await tester.runAsync(() => ImageStyleRepository(db).all());
     expect(styles, hasLength(2));
+  });
+
+  testWidgets('cancelling the picker reports a cancel and writes nothing', (tester) async {
+    FakeFilePicker.install(pickedPath: null);
+    await tester.pumpWidget(skillsHarness());
+    await pumpUntil(tester, () => find.text('暂无技能').evaluate().isNotEmpty);
+
+    await tapMenuItem(tester, '导入 JSON');
+    await pumpUntil(tester, () => find.text('已取消导入').evaluate().isNotEmpty);
+
+    final rows = await tester.runAsync(() => SkillRepository(db).all());
+    expect(rows, isEmpty);
   });
 }

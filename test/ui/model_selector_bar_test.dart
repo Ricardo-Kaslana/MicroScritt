@@ -1,5 +1,5 @@
 // 模型选择条:当前模型 chip、选择弹窗(provider/模型/推理等级)与使用率
-// 圆环的真实锚点/字符估算口径。
+// 圆环的悬停百分比、点击底单的容量用量与缓存命中率口径。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -36,13 +36,17 @@ void main() {
         appSettingsRepositoryProvider.overrideWithValue(settingsRepository),
     ],
     child: const MaterialApp(
-      home: Scaffold(body: ModelSelectorBar(usage: ContextLink(estimateTokens: 20000))),
+      home: Scaffold(
+        body: ModelSelectorBar(usage: ContextLink(estimateTokens: 20000)),
+      ),
     ),
   );
 
   /// provider/配置的真实 DB 读取需要 runAsync 窗口,固定延时后补一帧让结果上树。
   Future<void> settle(WidgetTester tester) async {
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 150)));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 150)),
+    );
     await tester.pump();
   }
 
@@ -80,40 +84,129 @@ void main() {
     );
   }
 
-  testWidgets('shows the active model name and picks another model from the sheet', (tester) async {
+  testWidgets(
+    'shows the active model name and picks another model from the sheet',
+    (tester) async {
+      await tester.runAsync(() async {
+        db = await openTestDb();
+        await seedProvider();
+      });
+      await tester.pumpWidget(harness());
+      await settle(tester);
+
+      // 当前模型名显示在模型选择条上。
+      expect(find.byKey(const ValueKey('model_selector')), findsOneWidget);
+      expect(find.text('DeepSeek V4 Flash Default'), findsOneWidget);
+
+      // 点击打开选择器:列出 provider 与两个模型 + 推理等级。
+      await tester.tap(find.byKey(const ValueKey('model_selector')));
+      await tester.pumpAndSettle();
+      expect(find.text('选择模型'), findsOneWidget);
+      expect(find.text('Anthropic'), findsWidgets);
+      expect(find.text('Claude Opus'), findsOneWidget);
+      expect(find.text('推理等级'), findsOneWidget);
+      expect(find.byType(Slider), findsOneWidget);
+
+      // 选择第二个模型。
+      await tester.tap(find.text('Claude Opus'));
+      await tester.pumpAndSettle();
+
+      // 落库(必须在 runAsync 内读 DB):当前配置应指向 Claude Opus。
+      BackendConfig? config;
+      await tester.runAsync(() async {
+        config = await LlmProviderRepository(db).loadBackendConfig();
+      });
+      expect(config!.model, 'claude-3-opus');
+
+      await tester.runAsync(() => db.db.close());
+    },
+  );
+  testWidgets('picker sheet hugs its content when only one model exists', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
-      await seedProvider();
+      await LlmProviderRepository(db).saveProvider(
+        LlmProviderConfig(
+          id: 0,
+          providerId: 'deepseek',
+          displayName: 'DeepSeek 官网',
+          baseUrl: 'https://api.deepseek.com',
+          protocol: LlmProtocol.openaiCompat,
+          apiKey: 'sk-ds',
+          isActive: true,
+          models: [
+            LlmModelEntry(
+              id: 0,
+              providerId: 0,
+              modelId: 'deepseek-flash',
+              displayName: 'deepseek-flash',
+              contextCapacity: 1000000,
+              isActive: true,
+            ),
+          ],
+        ),
+      );
     });
     await tester.pumpWidget(harness());
     await settle(tester);
 
-    // 当前模型名显示在模型选择条上。
-    expect(find.byKey(const ValueKey('model_selector')), findsOneWidget);
-    expect(find.text('DeepSeek V4 Flash Default'), findsOneWidget);
-
-    // 点击打开选择器:列出 provider 与两个模型 + 推理等级。
     await tester.tap(find.byKey(const ValueKey('model_selector')));
     await tester.pumpAndSettle();
-    expect(find.text('选择模型'), findsOneWidget);
-    expect(find.text('Anthropic'), findsWidgets);
-    expect(find.text('Claude Opus'), findsOneWidget);
-    expect(find.text('推理等级'), findsOneWidget);
 
-    // 选择第二个模型。
-    await tester.tap(find.text('Claude Opus'));
-    await tester.pumpAndSettle();
-
-    // 落库(必须在 runAsync 内读 DB):当前配置应指向 Claude Opus。
-    BackendConfig? config;
-    await tester.runAsync(() async {
-      config = await LlmProviderRepository(db).loadBackendConfig();
-    });
-    expect(config!.model, 'claude-3-opus');
+    // 底单底部只留 16 的内边距;旧实现固定 60% 屏高会留下大块空白。
+    final sheet = tester.getRect(find.byType(ModelPickerSheet));
+    final lastRow = tester.getRect(find.byType(ListTile).last);
+    expect(sheet.bottom - lastRow.bottom, lessThan(32));
 
     await tester.runAsync(() => db.db.close());
   });
-  testWidgets('reasoning level changes persist to app_settings', (tester) async {
+
+  testWidgets('picker sheet caps its height when many models exist', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      await LlmProviderRepository(db).saveProvider(
+        LlmProviderConfig(
+          id: 0,
+          providerId: 'many',
+          displayName: 'Many',
+          baseUrl: 'https://example.com',
+          protocol: LlmProtocol.openaiCompat,
+          apiKey: 'sk-many',
+          isActive: true,
+          models: [
+            for (var i = 0; i < 30; i++)
+              LlmModelEntry(
+                id: 0,
+                providerId: 0,
+                modelId: 'model-$i',
+                displayName: 'Model $i',
+                contextCapacity: 128000,
+              ),
+          ],
+        ),
+      );
+    });
+    await tester.pumpWidget(harness());
+    await settle(tester);
+
+    await tester.tap(find.byKey(const ValueKey('model_selector')));
+    await tester.pumpAndSettle();
+
+    // 模型多时封顶 0.6 屏高,其余行在底单内部滚动。
+    final screenHeight =
+        tester.view.physicalSize.height / tester.view.devicePixelRatio;
+    final sheetHeight = tester.getSize(find.byType(ModelPickerSheet)).height;
+    expect(sheetHeight, lessThanOrEqualTo(screenHeight * 0.6 + 0.5));
+
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('reasoning level changes persist to app_settings', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
       await seedProvider();
@@ -130,7 +223,8 @@ void main() {
       before = (await AppSettingsRepository(db).load()).reasoningLevel;
     });
     expect(before, ReasoningLevel.off);
-    await tester.tap(find.text('高'));
+    // 滑块拖到最右端 = 高;松手才落库。
+    await tester.drag(find.byType(Slider), const Offset(600, 0));
     await tester.pumpAndSettle();
 
     late ReasoningLevel persisted;
@@ -150,7 +244,9 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('reasoning save failure keeps the old value and reports', (tester) async {
+  testWidgets('reasoning save failure keeps the old value and reports', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
       await seedProvider();
@@ -165,7 +261,7 @@ void main() {
     );
     await tester.tap(find.byKey(const ValueKey('model_selector')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('高'));
+    await tester.drag(find.byType(Slider), const Offset(600, 0));
     for (var i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 20));
       if (find.text('保存推理等级失败,请重试').evaluate().isNotEmpty) break;
@@ -186,46 +282,85 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('usage ring prefers the real last-request input when anchored', (tester) async {
+  testWidgets('usage ring tooltip shows percentage and sheet shows usage', (
+    tester,
+  ) async {
     await tester.runAsync(() async {
       db = await openTestDb();
       await seedProvider();
     });
-    // 真实锚点 150000(75%):弹窗只展示"上轮实际输入"口径,不再并列字符估算。
-    await tester.pumpWidget(ProviderScope(
-      overrides: [databaseProvider.overrideWithValue(db)],
-      child: const MaterialApp(
-        home: Scaffold(
-          body: ModelSelectorBar(
-            usage: ContextLink(estimateTokens: 5000, actualInputTokens: 150000),
+    // 真实锚点 150000/200000(75%),其中 120000 命中缓存(80%):
+    // 悬停只给百分比,底单给「已用/容量(百分比)」与缓存命中率。
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: const MaterialApp(
+          home: Scaffold(
+            body: ModelSelectorBar(
+              usage: ContextLink(
+                estimateTokens: 5000,
+                actualInputTokens: 150000,
+                cachedInputTokens: 120000,
+              ),
+            ),
           ),
         ),
       ),
-    ));
+    );
     await settle(tester);
+    expect(find.byTooltip('已用 75.0%'), findsOneWidget);
     await tester.tap(find.byType(ContextUsageRing));
     await tester.pumpAndSettle();
-    expect(find.textContaining('上轮实际输入:150K token(150000)'), findsOneWidget);
-    // 有真实值就不显示估算:两种口径同屏只会让人来回对照。
-    expect(find.textContaining('字符估算'), findsNothing);
-    expect(find.textContaining('已用 75.0%'), findsOneWidget);
-    await tester.tap(find.text('知道了'));
+    expect(find.text('上下文容量'), findsOneWidget);
+    expect(find.text('15万/20万（75.0%）'), findsOneWidget);
+    expect(find.text('缓存命中率'), findsOneWidget);
+    expect(find.text('80.0%'), findsOneWidget);
+    await tester.tap(find.byTooltip('关闭'));
     await tester.pumpAndSettle();
 
-    // 无锚点:退回估算口径并明确标注。
-    await tester.pumpWidget(ProviderScope(
-      overrides: [databaseProvider.overrideWithValue(db)],
-      child: const MaterialApp(
-        home: Scaffold(
-          body: ModelSelectorBar(usage: ContextLink(estimateTokens: 20000)),
+    // 无真实锚点:估算值标 ≈,缓存命中率无数据。
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: const MaterialApp(
+          home: Scaffold(
+            body: ModelSelectorBar(usage: ContextLink(estimateTokens: 20000)),
+          ),
         ),
       ),
-    ));
+    );
     await settle(tester);
+    expect(find.byTooltip('已用 10.0%'), findsOneWidget);
     await tester.tap(find.byType(ContextUsageRing));
     await tester.pumpAndSettle();
-    expect(find.textContaining('按字符估算'), findsOneWidget);
-    expect(find.textContaining('已用 10.0%'), findsOneWidget);
+    expect(find.text('≈2万/20万（10.0%）'), findsOneWidget);
+    expect(find.text('—'), findsOneWidget);
+
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('usage ring hints when the model has no capacity', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: const MaterialApp(
+          home: Scaffold(
+            body: ModelSelectorBar(usage: ContextLink(estimateTokens: 5000)),
+          ),
+        ),
+      ),
+    );
+    await settle(tester);
+    expect(find.byTooltip('未设置上下文容量'), findsOneWidget);
+    await tester.tap(find.byType(ContextUsageRing));
+    await tester.pumpAndSettle();
+    expect(find.text('未设置'), findsOneWidget);
+    expect(find.text('—'), findsOneWidget);
 
     await tester.runAsync(() => db.db.close());
   });

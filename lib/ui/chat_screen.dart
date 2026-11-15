@@ -13,12 +13,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../data/character_repository.dart';
 import '../data/image_codec.dart';
+import '../data/session_repository.dart';
 import '../engine/background_status.dart';
 import '../engine/display_regex.dart';
 import '../engine/glossary.dart';
 import '../export/session_exporter.dart';
-import '../models/app_settings.dart';
 import '../models/character_card.dart';
 import '../models/context_snapshot.dart';
 import '../models/message.dart';
@@ -27,8 +28,11 @@ import '../models/skill.dart';
 import '../state/chat_controller.dart';
 import '../state/providers.dart';
 import '../state/slash_commands.dart';
+import '../state/ui_prefs_sync.dart';
 import 'common/app_menu.dart';
+import 'common/chat_layout.dart';
 import 'common/confirm_dialog.dart';
+import 'common/motion.dart';
 import 'common/section_header.dart';
 import 'common/text_edit_sheet.dart';
 import 'common/session_file_helper.dart';
@@ -37,18 +41,22 @@ import 'character_edit_screen.dart';
 import 'context_panel.dart';
 import 'hooks_screen.dart';
 import 'model_selector_bar.dart';
-import 'skill_highlight.dart';
 import 'skills_screen.dart';
+import 'text_syntax.dart';
 import 'status_screen.dart';
 import 'user_screen.dart';
+import 'widgets/chat_composer.dart';
+import 'widgets/chat_empty_state.dart';
+import 'widgets/chat_session_sidebar.dart';
 import 'widgets/message_list.dart';
 import 'widgets/chat_island.dart';
 
 /// 聊天页:一条会话的消息流、输入发送与全部会话侧入口。
 ///
 /// 由会话列表页 push 进入。AppBar 提供搜索记录、上下文面板、状态面板与
-/// 会话菜单(技能/Hooks/导出/删除);输入区内嵌模型 chip、上下文使用率
-/// 圆环与发送/中断键。[ChatState.messages] 只是显示窗口(贴顶分页补更早
+/// 会话菜单(技能/Hooks/导出/删除);底部输入区整体由 [ChatComposer] 承载
+/// (命令行、消息框、模型 chip、上下文圆环与发送/中断键)。
+/// [ChatState.messages] 只是显示窗口(贴顶分页补更早
 /// 历史),上下文组装另读仓库的活跃窗口 —— 翻阅历史不改变发给 LLM 的内容。
 ///
 /// 流式回复期间草稿走独立 provider,消息列表单独包一层 Consumer 重建;
@@ -75,7 +83,7 @@ class ChatScreen extends ConsumerStatefulWidget {
 }
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
-  final _input = _SkillHighlightController();
+  final _input = ComposerSyntaxController();
   final _inputFocus = FocusNode();
   final _scroll = ScrollController();
   final _messageListKey = GlobalKey<MessageListState>();
@@ -87,6 +95,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _nearBottom = ValueNotifier<bool>(true);
   final _nearTop = ValueNotifier<bool>(true);
   int _lastCount = -1;
+
+  /// 上一帧侧栏是否可见。≥1000 的宽窗里侧栏始终挂载(收展只是宽度动画),
+  /// 隐藏期(<1200)跳过消息驱动的分组失效;重新展开时补一次失效,避免
+  /// 条数/排序停在隐藏前的快照。null = 尚未观察过(首帧不补,初次加载
+  /// 本就是新查询)。
+  bool? _sidebarWasShown;
 
   /// 进入会话的初始定位期间,消息列表以完全透明(Opacity 0)渲染:数据首帧
   /// 就不画出来,贴底收敛的多帧 jump 在不可见状态下进行,收敛到位才一次性
@@ -143,13 +157,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// `dispose` 一并取消。
   Timer? _navRestoreTimer;
 
-  /// 用户是否手动关闭过「初始化记忆」提示条。切换会话后复位(每个新会话重新
-  /// 评估),仅隐藏提示本身,不撤销初始化功能。
-  bool _memoryInitDismissed = false;
-
   /// 搜索命中后短暂高亮的气泡 id 与收起计时器。
   int? _highlightMessageId;
   Timer? _highlightTimer;
+
+  /// 最近一次会话内搜索关键词:重新打开搜索页时恢复并直接检索。
+  String _lastSearchQuery = '';
 
   /// 灵动岛的瞬态通知中枢:命令反馈(如压缩成功)由此闪示,替代旧 SnackBar。
   final _islandHub = IslandHub();
@@ -258,9 +271,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _navRestoreTimer?.cancel();
       _highlightTimer?.cancel();
       _highlightMessageId = null;
+      // 搜索词按会话记忆:换会话后重新打开搜索不再带着上一会话的关键词。
+      _lastSearchQuery = '';
       _load();
-      // 切换会话后重新评估「初始化记忆」提示(新会话记忆为空时再次出现)。
-      _memoryInitDismissed = false;
     }
     if (oldWidget.characterId != widget.characterId) {
       _character = widget.character;
@@ -454,7 +467,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (!identical) setState(() => _slashSuggestions = next);
   }
 
-  /// 触发一个命令(命令按钮 / 斜杠输入共用);命令会清空当前输入。
+  /// 命令按钮 / 斜杠建议:把 `/命令 ` 写入输入框并聚焦,不直接执行;
+  /// 用户可继续追加参数(如 `/rerun 画面更暗`)再按发送。
+  void _insertCommand(SlashCommand cmd) {
+    final text = '${slashCommandSlash(cmd)} ';
+    _input.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _inputFocus.requestFocus();
+    _onInputChanged(text);
+  }
+
+  /// 执行一个斜杠命令(发送端解析后调用);命令会清空当前输入。
   /// [args] 是命令名之后的文本(当前仅 `/rerun` 消费为修改方向)。
   /// 命令返回的反馈文本(如 /compact 的压缩成功提示)推给灵动岛闪示,
   /// 替代旧的 SnackBar。/compact 的「压缩中」活动态由 controller 侧
@@ -492,6 +517,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _followAfterSend = true;
       _input.clear();
       setState(() => _slashSuggestions = const []);
+      // 轻触觉回执:发送键在点按瞬间的确认感,不打断连续输入。
+      HapticFeedback.lightImpact();
     }
   }
 
@@ -547,7 +574,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _settleEntry();
       return;
     }
-    if (animate) {
+    if (animate && !reduceMotionOf(context)) {
       // 用户可见的一段(如点「回到底部」)保持动画平滑;到位后解除隐藏态。
       _scroll
           .animateTo(
@@ -676,6 +703,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         builder: (_) => ChatSearchScreen(
           sessionId: widget.sessionId,
           characterName: _character.name,
+          characterAvatarBase64: _avatarBase64,
+          initialQuery: _lastSearchQuery,
+          onQueryChanged: (query) => _lastSearchQuery = query,
         ),
       ),
     );
@@ -787,21 +817,42 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
-  /// 导出当前会话为 v4 归档:桌面端直接选路径并流式写出,移动端先写临时
-  /// 文件再由用户选择「保存到本地」或系统分享;取消与失败由
-  /// `saveSessionArchive` 统一提示。
-  Future<void> _exportSession() async {
+  /// 导出会话为 v4 归档:桌面端直接选路径并流式写出,移动端先写临时文件再
+  /// 交给系统另存为或分享面板;取消与失败由 `saveSessionArchive` 统一提示。
+  /// [title] 为归档文件名前缀:AppBar 菜单用「角色名-会话 id」,侧栏用会话
+  /// 标题(AppBar 导出当前会话,侧栏可导出任意会话)。
+  Future<void> _exportSessionArchive({
+    required int sessionId,
+    required String title,
+    bool share = false,
+  }) async {
     await saveSessionArchive(
       context,
-      fileName: '${_character.name}-${widget.sessionId}.json',
+      fileName: '$title.json',
+      delivery: share
+          ? SessionArchiveDelivery.share
+          : SessionArchiveDelivery.save,
       build: (staging, {onProgress, isCancelled}) =>
           SessionExporter(ref.read(databaseProvider)).exportToFile(
-            sessionId: widget.sessionId,
+            sessionId: sessionId,
             file: staging,
             onProgress: onProgress,
             isCancelled: isCancelled,
           ),
     );
+  }
+
+  Future<void> _exportSession({bool share = false}) => _exportSessionArchive(
+    sessionId: widget.sessionId,
+    title: '${_character.name}-${widget.sessionId}',
+    share: share,
+  );
+
+  /// 级联删除一条会话并刷新会话列表与侧栏数据(调用方负责确认与导航)。
+  Future<void> _deleteSessionCascade(int sessionId, int? characterId) async {
+    await ref.read(sessionRepositoryProvider).deleteWithCascade(sessionId);
+    if (characterId != null) ref.invalidate(sessionInfosProvider(characterId));
+    ref.invalidate(sessionGroupsProvider);
   }
 
   /// 打开状态面板(AppBar 状态按钮与灵动岛的状态入口共用)。
@@ -826,12 +877,191 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
     if (!confirmed || !mounted) return;
     final characterId = ref.read(chatControllerProvider).characterId;
-    await ref
-        .read(sessionRepositoryProvider)
-        .deleteWithCascade(widget.sessionId);
-    if (characterId != null) ref.invalidate(sessionInfosProvider(characterId));
+    await _deleteSessionCascade(widget.sessionId, characterId);
     if (!mounted) return;
     Navigator.pop(context);
+  }
+
+  /// 侧栏会话行菜单:置顶 / 重命名 / 导出 / 删除,作用对象可以是列表里的
+  /// 任意会话(含其它角色);重命名 / 导出 / 删除与 AppBar 的会话菜单同口径。
+  Future<void> _handleSidebarAction(
+    SessionInfo session,
+    SessionSidebarAction action,
+  ) async {
+    switch (action) {
+      case SessionSidebarAction.togglePin:
+        await _toggleSessionPin(session);
+      case SessionSidebarAction.rename:
+        await _renameSession(session);
+      case SessionSidebarAction.export:
+        await _exportSessionArchive(
+          sessionId: session.id,
+          title: session.title.trim().isEmpty
+              ? '会话 #${session.id}'
+              : session.title.trim(),
+        );
+      case SessionSidebarAction.delete:
+        await _deleteSessionFromSidebar(session);
+    }
+  }
+
+  /// 侧栏置顶/取消置顶:只改会话的展示优先级,不动消息与当前路由;
+  /// 落库后失效侧栏数据即时重排。
+  Future<void> _toggleSessionPin(SessionInfo session) async {
+    try {
+      await ref
+          .read(sessionRepositoryProvider)
+          .setPinned(session.id, session.pinnedAt == null);
+      ref.invalidate(sessionInfosProvider(session.characterId));
+      ref.invalidate(sessionGroupsProvider);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          width: chatSnackBarWidth(context),
+          content: Text('置顶状态更新失败:$e'),
+        ),
+      );
+    }
+  }
+
+  /// 侧栏重命名:空标题不落库并明确提示;改名后会话列表与侧栏即时刷新。
+  Future<void> _renameSession(SessionInfo session) => _renameSessionById(
+    sessionId: session.id,
+    characterId: session.characterId,
+    initialTitle: session.title,
+  );
+
+  /// AppBar 会话菜单的重命名:聊天页不持有会话标题,先从库里取当前值
+  /// 作对话框初始文本。
+  Future<void> _renameCurrentSession() async {
+    final session = await ref
+        .read(sessionRepositoryProvider)
+        .get(widget.sessionId);
+    if (session == null || !mounted) return;
+    await _renameSessionById(
+      sessionId: widget.sessionId,
+      characterId: widget.characterId,
+      initialTitle: session.title,
+    );
+  }
+
+  /// 重命名任意会话(AppBar 与侧栏共用):空标题不落库并明确提示;
+  /// 改名后会话列表与侧栏即时刷新。
+  Future<void> _renameSessionById({
+    required int sessionId,
+    required int characterId,
+    required String initialTitle,
+  }) async {
+    final next = await showDialog<String>(
+      context: context,
+      builder: (_) => _RenameSessionDialog(initialTitle: initialTitle),
+    );
+    if (next == null || !mounted) return;
+    final title = next.trim();
+    if (title.isEmpty) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            width: chatSnackBarWidth(context),
+            content: const Text('会话标题不能为空'),
+          ),
+        );
+      return;
+    }
+    await ref.read(sessionRepositoryProvider).rename(sessionId, title);
+    ref.invalidate(sessionInfosProvider(characterId));
+    ref.invalidate(sessionGroupsProvider);
+  }
+
+  /// 侧栏删除:删除的是当前会话就退出聊天页(与 AppBar 菜单一致),
+  /// 否则留在当前会话并轻提示;两种路径都由侧栏数据失效即时反映。
+  Future<void> _deleteSessionFromSidebar(SessionInfo session) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: '删除会话?',
+      message: '会话内的全部消息都会被删除,不可恢复。',
+    );
+    if (!confirmed || !mounted) return;
+    await _deleteSessionCascade(session.id, session.characterId);
+    if (!mounted) return;
+    if (session.id == widget.sessionId) {
+      Navigator.pop(context);
+    } else {
+      _islandHub.push('已删除会话', tone: IslandTone.info);
+    }
+  }
+
+  /// 收起/展开桌面会话侧栏:内存态立即生效(宽度动画收展),并整体回写
+  /// `ui-prefs.json`(保留布局与牌堆进度);写失败只打日志,不回滚本次切换。
+  Future<void> _toggleSidebar() async {
+    final next = !ref.read(sidebarCollapsedProvider);
+    ref.read(sidebarCollapsedProvider.notifier).state = next;
+    await syncUiPrefsFile(ref);
+  }
+
+  /// 侧栏 home 键:一次弹掉栈内全部会话路由,回到应用首页(角色列表)。
+  /// 会话切换走 pushReplacement,返回栈深度不定,逐层返回不可靠。
+  void _goHome() {
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
+  /// 侧栏切换到同角色/其它角色的会话:以零时长过渡整页替换当前路由 ——
+  /// 会话切换本就是换一份数据,推入新路由会把返回栈越堆越深,且系统滑动
+  /// 过渡在桌面场景显得拖沓。同一会话是空操作。
+  void _switchSession(CharacterRecord character, SessionInfo session) {
+    if (session.id == widget.sessionId) return;
+    _openSession(character, session.id);
+  }
+
+  void _openSession(CharacterRecord character, int sessionId) {
+    Navigator.of(context).pushReplacement(
+      PageRouteBuilder<void>(
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, __, ___) => ChatScreen(
+          sessionId: sessionId,
+          characterId: character.id,
+          character: character.card,
+        ),
+      ),
+    );
+  }
+
+  /// 侧栏「新建会话」:与角色页新建同口径(角色有开场白时作为助手首条
+  /// 消息落库),刷新侧栏数据后直接进入新会话。
+  Future<void> _createSessionFor(CharacterRecord character) async {
+    try {
+      final id = await ref
+          .read(sessionRepositoryProvider)
+          .createWithDefaultTitle(character.id);
+      if (character.card.firstMessage.isNotEmpty) {
+        await ref
+            .read(messageRepositoryProvider)
+            .append(
+              sessionId: id,
+              role: 'assistant',
+              content: character.card.firstMessage,
+            );
+      }
+      ref.invalidate(sessionInfosProvider(character.id));
+      ref.invalidate(sessionGroupsProvider);
+      if (!mounted) return;
+      final container = ProviderScope.containerOf(context, listen: false);
+      _openSession(character, id);
+      // 路由替换会销毁旧侧栏订阅;若分组刷新恰好横跨这一帧,新侧栏可能
+      // 拿到失效前的快照。待新路由完成首帧后再失效一次,确保新会话行
+      // 即时出现。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        container.invalidate(sessionGroupsProvider);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(width: chatSnackBarWidth(context), content: Text('新建会话失败:$e')),
+      );
+    }
   }
 
   /// 消息操作统一分发(气泡下方按钮与长按/右键菜单共用)。
@@ -841,18 +1071,39 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       case MessageAction.copy:
         await Clipboard.setData(ClipboardData(text: m.content));
         if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('已复制到剪贴板')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              width: chatSnackBarWidth(context),
+              content: const Text('已复制到剪贴板'),
+            ),
+          );
         }
       case MessageAction.edit:
         await _editMessage(m);
       case MessageAction.delete:
         final id = m.id;
-        if (id != null) await controller.deleteMessage(id);
+        if (id == null) return;
+        final snapshot = await controller.deleteMessage(id);
+        if (snapshot == null || !mounted) return;
+        // 删除即时生效但保留撤销窗口:快照含图片字节,撤销后原位置/内容复原;
+        // 撤销窗口内又有新消息落库时恢复行排到末尾,不留重复 seq。
+        final messenger = ScaffoldMessenger.of(context);
+        messenger.hideCurrentSnackBar();
+        messenger.showSnackBar(
+          SnackBar(
+            width: chatSnackBarWidth(context),
+            content: const Text('已删除消息'),
+            action: SnackBarAction(
+              label: '撤销',
+              onPressed: () => controller.restoreMessage(snapshot),
+            ),
+          ),
+        );
       case MessageAction.regenerate:
         final id = m.id;
         if (id != null) await controller.regenerate(id);
+      case MessageAction.rewrite:
+        await _rewriteMessage(m);
       case MessageAction.resend:
         final id = m.id;
         if (id != null) await controller.resend(id);
@@ -878,10 +1129,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   /// 长按/右键菜单:按消息角色与内容动态给出操作项 —— 空正文不提供复制/
   /// 编辑,重新生成图片只在助手消息带图且留有原始描述时出现(没有描述就
-  /// 无法重绘);删除恒定提供。
+  /// 无法重绘);「按要求重写」只给最新一条有正文的助手回复(其后允许跟
+  /// 图片消息);删除恒定提供。
   Future<void> _messageActions(Message m) async {
     final isUser = m.role == 'user';
     final hasText = m.content.trim().isNotEmpty;
+    final canRewrite =
+        !isUser &&
+        hasText &&
+        latestRewritableAssistantReply(
+              ref.read(chatControllerProvider).messages,
+            )?.id ==
+            m.id;
     final picked = await showAppActionSheet<MessageAction>(
       context,
       actions: [
@@ -896,6 +1155,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             value: MessageAction.edit,
             label: '编辑消息',
             icon: Icons.edit_outlined,
+          ),
+        if (canRewrite)
+          const MenuAction(
+            value: MessageAction.rewrite,
+            label: '按要求重写',
+            icon: Icons.edit_note,
           ),
         if (!isUser && hasText)
           const MenuAction(
@@ -1016,6 +1281,38 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     await ref.read(chatControllerProvider.notifier).editMessage(m.id!, saved);
   }
 
+  /// 「按要求重写」:先收集修改要求,再由控制器剪断旧回复并带要求重走生成
+  /// 管线。要求只随当次请求注入,不落库、不会出现在聊天流里。
+  Future<void> _rewriteMessage(Message m) async {
+    final id = m.id;
+    if (id == null) return;
+    final chat = ref.read(chatControllerProvider);
+    if (chat.streaming || chat.busyCommand != null) {
+      _islandHub.push('正在处理中,请稍候', tone: IslandTone.info);
+      return;
+    }
+    if (chat.regeneratingImageId != null) {
+      _islandHub.push('正在重新生成图片,请稍候', tone: IslandTone.info);
+      return;
+    }
+    final saved = await showTextEditSheet(
+      context,
+      title: '按要求重写',
+      initialText: '',
+      hintText: '描述希望如何修改这条回复…',
+      submitLabel: '重写',
+      editorHeightFactor: 0.32,
+      maxEditorHeight: 240,
+    );
+    if (saved == null || !mounted) return;
+    final error = await ref
+        .read(chatControllerProvider.notifier)
+        .rewrite(id, saved);
+    if (error != null && mounted) {
+      _islandHub.push(error, tone: IslandTone.danger);
+    }
+  }
+
   /// 估算当前已组装上下文的 token 用量(供上下文使用率圆环)。
   /// 结果按 snapshot 实例缓存:同一轮内实例不变,复用上次求和,不在每次 build
   /// 或每个流式块上重算;换轮(snapshot 被替换)时自动失效重算。
@@ -1034,19 +1331,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final chat = ref.watch(chatControllerProvider);
-    // 已启用技能名集合:喂给输入控制器(@技能名 输入框内主题蓝高亮)与消息
-    // 列表(用户气泡内同款记号高亮),两处共用同一集合、同一正则与选色助手
-    // (skill_highlight)。watch 触发惰性加载;技能增删改后自动跟随。
+    // 已启用技能名集合:输入框与全部气泡共用同一份编译语法(命令/@技能/
+    // 宏/标签),watch 触发惰性加载,技能增删改后自动跟随。
     final enabledSkillNames = {
       for (final s in (ref.watch(skillsProvider).value ?? const <Skill>[]))
         if (s.enabled && s.name.trim().isNotEmpty) s.name.trim(),
     };
-    _input.skillNames = enabledSkillNames;
-    // 每个用户气泡都要用;页面级 build 编译一次即可,不再让气泡在流式
-    // 重建时各自拼 alternation + new RegExp。
-    final skillTokenRegex = enabledSkillNames.isEmpty
-        ? null
-        : skillTokenPattern(enabledSkillNames);
+    final syntax = CompiledSyntax.compile(skillNames: enabledSkillNames);
+    final dialogueHighlight = ref
+        .watch(appSettingsProvider)
+        .dialogueHighlightEnabled;
+    _input.updateSyntax(syntax, highlightDialogue: dialogueHighlight);
     // 用户档案:头像用于气泡旁展示;用户名仅用于显示层替换正文里的 {{user}}。
     final user = ref.watch(userProfileProvider);
     // 用户头像:按 base64 值缓存单个 ImageProvider(全列表共用),避免流式回复期间
@@ -1064,6 +1359,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
     final displayUserName = user.name;
 
+    final backgroundEnabled = ref.watch(chatBackgroundEnabledProvider);
+    final backgroundBlur = ref.watch(chatBackgroundBlurProvider);
+    // 宽窗桌面适配:≥1000 会话收敛成居中阅读列(刻度见 chat_layout),
+    // ≥1200 再出左侧会话侧栏(主从布局);低于阈值一切照旧。侧栏还受
+    // 用户折叠偏好约束(AppBar 左端的收起/展开键切换,偏好落 ui-prefs)。
+    final windowWidth = MediaQuery.sizeOf(context).width;
+    final sidebarAvailable = windowWidth >= kChatSidebarBreakpoint;
+    final showSidebar =
+        sidebarAvailable && !ref.watch(sidebarCollapsedProvider);
+    // 侧栏从隐藏切回可见时补一次分组失效:隐藏期跳过了消息驱动的失效,
+    // 不补的话条数/排序会停在隐藏前的快照。首帧(_sidebarWasShown 为
+    // null)不补 —— 初次加载本来就是新查询。
+    if (showSidebar && _sidebarWasShown == false) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) ref.invalidate(sessionGroupsProvider);
+      });
+    }
+    _sidebarWasShown = showSidebar;
+
     // 滚动定位判定(三种互斥情形):
     final count = chat.messages.length;
     // controller 状态是否已是本屏会话的数据。会话切换窗口内(load 的元数据
@@ -1071,6 +1385,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // 会话的转录,sessionId 为旧值或 null。
     final loadedHere = chat.sessionId == widget.sessionId;
     _screenDataReady = loadedHere;
+    // 空会话的输入区抬升:桌面端在本屏数据就位、没有任何消息、角色卡也没有
+    // 开场白候选时,底部留白按内容高的四分之一把输入区抬离底部(此时空态里
+    // 没有可点的起笔入口,输入卡贴在屏幕最底部显得空旷);有开场白时输入区
+    // 留在底部,由空态的开场白卡承担起笔。移动端始终贴底 —— 抬高会让输入位
+    // 与键盘位置脱节,不符合移动端输入习惯。
+    final hasOpening =
+        _character.firstMessage.trim().isNotEmpty ||
+        _character.alternateGreetings.any((g) => g.trim().isNotEmpty);
+    final desktopPlatform =
+        defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.linux;
+    final liftComposer =
+        desktopPlatform && loadedHere && count == 0 && !hasOpening;
     if (!loadedHere &&
         count > 0 &&
         chat.transcriptSessionId != widget.sessionId) {
@@ -1103,6 +1431,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // (jumpTo),避免频繁开启和打断 150ms 动画导致动画控制器冲突与掉帧卡顿。
     // 用户正在拖动时跳过(详见 _userDragging)。
     if (count != _lastCount) {
+      // 首次数据到达不算「新消息」:此时侧栏刚拿到首查结果,再失效一次
+      // 只会多打一轮无意义聚合查询。
+      final hadBaseline = _lastCount >= 0;
       _lastCount = count;
       // 用户主动发送带来的首个新条目:无条件跟随一次(force 绕过滚动宽限窗)。
       final fromSend = _followAfterSend;
@@ -1117,6 +1448,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           !_autoTopRunning.value) {
         _scrollToBottom(animate: !chat.streaming, force: fromSend);
       }
+      // 侧栏的组内排序与末条预览随消息更新:帧末失效(不能在 build 期改
+      // provider);侧栏不在可视区时跳过(失效只记脏,重新展开时由
+      // [_sidebarWasShown] 的补失效统一兜底)。
+      if (showSidebar && hadBaseline) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) ref.invalidate(sessionGroupsProvider);
+        });
+      }
     }
     // 流式草稿在独立 provider(不驱动整页重建),经 listen 跟随:
     // 每个草稿块只触发这条回调(贴底时滚动一下),页面 build 不再陪跑。
@@ -1129,122 +1468,174 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
     });
 
-    final backgroundEnabled = ref.watch(chatBackgroundEnabledProvider);
-    final backgroundBlur = ref.watch(chatBackgroundBlurProvider);
-    // 会话记忆:驱动「初始化记忆」提示条(后台成功写入后经 invalidate 自动刷新,
-    // 记忆非空即提示条消失)。
-    final memoriesAsync = ref.watch(memoriesProvider(widget.sessionId));
+    // 一次性瞬态通知(如自动压缩失败):推给灵动岛闪示后清除,避免重复展示。
+    // 不走 [ChatState.error] 错误横幅 —— 主写本身已成功,不该显示为失败态。
+    ref.listen(chatControllerProvider, (_, next) {
+      final notice = next.notice;
+      if (notice == null || notice.isEmpty) return;
+      _islandHub.push(notice, tone: IslandTone.danger);
+      Future<void>.microtask(() {
+        if (mounted) ref.read(chatControllerProvider.notifier).clearNotice();
+      });
+    });
 
-    return Scaffold(
-      appBar: AppBar(
-        titleSpacing: 0,
-        title: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            InkWell(
-              key: const ValueKey('appbar-character-avatar'),
-              customBorder: const CircleBorder(),
-              onTap: _showCharacterStatusCard,
-              child: _ChatAvatar(
-                name: _character.name,
-                avatarBase64: _avatarBase64,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                _character.name,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
+    // 会话记忆:驱动「初始化记忆」提示条(后台成功写入后经 invalidate 自动刷新,
+    // 记忆非空即提示条消失)。手动关闭按会话记忆,重复进入同一会话不再弹出。
+    final memoriesAsync = ref.watch(memoriesProvider(widget.sessionId));
+    final memoryInitDismissed = ref
+        .watch(memoryInitDismissedProvider)
+        .contains(widget.sessionId);
+
+    final appBarAvatar = InkWell(
+      key: const ValueKey('appbar-character-avatar'),
+      customBorder: const CircleBorder(),
+      onTap: _showCharacterStatusCard,
+      child: _ChatAvatar(name: _character.name, avatarBase64: _avatarBase64),
+    );
+    final appBarActions = <Widget>[
+      IconButton(
+        tooltip: '搜索聊天记录',
+        icon: const Icon(Icons.search),
+        onPressed: _openChatSearch,
+      ),
+      IconButton(
+        tooltip: '上下文',
+        icon: const Icon(Icons.query_stats_outlined),
+        onPressed: () => showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          showDragHandle: true,
+          // 可拖拽缩放:默认接近全高,向下拖可让出聊天内容对照着看。
+          builder: (_) => DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.9,
+            minChildSize: 0.4,
+            maxChildSize: 0.95,
+            builder: (context, scrollController) =>
+                ContextPanel(scrollController: scrollController),
+          ),
         ),
+      ),
+      // 状态面板:与"上下文"按钮并排,不藏在三点菜单里。
+      IconButton(
+        tooltip: '状态面板',
+        icon: const Icon(Icons.insights_outlined),
+        onPressed: _openStatus,
+      ),
+      AppPopupMenuButton<String>(
+        tooltip: '会话操作',
+        onSelected: (action) {
+          switch (action) {
+            case 'rename':
+              _renameCurrentSession();
+            case 'skills':
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SkillsScreen()),
+              );
+            case 'hooks':
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const HooksScreen()),
+              );
+            case 'export':
+              _exportSession();
+            case 'share':
+              _exportSession(share: true);
+            case 'delete':
+              _deleteSession();
+          }
+        },
         actions: [
-          IconButton(
-            tooltip: '搜索聊天记录',
-            icon: const Icon(Icons.search),
-            onPressed: _openChatSearch,
+          const MenuAction(
+            value: 'skills',
+            label: '技能管理',
+            icon: Icons.extension_outlined,
           ),
-          IconButton(
-            tooltip: '上下文',
-            icon: const Icon(Icons.query_stats_outlined),
-            onPressed: () => showModalBottomSheet<void>(
-              context: context,
-              isScrollControlled: true,
-              useSafeArea: true,
-              builder: (_) => const FractionallySizedBox(
-                heightFactor: 0.9,
-                child: ContextPanel(),
-              ),
+          const MenuAction(
+            value: 'hooks',
+            label: 'Hooks 管理',
+            icon: Icons.code_outlined,
+          ),
+          // 会话级三项(重命名/导出/删除)连排,与上方管理入口分开。
+          const MenuAction(
+            value: 'rename',
+            label: '重命名会话',
+            icon: Icons.edit_outlined,
+          ),
+          const MenuAction(
+            value: 'export',
+            label: '导出会话',
+            icon: Icons.file_download_outlined,
+          ),
+          if (isMobileSessionExport)
+            const MenuAction(
+              value: 'share',
+              label: '分享会话',
+              icon: Icons.share_outlined,
             ),
+          const MenuAction(
+            value: 'delete',
+            label: '删除会话',
+            icon: Icons.delete_outline,
+            destructive: true,
           ),
-          // 状态面板:与"上下文"按钮并排,不藏在三点菜单里。
-          IconButton(
-            tooltip: '状态面板',
-            icon: const Icon(Icons.insights_outlined),
-            onPressed: _openStatus,
-          ),
-          AppPopupMenuButton<String>(
-            tooltip: '会话操作',
-            onSelected: (action) {
-              switch (action) {
-                case 'skills':
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const SkillsScreen()),
-                  );
-                case 'hooks':
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const HooksScreen()),
-                  );
-                case 'export':
-                  _exportSession();
-                case 'delete':
-                  _deleteSession();
-              }
-            },
-            actions: const [
-              MenuAction(
-                value: 'skills',
-                label: '技能管理',
-                icon: Icons.extension_outlined,
-              ),
-              MenuAction(
-                value: 'hooks',
-                label: 'Hooks 管理',
-                icon: Icons.code_outlined,
-              ),
-              MenuAction(
-                value: 'export',
-                label: '导出会话',
-                icon: Icons.file_download_outlined,
-              ),
-              MenuAction(
-                value: 'delete',
-                label: '删除会话',
-                icon: Icons.delete_outline,
-                destructive: true,
-              ),
-            ],
-          ),
-          const SizedBox(width: 4),
         ],
       ),
-      body: Stack(
-        fit: StackFit.expand,
+      const SizedBox(width: 4),
+    ];
+
+    // AppBar 不跟随正文的居中列:左右内容各贴窗格最左/最右缘(侧栏展开
+    // 时左缘接分隔线,右缘是窗口最右),与输入卡/气泡的列线脱钩。侧栏
+    // 收起/展开键与返回键内联在最左,操作组在最右。
+    // 主从布局下 AppBar 直接嵌进右窗 Column(嵌套 Scaffold 会让 SnackBar
+    // 在两座脚手架各渲染一份);AppBar 自持 toolbarHeight 与顶部安全区。
+    final appBar = AppBar(
+      titleSpacing: 0,
+      automaticallyImplyLeading: false,
+      title: Row(
         children: [
-          const ColoredBox(color: Colors.transparent),
-          // 聊天背景:全局开关开启时铺一层背景图(优先角色卡背景;未设置回退头像),
-          // 之上叠一层不透明白色/深色淡罩,让消息气泡保持清晰可读。纯显示层,不进上下文。
-          if (backgroundEnabled)
-            _ChatBackground(
-              key: const ValueKey('chat-background'),
-              backgroundBase64: _bgBase64,
-              avatarBase64: _avatarBase64,
-              blur: backgroundBlur,
+          // 侧栏到达断点后常驻提供收起/展开入口(折叠偏好跨会话记忆);
+          // 窗口更窄(<1200)时侧栏不可用,不出现。
+          if (sidebarAvailable)
+            IconButton(
+              tooltip: showSidebar ? '收起会话侧栏' : '展开会话侧栏',
+              onPressed: _toggleSidebar,
+              iconSize: 20,
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.vertical_split),
             ),
-          Column(
+          if (ModalRoute.of(context)?.canPop ?? false) const BackButton(),
+          appBarAvatar,
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(_character.name, overflow: TextOverflow.ellipsis),
+          ),
+        ],
+      ),
+      actions: appBarActions,
+    );
+
+    final content = Stack(
+      fit: StackFit.expand,
+      children: [
+        const ColoredBox(color: Colors.transparent),
+        // 聊天背景:全局开关开启时铺一层背景图(优先角色卡背景;未设置回退头像),
+        // 之上叠一层不透明白色/深色淡罩,让消息气泡保持清晰可读。纯显示层,不进上下文。
+        if (backgroundEnabled)
+          _ChatBackground(
+            key: const ValueKey('chat-background'),
+            backgroundBase64: _bgBase64,
+            avatarBase64: _avatarBase64,
+            blur: backgroundBlur,
+          ),
+        // 宽窗只收敛内容(消息行/输入卡同列;AppBar 贴窗格两缘),不铺列底色:助手气泡
+        // 与输入卡同为 surface,铺一层同色纸面会让气泡失去与分组底的明度
+        // 分层(暗色下尤甚,整块消息区看起来像裸文本)。消息列表本身铺满
+        // 窗格,桌面滚动条因此贴在窗口最右缘。
+        LayoutBuilder(
+          builder: (context, constraints) => Column(
             children: [
               // 顶部状态(错误/用量/后台/记忆提示/命令反馈)全部收纳进消息区悬浮的
               // 灵动岛(见下方 ChatIsland),Column 里不按状态插拔横幅,避免布局跳动。
@@ -1271,6 +1662,27 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           builder: (context, listRef, _) => MessageList(
                             key: _messageListKey,
                             messages: chat.messages,
+                            // 空会话不再只有一行灰字:角色头像/名称 + 可直接
+                            // 起笔的开场白;开场白作为助手首条消息落库。
+                            // 会话数据就位前渲染空白,避免打开已有会话时先闪
+                            // 一帧空态(此时控制器还没 load 完)。
+                            emptyState: loadedHere
+                                ? ChatEmptyState(
+                                    character: _character,
+                                    avatar: _assistantAvatarImage,
+                                    onGreeting: (text) async {
+                                      final ok = await listRef
+                                          .read(chatControllerProvider.notifier)
+                                          .startWithGreeting(text);
+                                      if (!ok && mounted) {
+                                        _islandHub.push(
+                                          '会话已经开始或正在生成,开场白未插入',
+                                          tone: IslandTone.info,
+                                        );
+                                      }
+                                    },
+                                  )
+                                : const SizedBox.shrink(),
                             draft: listRef.watch(chatDraftProvider),
                             streaming: chat.streaming,
                             controller: _scroll,
@@ -1282,9 +1694,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             onAssistantAvatarTap: _showCharacterStatusCard,
                             displayUserName: displayUserName,
                             displayCharName: _character.name,
-                            // 用户气泡内 @技能名 记号高亮用(与输入框共用同一集合)。
-                            skillNames: enabledSkillNames,
-                            skillTokenPattern: skillTokenRegex,
+                            // 全部气泡的 @技能名 / /命令 高亮(与输入框共用同一语法)。
+                            syntax: syntax,
                             // 直接 watch FutureProvider + 记忆化编译(不走派生 Provider:
                             // Provider→FutureProvider 桥接在 TickerMode 重启时会触发
                             // build 期 setState 崩溃,见 providers.dart 注释)。
@@ -1304,9 +1715,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             onTermTap: _showTermCard,
                             // 内置对话高亮(引号台词)总开关,随 app_settings 持久化,
                             // 入口在正则脚本管理页。
-                            highlightDialogue: listRef
-                                .watch(appSettingsProvider)
-                                .dialogueHighlightEnabled,
+                            highlightDialogue: dialogueHighlight,
                             assistantBubbleStyle: _character.bubbleStyle,
                             imageLoader: (id) => listRef
                                 .read(messageRepositoryProvider)
@@ -1339,7 +1748,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         key: const ValueKey('chat-island'),
                         chat: chat,
                         memoryInitPrompt:
-                            !_memoryInitDismissed &&
+                            !memoryInitDismissed &&
                             chat.backgroundStatus != BackgroundStatus.running &&
                             memoriesAsync.maybeWhen(
                               data: (list) =>
@@ -1360,8 +1769,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         onInitMemory: () => ref
                             .read(chatControllerProvider.notifier)
                             .initializeMemory(),
-                        onDismissMemoryInit: () =>
-                            setState(() => _memoryInitDismissed = true),
+                        onDismissMemoryInit: () {
+                          final notifier = ref.read(
+                            memoryInitDismissedProvider.notifier,
+                          );
+                          notifier.state = {
+                            ...notifier.state,
+                            widget.sessionId,
+                          };
+                        },
                         onDismissError: () => ref
                             .read(chatControllerProvider.notifier)
                             .clearError(),
@@ -1401,8 +1817,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 ),
               ),
               // /compact 的「压缩中」活动态由灵动岛呈现。
-              // 模型选择 chip + 上下文使用率圆环:内嵌在输入框内部右下角。
-              _CommandInputSection(
+              // 底部输入区(命令行 + 输入卡 + 工具底栏)整体见 ChatComposer。
+              ChatComposer(
                 interruptible: chat.streaming || chat.busyCommand != null,
                 suggestions: _slashSuggestions,
                 inputController: _input,
@@ -1411,18 +1827,196 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 usage: ContextLink(
                   estimateTokens: _estimateContextTokens(chat.lastContext),
                   actualInputTokens: chat.lastSentInputTokens,
+                  cachedInputTokens: chat.cachedInputTokens,
                 ),
                 onToggleCommands: () =>
                     setState(() => _commandsExpanded = !_commandsExpanded),
                 onChanged: _onInputChanged,
-                onRunCommand: _runCommandFromUI,
+                onInsertCommand: _insertCommand,
                 onSend: _send,
                 onInterrupt: () =>
                     ref.read(chatControllerProvider.notifier).interrupt(),
               ),
+              // 桌面端空会话且角色没有开场白:底部留白(内容高 25%)把输入区
+              // 抬离底部;一旦有消息(发送/开场白/重发)留白收回,输入区回到
+              // 底部。移动端 liftComposer 恒为 false,始终贴底。
+              _ComposerLift(
+                lifted: liftComposer,
+                height: constraints.maxHeight * 0.25,
+                duration: reduceMotionOf(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 240),
+              ),
             ],
           ),
+        ),
+      ],
+    );
+
+    // 主从骨架全局统一:所有宽度都是 Row[侧栏槽, Column[AppBar, 聊天区]],
+    // 侧栏槽在 <1200 时宽度为 0(子树卸载)。此前 <1000 与 ≥1000 用两套
+    // 不同结构的 Scaffold,跨过 1000 断点时整棵内容子树换父重挂,暗色下
+    // 会漏出脚手架黑底闪一帧;统一后唯一的断点变化只剩侧栏槽的宽度动画。
+    // 侧栏跨过 1200 断点不瞬移:槽宽在 0..kChatSidebarWidth 间动画(聊天区
+    // 随之平滑重排),内容始终按侧栏满宽布局、锚定槽右缘滑入滑出 —— 内部
+    // 不随动画重排(标题/检索框不抖),右缘分隔线始终贴着聊天区;完全收起
+    // 后卸载子树,不把隐藏的检索框留在焦点遍历里。
+    return Scaffold(
+      body: Row(
+        children: [
+          _SidebarReveal(
+            visible: showSidebar,
+            duration: reduceMotionOf(context)
+                ? Duration.zero
+                : const Duration(milliseconds: 220),
+            child: ChatSessionSidebar(
+              currentSessionId: widget.sessionId,
+              onSelect: _switchSession,
+              onCreate: _createSessionFor,
+              onSessionAction: _handleSidebarAction,
+              onGoHome: _goHome,
+            ),
+          ),
+          Expanded(
+            child: Column(
+              children: [
+                appBar,
+                Expanded(child: content),
+              ],
+            ),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+/// 空会话输入区抬升的底部留白:在 0 与 [height] 之间做 easeOutCubic 过渡。
+/// 窗口缩放导致 [height] 变化时按当前进度即时随动 —— 隐式动画在持续缩放
+/// 中会一直追新目标,输入区会橡皮一样滞后;只有「有/无内容」切换才播动画。
+/// 留白取内容区高度的四分之一,不必测量输入区的实际高度。
+class _ComposerLift extends StatefulWidget {
+  final bool lifted;
+  final double height;
+  final Duration duration;
+
+  const _ComposerLift({
+    required this.lifted,
+    required this.height,
+    required this.duration,
+  });
+
+  @override
+  State<_ComposerLift> createState() => _ComposerLiftState();
+}
+
+class _ComposerLiftState extends State<_ComposerLift>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: widget.duration,
+    value: widget.lifted ? 1 : 0,
+  );
+
+  @override
+  void didUpdateWidget(covariant _ComposerLift oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _controller.duration = widget.duration;
+    if (widget.lifted != oldWidget.lifted) {
+      if (widget.lifted) {
+        _controller.forward();
+      } else {
+        _controller.reverse();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) => SizedBox(
+        height:
+            widget.height * Curves.easeOutCubic.transform(_controller.value),
+      ),
+    );
+  }
+}
+
+/// 宽窗侧栏的收展容器:槽宽按 [visible] 在 0..[kChatSidebarWidth] 间做
+/// easeOutCubic 动画,聊天区随行重排;子树始终按侧栏满宽布局并锚定槽右缘,
+/// 被 [ClipRect] 按槽宽裁切 —— 滑入滑出而不是整体缩放,标题/检索框/行宽
+/// 在动画中不重排。完全收起后卸载子树:隐藏的检索框不应留在焦点遍历与
+/// widget 树里(也避免测试把侧栏输入框误当聊天输入框)。
+class _SidebarReveal extends StatefulWidget {
+  final bool visible;
+  final Duration duration;
+  final Widget child;
+
+  const _SidebarReveal({
+    required this.visible,
+    required this.duration,
+    required this.child,
+  });
+
+  @override
+  State<_SidebarReveal> createState() => _SidebarRevealState();
+}
+
+class _SidebarRevealState extends State<_SidebarReveal>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: widget.duration,
+    // 首帧即按目标状态成形:从宽窗打开聊天页不该先播一次展开动画。
+    value: widget.visible ? 1 : 0,
+  );
+
+  @override
+  void didUpdateWidget(covariant _SidebarReveal oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _controller.duration = widget.duration;
+    if (widget.visible != oldWidget.visible) {
+      if (widget.visible) {
+        _controller.forward();
+      } else {
+        _controller.reverse();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRect(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          final width =
+              kChatSidebarWidth *
+              Curves.easeOutCubic.transform(_controller.value);
+          if (width <= 0) return const SizedBox.shrink();
+          return SizedBox(
+            width: width,
+            child: OverflowBox(
+              alignment: Alignment.centerRight,
+              minWidth: kChatSidebarWidth,
+              maxWidth: kChatSidebarWidth,
+              child: SizedBox(width: kChatSidebarWidth, child: widget.child),
+            ),
+          );
+        },
       ),
     );
   }
@@ -1574,403 +2168,6 @@ class _ScrollNavRail extends StatelessWidget {
   }
 }
 
-/// 桌面/平板宽窗上输入区(命令行 + 输入框)的最大宽度:与助手气泡同宽(760),
-/// 居中放置,不再拉满整个聊天区;手机视口窄于上限不受影响。
-const double _kInputMaxWidth = 760;
-
-/// 底部一行「组件组靠右、chip 自适应」的宽行阈值:可用宽度达到该值(桌面窗口
-/// /平板横屏)视为宽行;手机竖屏必然低于它,维持吃满剩余宽的窄行布局。
-const double _kWideInputRowMinWidth = 480;
-
-/// 输入区:常驻命令按钮行(可折叠)+ 斜杠命令建议 + 消息输入框 + 发送/中断键。
-///
-/// 输入框底部一行内嵌模型 chip、推理徽标与上下文圆环;窄行(手机)让 chip
-/// 吃满剩余宽度并省略长模型名,宽行(桌面/平板横屏)按内容自适应靠右,
-/// 两者顺序一致。流式或耗时命令进行中发送键换成中断键,中断经控制器取消
-/// 当前轮的中断令牌实现。
-class _CommandInputSection extends ConsumerWidget {
-  final bool interruptible;
-  final List<SlashCommand> suggestions;
-  final TextEditingController inputController;
-  final FocusNode inputFocusNode;
-  final bool commandsExpanded;
-  final ContextLink usage;
-  final VoidCallback onToggleCommands;
-  final ValueChanged<String> onChanged;
-  final ValueChanged<SlashCommand> onRunCommand;
-
-  final VoidCallback onSend;
-  final VoidCallback onInterrupt;
-
-  const _CommandInputSection({
-    required this.interruptible,
-    required this.suggestions,
-    required this.inputController,
-    required this.inputFocusNode,
-    required this.commandsExpanded,
-    required this.usage,
-    required this.onToggleCommands,
-    required this.onChanged,
-    required this.onRunCommand,
-    required this.onSend,
-    required this.onInterrupt,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
-    final reasoning = ref.watch(appSettingsProvider).reasoningLevel;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-        // 宽窗封顶居中:输入区整体(命令行 + 输入框)不再拉满聊天区。必须先经
-        // Align 松开紧约束 —— 紧约束下 ConstrainedBox 的上限会被 enforce 钳回
-        // 全宽,封顶静默失效(与模型 chip 封顶同陷阱)。
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: _kInputMaxWidth),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // 斜杠输入 `/xx` 时的命令建议(与常驻按钮同款 chip,点选即执行)。
-                // 出现建议时隐藏常驻命令行,避免同一批命令按钮重复展示。
-                if (suggestions.isNotEmpty)
-                  ..._commandChips(context, suggestions),
-                if (suggestions.isEmpty && commandsExpanded)
-                  ..._commandChips(context, allSlashCommands),
-                // iOS 语言:输入框是白色胶囊(浮在灰底上),细描边替代阴影。
-                Container(
-                  decoration: BoxDecoration(
-                    color: scheme.surface,
-                    borderRadius: BorderRadius.circular(26),
-                    border: Border.all(
-                      color: scheme.outlineVariant.withValues(alpha: 0.5),
-                    ),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      TextField(
-                        controller: inputController,
-                        focusNode: inputFocusNode,
-                        // 默认高度两行文字;随输入增长到上限 5 行。
-                        maxLines: 5,
-                        minLines: 2,
-                        textInputAction: TextInputAction.newline,
-                        onChanged: onChanged,
-                        decoration: InputDecoration(
-                          hintText: '输入消息…(/ 命令 · @ 技能)',
-                          border: InputBorder.none,
-                          contentPadding: const EdgeInsets.fromLTRB(
-                            16,
-                            12,
-                            16,
-                            2,
-                          ),
-                        ),
-                      ),
-                      // 输入框底部一行:左侧是命令行折叠/展开与 @ 技能按钮,其后
-                      // 依次是模型选择 chip、(推理等级徽标)、上下文使用率圆环与
-                      // 发送/中断键,全部内嵌进输入框 —— 宽窄行同一顺序。推理
-                      // 等级只显示「高/中/低」单字徽标 —— 「推理 xx」全称在窄屏
-                      // 上会与模型 chip 挤在一起互抢宽度被省略。窄行(手机)与
-                      // 宽行(桌面/平板横屏)仅排布策略不同,见分支注释。
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
-                        child: Row(
-                          children: [
-                            _buildToggleIcon(context),
-                            const SizedBox(width: 4),
-                            _buildSkillButton(context, ref),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: LayoutBuilder(
-                                builder: (context, box) {
-                                  final available = box.maxWidth;
-                                  final capped = available.isFinite
-                                      ? math.min(available, 280.0)
-                                      : 280.0;
-                                  final ring = ContextUsageRing(usage: usage);
-                                  final badge = reasoning == ReasoningLevel.off
-                                      ? null
-                                      : _ReasoningBadge(level: reasoning.label);
-                                  // 宽行:组件间不拥挤,chip 不再吃满/定宽,而是按
-                                  // 模型名自适应(上限 280,长名省略);整组靠右贴
-                                  // 发送键,推理徽标紧贴模型 chip 右侧。Align 松开
-                                  // 紧约束 + Row(min) 才能实现"内容自适应宽"。
-                                  if (available >= _kWideInputRowMinWidth) {
-                                    return Align(
-                                      alignment: Alignment.centerRight,
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          ConstrainedBox(
-                                            constraints: BoxConstraints(
-                                              maxWidth: capped,
-                                            ),
-                                            child: const ModelSelectorChip(),
-                                          ),
-                                          if (badge != null) ...[
-                                            const SizedBox(width: 6),
-                                            badge,
-                                          ],
-                                          const SizedBox(width: 6),
-                                          ring,
-                                        ],
-                                      ),
-                                    );
-                                  }
-                                  // 窄行(手机,挤的是这里不是桌面):chip 吃满剩余
-                                  // 宽度(收缩省略、不留死空档);与宽行同一顺序
-                                  // 模型→推理徽标→圆环。收窄必须经 Align 松开约束:
-                                  // LayoutBuilder 传下的是紧约束(min=max),
-                                  // ConstrainedBox/SizedBox 的上限在 enforce 时会被
-                                  // 钳回全宽,定宽/封顶静默失效;先 Align 松成 loose,
-                                  // 再按「剩余宽与上限的较小值」给 chip 精确宽度。
-                                  return Row(
-                                    children: [
-                                      Expanded(
-                                        child: Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: SizedBox(
-                                            width: capped,
-                                            child: const ModelSelectorChip(),
-                                          ),
-                                        ),
-                                      ),
-                                      if (badge != null) ...[
-                                        const SizedBox(width: 6),
-                                        badge,
-                                      ],
-                                      const SizedBox(width: 6),
-                                      ring,
-                                    ],
-                                  );
-                                },
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            if (interruptible)
-                              IconButton.filled(
-                                tooltip: '中断生成',
-                                visualDensity: VisualDensity.compact,
-                                constraints: const BoxConstraints(
-                                  minWidth: 34,
-                                  minHeight: 34,
-                                ),
-                                padding: EdgeInsets.zero,
-                                iconSize: 20,
-                                icon: const Icon(Icons.stop_rounded),
-                                onPressed: onInterrupt,
-                              )
-                            else
-                              IconButton.filled(
-                                tooltip: '发送',
-                                visualDensity: VisualDensity.compact,
-                                constraints: const BoxConstraints(
-                                  minWidth: 34,
-                                  minHeight: 34,
-                                ),
-                                padding: EdgeInsets.zero,
-                                iconSize: 20,
-                                icon: const Icon(Icons.send_rounded),
-                                onPressed: onSend,
-                              ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 一行命令 chip(常驻按钮行与斜杠建议共用,样式完全一致)。
-  /// 移动端采用左右横向滑动而非换行,保持单行紧凑;滑到底部自然可见全部。
-  List<Widget> _commandChips(BuildContext context, List<SlashCommand> cmds) {
-    return [
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.only(bottom: 4),
-        child: Row(
-          children: [
-            for (final c in cmds)
-              Padding(
-                padding: const EdgeInsets.only(right: 6),
-                child: ActionChip(
-                  avatar: const Icon(Icons.terminal, size: 15),
-                  label: Text(_commandLabel(c)),
-                  tooltip: slashCommandDescription[c],
-                  onPressed: () => onRunCommand(c),
-                ),
-              ),
-          ],
-        ),
-      ),
-    ];
-  }
-
-  /// 输入框底部行的折叠/展开紧凑图标:点击切换命令行展开状态。
-  /// 展开时用上收箭头提示可收起;收起时用终端图标提示命令入口。
-  Widget _buildToggleIcon(BuildContext context) {
-    return IconButton(
-      tooltip: commandsExpanded ? '收起命令按钮行' : '展开命令按钮行',
-      visualDensity: VisualDensity.compact,
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-      iconSize: 18,
-      onPressed: onToggleCommands,
-      icon: Icon(
-        commandsExpanded ? Icons.expand_less : Icons.terminal,
-        size: 18,
-      ),
-    );
-  }
-
-  /// 命令 chip 的显示文本:常驻与斜杠建议用同一份(标签一致)。
-  static String _commandLabel(SlashCommand c) =>
-      '${slashCommandSlash(c)} ${slashCommandLabel[c]}';
-
-  /// 输入框底部行的 @ 技能按钮:点击弹出技能选择弹层。
-  Widget _buildSkillButton(BuildContext context, WidgetRef ref) {
-    return IconButton(
-      tooltip: '插入技能(@)',
-      visualDensity: VisualDensity.compact,
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-      iconSize: 18,
-      onPressed: () => _pickSkill(context, ref),
-      icon: const Icon(Icons.alternate_email, size: 18),
-    );
-  }
-
-  /// @ 技能选择弹层:列出全部启用中的技能(name + description),点选即把
-  /// `@技能名 ` 插入输入框光标处 —— 与发送端的触发判据(文本含 @技能名)
-  /// 完全同构,选中即等价于主动调用该技能。无启用技能时给引导提示。
-  Future<void> _pickSkill(BuildContext context, WidgetRef ref) async {
-    final skills = await ref.read(skillsProvider.future);
-    final usable = [
-      for (final s in skills)
-        if (s.enabled && s.name.trim().isNotEmpty) s,
-    ];
-    if (!context.mounted) return;
-    if (usable.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('暂无启用的技能,可在 设置 → 全局技能 中创建')));
-      return;
-    }
-    final scheme = Theme.of(context).colorScheme;
-    await showModalBottomSheet<void>(
-      context: context,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 8, 4),
-              child: Row(
-                children: [
-                  Icon(Icons.alternate_email, size: 18, color: scheme.primary),
-                  const SizedBox(width: 6),
-                  Text('调用技能', style: Theme.of(context).textTheme.titleMedium),
-                  const Spacer(),
-                  IconButton(
-                    tooltip: '关闭',
-                    icon: const Icon(Icons.close, size: 20),
-                    onPressed: () => Navigator.pop(sheetContext),
-                  ),
-                ],
-              ),
-            ),
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                padding: const EdgeInsets.only(bottom: 12),
-                itemCount: usable.length,
-                itemBuilder: (context, index) {
-                  final s = usable[index];
-                  return ListTile(
-                    leading: const Icon(Icons.extension_outlined),
-                    title: Text('@${s.name.trim()}'),
-                    subtitle: s.description.trim().isEmpty
-                        ? null
-                        : Text(
-                            s.description.trim(),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      _insertSkillToken(s);
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 把 `@技能名 ` 插入输入框光标处并聚焦;编程式赋值不会触发 TextField 的
-  /// onChanged,手动补一次以刷新斜杠建议等派生状态。
-  void _insertSkillToken(Skill s) {
-    final controller = inputController;
-    final token = '@${s.name.trim()} ';
-    final selection = controller.selection;
-    final offset = selection.isValid && selection.baseOffset >= 0
-        ? selection.baseOffset
-        : controller.text.length;
-    final text = controller.text.replaceRange(offset, offset, token);
-    controller.value = TextEditingValue(
-      text: text,
-      selection: TextSelection.collapsed(offset: offset + token.length),
-    );
-    inputFocusNode.requestFocus();
-    onChanged(controller.text);
-  }
-}
-
-/// 推理等级徽标:只显示等级单字(高/中/低),tooltip 补全语义。完整「推理 xx」
-/// 文案在窄屏输入框底部行会与模型 chip 抢宽互相省略,单字徽标恒定窄小。
-class _ReasoningBadge extends StatelessWidget {
-  final String level;
-  const _ReasoningBadge({required this.level});
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Tooltip(
-      message: '推理等级:$level',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-        decoration: BoxDecoration(
-          color: scheme.tertiary.withValues(alpha: 0.14),
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Text(
-          level,
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-            color: scheme.tertiary,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// AppBar 里的小头像:base64 图或名字首字。
 /// 必须是 StatefulWidget:流式回复期间 AppBar 随每个流式块重建,若每次 build 都
 /// 现解 base64 并 new 一个 MemoryImage,头像会被反复重新解码而频闪(与
@@ -2001,15 +2198,15 @@ class _ChatAvatarState extends State<_ChatAvatar> {
   @override
   Widget build(BuildContext context) {
     final bytes = _bytes ??= safeBase64Decode(widget.avatarBase64);
-    if (bytes != null) {
-      return CircleAvatar(
-        radius: 16,
-        backgroundImage: _provider ??= MemoryImage(bytes),
-      );
-    }
     final initial = widget.name.isEmpty ? '?' : widget.name.characters.first;
+    // foregroundImage 画在 child 之上:解码失败时自动露出首字,不会留下
+    // 一个没有内容的空白圆。
     return CircleAvatar(
       radius: 16,
+      foregroundImage: bytes == null
+          ? null
+          : (_provider ??= MemoryImage(bytes)),
+      onForegroundImageError: bytes == null ? null : (_, __) {},
       child: Text(initial, style: const TextStyle(fontSize: 14)),
     );
   }
@@ -2089,9 +2286,7 @@ class _AvatarStatusSheet extends StatelessWidget {
                 textAlign: TextAlign.center,
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
-                style: text.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
+                style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ],
             const SizedBox(height: 16),
@@ -2110,65 +2305,6 @@ class _AvatarStatusSheet extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-/// 输入框控制器:`@技能名` 记号以主题蓝高亮渲染。
-///
-/// 只影响显示层 —— [text]/[value] 仍是原始输入,发送管线照常按文本判据
-/// (`contains('@$name')`)识别触发。[skillNames] 由 ChatScreen 每次 build
-/// 用已启用技能刷新;名字集合为空或 IME 组合中时回退基类默认渲染。
-class _SkillHighlightController extends TextEditingController {
-  Set<String> skillNames = const {};
-
-  _SkillHighlightController();
-
-  @override
-  TextSpan buildTextSpan({
-    required BuildContext context,
-    TextStyle? style,
-    required bool withComposing,
-  }) {
-    // IME 组合中回退默认渲染,保住组合文字的下划线交互;空集合无记号可染。
-    if (skillNames.isEmpty ||
-        (withComposing &&
-            value.composing.isValid &&
-            !value.composing.isCollapsed)) {
-      return super.buildTextSpan(
-        context: context,
-        style: style,
-        withComposing: withComposing,
-      );
-    }
-    final pattern = skillTokenPattern(skillNames);
-    final color = skillTokenColor(
-      Theme.of(context).colorScheme,
-      onPrimaryBubble: false,
-    );
-    final text = this.text;
-    final spans = <InlineSpan>[];
-    var last = 0;
-    for (final m in pattern.allMatches(text)) {
-      if (m.start > last) {
-        spans.add(TextSpan(text: text.substring(last, m.start)));
-      }
-      spans.add(
-        TextSpan(
-          text: m[0],
-          style: (style ?? const TextStyle()).copyWith(color: color),
-        ),
-      );
-      last = m.end;
-    }
-    if (spans.isEmpty) {
-      return super.buildTextSpan(
-        context: context,
-        style: style,
-        withComposing: withComposing,
-      );
-    }
-    if (last < text.length) spans.add(TextSpan(text: text.substring(last)));
-    return TextSpan(children: spans, style: style);
   }
 }
 
@@ -2239,14 +2375,64 @@ class _ChatBackgroundState extends State<_ChatBackground> {
             ),
             child: image,
           );
-    return IgnorePointer(
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          rendered,
-          ColoredBox(color: veilColor),
-        ],
+    // ImageFiltered 的模糊输出不受布局边界约束,会画到自身 rect 之外;宽窗
+    // 主从布局下背景左缘的晕染会越过窗格边界、渗到侧栏上。裁到自身边界,
+    // 背景只落在聊天窗格内。
+    return ClipRect(
+      child: IgnorePointer(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            rendered,
+            ColoredBox(color: veilColor),
+          ],
+        ),
       ),
+    );
+  }
+}
+
+/// 会话重命名弹窗:控制器归弹窗 State 所有 —— 在 showDialog 调用方释放会
+/// 撞上退场动画期间 TextField 重建(controller used after dispose)。
+class _RenameSessionDialog extends StatefulWidget {
+  final String initialTitle;
+  const _RenameSessionDialog({required this.initialTitle});
+
+  @override
+  State<_RenameSessionDialog> createState() => _RenameSessionDialogState();
+}
+
+class _RenameSessionDialogState extends State<_RenameSessionDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initialTitle,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('重命名会话'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(labelText: '会话标题'),
+        onSubmitted: (value) => Navigator.pop(context, value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _controller.text),
+          child: const Text('确定'),
+        ),
+      ],
     );
   }
 }

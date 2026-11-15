@@ -7,6 +7,8 @@ library;
 import 'package:flutter/material.dart';
 import '../../models/variable.dart';
 import 'copy_button.dart';
+import 'sheet_header.dart';
+import 'unsaved_changes_guard.dart';
 
 /// 变量键值编辑结果:[key] 已 trim 且保证非空,[value] 已 trim(可为空串),
 /// [access] 为保存到 `variables.agent_access` 的后台权限。
@@ -128,128 +130,123 @@ class _VariableEditSheetState extends State<_VariableEditSheet> {
       ),
     );
 
-    return Align(
-      alignment: Alignment.bottomCenter,
-      // heightFactor=1:整块按内容高度收缩,不撑满整屏(与其余底单一致)。
-      heightFactor: 1,
-      child: Padding(
-        padding: EdgeInsets.only(bottom: bottomInset),
-        child: Material(
-          color: scheme.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-          clipBehavior: Clip.antiAlias,
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(12, 12, 12, bottomInset > 0 ? 12 : 20),
-            // 键盘弹起 + 新增权限下拉后内容可能超过可视高度:可滚动,
-            // 不让保存键被顶出屏幕。
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        width: 36,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: scheme.outlineVariant,
-                          borderRadius: BorderRadius.circular(2),
+    return UnsavedChangesGuard(
+      // 点遮罩/系统返回退出前确认;显式「取消」按钮走程序性 pop,不拦。
+      hasChanges: () =>
+          _key != widget.initialKey ||
+          _valueController.text != widget.initialValue ||
+          _access != widget.initialAccess,
+      changes: [_keyController, _valueController],
+      title: '放弃编辑?',
+      message: '已填写的内容不会保存。',
+      confirmLabel: '放弃',
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        // heightFactor=1:整块按内容高度收缩,不撑满整屏(与其余底单一致)。
+        heightFactor: 1,
+        child: Padding(
+          padding: EdgeInsets.only(bottom: bottomInset),
+          child: Material(
+            color: scheme.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            clipBehavior: Clip.antiAlias,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                12,
+                12,
+                12,
+                bottomInset > 0 ? 12 : 20,
+              ),
+              // 键盘弹起 + 新增权限下拉后内容可能超过可视高度:可滚动,
+              // 不让保存键被顶出屏幕。
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    SheetHeader(title: widget.title, closeLabel: '取消'),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _keyController,
+                      autofocus: true,
+                      textInputAction: TextInputAction.next,
+                      onChanged: (v) => setState(() => _key = v),
+                      decoration: decoration('键', '如 hp / location'),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _valueController,
+                      minLines: 3,
+                      maxLines: 6,
+                      keyboardType: TextInputType.multiline,
+                      decoration: decoration('值', '如 8/10').copyWith(
+                        suffixIcon: CopyTextButton(
+                          controller: _valueController,
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          widget.title,
-                          style: Theme.of(context).textTheme.titleMedium,
-                          overflow: TextOverflow.ellipsis,
+                        suffixIconConstraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
                         ),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('取消'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _keyController,
-                    autofocus: true,
-                    textInputAction: TextInputAction.next,
-                    onChanged: (v) => setState(() => _key = v),
-                    decoration: decoration('键', '如 hp / location'),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _valueController,
-                    minLines: 3,
-                    maxLines: 6,
-                    keyboardType: TextInputType.multiline,
-                    decoration: decoration('值', '如 8/10').copyWith(
-                      suffixIcon: CopyTextButton(controller: _valueController),
-                      suffixIconConstraints: const BoxConstraints(
-                        minWidth: 40,
-                        minHeight: 40,
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  DropdownButtonFormField<VariableAccess>(
-                    // key 随当前权限变化:切换后强制重建下拉,不依赖 FormField
-                    // 对 initialValue 的内部同步。
-                    key: ValueKey('variable_access_${_access.name}'),
-                    initialValue: _access,
-                    isExpanded: true,
-                    decoration: decoration('后台权限', '控制后台 agent 对该变量的改/删权限'),
-                    items: [
-                      for (final access in VariableAccess.values)
-                        DropdownMenuItem(
-                          value: access,
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<VariableAccess>(
+                      // key 随当前权限变化:切换后强制重建下拉,不依赖 FormField
+                      // 对 initialValue 的内部同步。
+                      key: ValueKey('variable_access_${_access.name}'),
+                      initialValue: _access,
+                      isExpanded: true,
+                      decoration: decoration('后台权限', '控制后台引擎对该变量的改/删权限'),
+                      items: [
+                        for (final access in VariableAccess.values)
+                          DropdownMenuItem(
+                            value: access,
+                            child: Text(
+                              access.label,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) setState(() => _access = value);
+                      },
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6, left: 4),
+                      child: Text(
+                        '${_access.description}。只影响后台引擎,不改写剧情正文。',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    if (_conflicts)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          '已存在同名变量,保存将覆盖它的值。',
+                          style: TextStyle(color: scheme.error, fontSize: 12),
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
                           child: Text(
-                            access.label,
-                            overflow: TextOverflow.ellipsis,
+                            '删除的变量会进入回收站,可在状态面板恢复',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: scheme.onSurfaceVariant),
                           ),
                         ),
-                    ],
-                    onChanged: (value) {
-                      if (value != null) setState(() => _access = value);
-                    },
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6, left: 4),
-                    child: Text(
-                      '${_access.description}。只影响后台 agent,不改写剧情正文。',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                  if (_conflicts)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        '已存在同名变量,保存将覆盖它的值。',
-                        style: TextStyle(color: scheme.error, fontSize: 12),
-                      ),
-                    ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '删除的变量会进入回收站,可在状态面板恢复',
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: scheme.onSurfaceVariant),
+                        FilledButton.icon(
+                          onPressed: _key.trim().isEmpty ? null : _submit,
+                          icon: const Icon(Icons.check, size: 18),
+                          label: const Text('保存'),
                         ),
-                      ),
-                      FilledButton.icon(
-                        onPressed: _key.trim().isEmpty ? null : _submit,
-                        icon: const Icon(Icons.check, size: 18),
-                        label: const Text('保存'),
-                      ),
-                    ],
-                  ),
-                ],
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

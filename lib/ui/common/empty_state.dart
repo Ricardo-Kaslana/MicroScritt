@@ -1,7 +1,7 @@
 /// 列表/面板的空态占位组件。
 ///
 /// 只做展示,不判断何时为空;是否给引导按钮由页面传入的 [EmptyState.action]
-/// 决定。
+/// 决定。整页空态用默认档,嵌在分组卡/面板内的小区块用 [compact] 档。
 library;
 
 import 'package:flutter/material.dart';
@@ -14,41 +14,72 @@ class EmptyState extends StatelessWidget {
   final String? message;
   final Widget? action;
 
-  const EmptyState({super.key, required this.icon, required this.title, this.message, this.action});
+  /// 紧凑档:更小的图标圆片与字号,用于状态面板等长页面的区块空态,
+  /// 不抢整页空态的视觉重量。两个档位同源,避免各页自绘灰字提示。
+  final bool compact;
+
+  const EmptyState({
+    super.key,
+    required this.icon,
+    required this.title,
+    this.message,
+    this.action,
+    this.compact = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final circle = compact ? 48.0 : 72.0;
+    final iconSize = compact ? 22.0 : 32.0;
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(32),
+        padding: EdgeInsets.all(compact ? 16 : 32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 72,
-              height: 72,
+              width: circle,
+              height: circle,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: scheme.secondaryContainer.withValues(alpha: 0.55),
                 shape: BoxShape.circle,
               ),
-              child: Icon(icon, size: 32, color: scheme.onSecondaryContainer),
+              child: Icon(
+                icon,
+                size: iconSize,
+                color: scheme.onSecondaryContainer,
+              ),
             ),
-            const SizedBox(height: 18),
+            SizedBox(height: compact ? 10 : 18),
             Text(
               title,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+              textAlign: TextAlign.center,
+              style: compact
+                  ? Theme.of(context).textTheme.titleSmall
+                  : Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
             ),
             if (message != null) ...[
-              const SizedBox(height: 8),
+              SizedBox(height: compact ? 4 : 8),
               Text(
                 message!,
                 textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+                style: compact
+                    ? Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      )
+                    : Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
               ),
             ],
-            if (action != null) ...[const SizedBox(height: 22), action!],
+            if (action != null) ...{
+              SizedBox(height: compact ? 12 : 22),
+              action!,
+            },
           ],
         ),
       ),

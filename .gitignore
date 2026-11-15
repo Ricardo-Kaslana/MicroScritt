@@ -16,9 +16,12 @@ migrate_working_dir/
 .omo/
 .zcode/
 .codegraph
+.codeartsdoer/
+.atomcode/
 .workbuddy-ai/
 .claude/
 .superpowers/
+.zed/
 
 # IntelliJ related
 *.iml

@@ -20,6 +20,18 @@ void main() {
       expect(budgetLevelFor(0.80), ContextBudgetLevel.hard);
       expect(budgetLevelFor(0.99), ContextBudgetLevel.hard);
     });
+    test('自定义触发线:软挡顺延,硬挡派生为 max(80%, 触发线+5%)', () {
+      final hard = ContextBudgetPolicy.hardFor(0.90); // 0.95
+      expect(budgetLevelFor(0.89, soft: 0.90, hard: hard), ContextBudgetLevel.ok);
+      expect(budgetLevelFor(0.90, soft: 0.90, hard: hard), ContextBudgetLevel.soft);
+      expect(budgetLevelFor(0.95, soft: 0.90, hard: hard), ContextBudgetLevel.hard);
+
+      // 触发线不高时硬挡保持 80% 下限;越界值夹到可选范围。
+      expect(ContextBudgetPolicy.hardFor(0.60), 0.80);
+      expect(ContextBudgetPolicy.hardFor(0.30), 0.80);
+      expect(ContextBudgetPolicy.hardFor(1.0), 0.95);
+      expect(ContextBudgetPolicy.hardFor(0.1), 0.80);
+    });
   });
 
   group('estimateRequestTokens', () {

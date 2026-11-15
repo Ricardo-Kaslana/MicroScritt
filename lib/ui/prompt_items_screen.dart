@@ -12,12 +12,15 @@ import '../export/resource_exporter.dart';
 import '../import/resource_importer.dart';
 import '../models/prompt_item.dart';
 import '../state/providers.dart';
+import 'common/app_menu.dart';
 import 'common/confirm_dialog.dart';
+import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
 import 'common/form_field.dart';
+import 'common/list_page_scaffold.dart';
 import 'common/resource_io.dart';
-import 'common/searchable_list.dart';
 import 'common/section_header.dart';
+import 'common/toggle_delete_tile.dart';
 
 /// 全局提示词列表页(设置页「内容与扩展 · 全局提示词」入口)。
 ///
@@ -40,6 +43,36 @@ class PromptItemsScreen extends ConsumerWidget {
       ),
     );
     ref.invalidate(promptItemsProvider);
+  }
+
+  /// 拖拽排序:预设段与规则段在 system 中的位置固定,不允许互相穿插;
+  /// 同类型内按松手顺序重写 position。
+  Future<bool> _reorder(
+    BuildContext context,
+    WidgetRef ref,
+    List<PromptItem> original,
+    List<PromptItem> reordered,
+  ) async {
+    final sameKindLayout =
+        original.length == reordered.length &&
+        [
+          for (var i = 0; i < original.length; i++)
+            original[i].kind == reordered[i].kind,
+        ].every((same) => same);
+    if (!sameKindLayout) {
+      _snack(context, '预设与规则不能互相调整顺序');
+      return false;
+    }
+    await ref.read(promptItemRepositoryProvider).reorder(reordered);
+    ref.invalidate(promptItemsProvider);
+    return true;
+  }
+
+  static void _snack(BuildContext context, String message) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// 删除提示词项:确认弹层展示正文摘要,删除后不再进入 system。
@@ -86,22 +119,34 @@ class PromptItemsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final items = ref.watch(promptItemsProvider);
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('全局提示词'),
-        actions: [
-          IconButton(
-            tooltip: '导出 JSON',
-            icon: const Icon(Icons.file_download_outlined),
-            onPressed: () => _exportJson(context, ref),
-          ),
-          IconButton(
-            tooltip: '导入 JSON',
-            icon: const Icon(Icons.file_upload_outlined),
-            onPressed: () => _importJson(context, ref),
-          ),
-        ],
-      ),
+    final current = items.value ?? const <PromptItem>[];
+    return ListPageScaffold<PromptItem>(
+      title: '全局提示词',
+      actions: [
+        AppPopupMenuButton<String>(
+          tooltip: '更多操作',
+          onSelected: (action) {
+            switch (action) {
+              case 'export':
+                _exportJson(context, ref);
+              case 'import':
+                _importJson(context, ref);
+            }
+          },
+          actions: const [
+            MenuAction(
+              value: 'export',
+              label: '导出 JSON',
+              icon: Icons.file_download_outlined,
+            ),
+            MenuAction(
+              value: 'import',
+              label: '导入 JSON',
+              icon: Icons.file_upload_outlined,
+            ),
+          ],
+        ),
+      ],
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => Navigator.push(
           context,
@@ -110,53 +155,37 @@ class PromptItemsScreen extends ConsumerWidget {
         icon: const Icon(Icons.add),
         label: const Text('新建'),
       ),
-      body: items.when(
-        data: (list) => list.isEmpty
-            ? const EmptyState(
-                icon: Icons.notes_outlined,
-                title: '暂无提示词项',
-                message: '提示词项会按顺序拼进每次对话的系统提示词(预设/规则)。',
-              )
-            : SearchableList<PromptItem>(
-                items: list,
-                searchHint: '搜索提示词名称/内容',
-                searchText: (item) => '${item.name} ${item.text}',
-                itemBuilder: (context, item) => GroupCard(
-                  children: [
-                    ListTile(
-                      leading: _KindBadge(kind: item.kind),
-                      title: Text(
-                        item.name.isNotEmpty ? item.name : _clip(item.text),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: '删除',
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () => _delete(context, ref, item),
-                          ),
-                          Switch(
-                            value: item.enabled,
-                            onChanged: (_) => _toggle(ref, item),
-                          ),
-                        ],
-                      ),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => PromptItemEditScreen(item: item),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+      loading: items.isLoading && !items.hasValue,
+      error: items.hasError && !items.hasValue ? items.error : null,
+      onRetry: () => ref.invalidate(promptItemsProvider),
+      items: items.value,
+      onReorder: current.length > 1
+          ? (reordered) => _reorder(context, ref, current, reordered)
+          : null,
+      reorderKey: (item) => 'prompt-${item.id ?? item.position}',
+      emptyState: const EmptyState(
+        icon: Icons.notes_outlined,
+        title: '暂无提示词项',
+        message: '提示词项会按顺序拼进每次对话的系统提示词(预设/规则)。',
+      ),
+      searchHint: '搜索提示词名称/内容',
+      searchText: (item) => '${item.name} ${item.text}',
+      itemBuilder: (context, item) => GroupCard(
+        children: [
+          ToggleDeleteTile(
+            leading: _KindBadge(kind: item.kind),
+            title: item.name.isNotEmpty ? item.name : _clip(item.text),
+            enabled: item.enabled,
+            onToggle: (_) => _toggle(ref, item),
+            onDelete: () => _delete(context, ref, item),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => PromptItemEditScreen(item: item),
               ),
-        error: (e, _) =>
-            EmptyState(icon: Icons.error_outline, title: '加载失败', message: '$e'),
-        loading: () => const Center(child: CircularProgressIndicator()),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -197,10 +226,10 @@ class _KindBadge extends StatelessWidget {
   }
 }
 
-/// 提示词项新建/编辑屏:类型、名称、正文、排序与启用开关。
+/// 提示词项新建/编辑屏:类型、名称、正文与启用开关。
 ///
-/// 内容必填;位置按整数解析,非法输入回落 0(不阻断保存)。保存后失效列表
-/// 并返回上一页;直接返回即丢弃未保存内容。
+/// 内容必填;顺序只在列表页拖拽调整(新建条目排到同类末尾)。保存后失效
+/// 列表并返回上一页;直接返回即丢弃未保存内容。
 class PromptItemEditScreen extends ConsumerStatefulWidget {
   /// null 表示新建;非 null 时以该行为初值编辑。
   final PromptItem? item;
@@ -214,10 +243,12 @@ class PromptItemEditScreen extends ConsumerStatefulWidget {
 class _PromptItemEditScreenState extends ConsumerState<PromptItemEditScreen> {
   late final TextEditingController _name;
   late final TextEditingController _text;
-  late final TextEditingController _position;
   late PromptItemKind _kind;
   late bool _enabled;
   bool _saving = false;
+
+  /// 打开编辑器时的表单快照(未保存修改的判定基准)。
+  late String _initialSignature;
 
   bool get _isNew => widget.item == null;
 
@@ -227,21 +258,24 @@ class _PromptItemEditScreenState extends ConsumerState<PromptItemEditScreen> {
     final item = widget.item;
     _name = TextEditingController(text: item?.name ?? '');
     _text = TextEditingController(text: item?.text ?? '');
-    _position = TextEditingController(text: (item?.position ?? 0).toString());
     _kind = item?.kind ?? PromptItemKind.rule;
     _enabled = item?.enabled ?? true;
+    _initialSignature = _signature();
   }
+
+  String _signature() =>
+      '${_name.text}\u0000${_text.text}\u0000${_kind.name}\u0000$_enabled';
 
   @override
   void dispose() {
     _name.dispose();
     _text.dispose();
-    _position.dispose();
     super.dispose();
   }
 
   /// 保存:正文为空即提示中止;名称允许留空(列表回退展示正文摘要)。
   Future<void> _save() async {
+    if (_saving) return;
     if (_text.text.trim().isEmpty) {
       ScaffoldMessenger.of(
         context,
@@ -251,13 +285,23 @@ class _PromptItemEditScreenState extends ConsumerState<PromptItemEditScreen> {
     setState(() => _saving = true);
     try {
       final repo = ref.read(promptItemRepositoryProvider);
+      // 新建排到同类末尾;编辑时 position 由列表拖拽维护,表单不动它。
+      final position = _isNew
+          ? (await repo.all())
+                    .where((i) => i.kind == _kind)
+                    .fold<int>(
+                      -1,
+                      (max, i) => i.position > max ? i.position : max,
+                    ) +
+                1
+          : widget.item!.position;
       final item = PromptItem(
         id: widget.item?.id,
         kind: _kind,
         name: _name.text.trim(),
         text: _text.text,
         enabled: _enabled,
-        position: int.tryParse(_position.text.trim()) ?? 0,
+        position: position,
       );
       if (_isNew) {
         await repo.insert(item);
@@ -273,59 +317,42 @@ class _PromptItemEditScreenState extends ConsumerState<PromptItemEditScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_isNew ? '新建提示词' : '编辑提示词'),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          GroupCard(
-            children: [
-              FormDropdownField<PromptItemKind>(
-                value: _kind,
-                label: '类型',
-                items: PromptItemKind.values.toList(),
-                labelOf: _KindBadge.label,
-                onChanged: (v) => setState(() => _kind = v ?? _kind),
-              ),
-              FormTextField(
-                controller: _name,
-                label: '名称',
-                hint: '列表里显示的标题(可不填)',
-              ),
-              FormTextField(
-                controller: _text,
-                label: '内容 *',
-                lines: 6,
-                hint: '写进系统提示词的文本',
-              ),
-              FormTextField(
-                controller: _position,
-                label: '位置(越小越靠前)',
-                keyboardType: TextInputType.number,
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          SwitchListTile(
-            title: const Text('启用'),
-            value: _enabled,
-            onChanged: (v) => setState(() => _enabled = v),
-          ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+    return EditFormScaffold(
+      title: _isNew ? '新建提示词' : '编辑提示词',
+      saving: _saving,
+      onSave: _save,
+      hasChanges: () => _signature() != _initialSignature,
+      changes: [_name, _text],
+      children: [
+        GroupCard(
+          children: [
+            FormDropdownField<PromptItemKind>(
+              value: _kind,
+              label: '类型',
+              items: PromptItemKind.values.toList(),
+              labelOf: _KindBadge.label,
+              onChanged: (v) => setState(() => _kind = v ?? _kind),
+            ),
+            FormTextField(
+              controller: _name,
+              label: '名称',
+              hint: '列表里显示的标题(可不填)',
+            ),
+            FormTextField(
+              controller: _text,
+              label: '内容 *',
+              lines: 6,
+              hint: '写进系统提示词的文本',
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        SwitchListTile(
+          title: const Text('启用'),
+          value: _enabled,
+          onChanged: (v) => setState(() => _enabled = v),
+        ),
+      ],
     );
   }
 }

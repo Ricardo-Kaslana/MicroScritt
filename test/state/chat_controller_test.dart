@@ -953,14 +953,18 @@ void main() {
     final controller = container.read(chatControllerProvider.notifier);
     await controller.load(sessionId: sessionId, character: const CharacterCard(name: 'Alice'));
 
-    await controller.runCommand(SlashCommand.compact); // 置压缩通知待发标志
+    await controller.runCommand(SlashCommand.compact); // 压缩完成即立即落库通知
+
+    // 通知在压缩完成时就已落库(不再等下一次输入),因此切换会话也不会丢。
+    var rows = await messageRepo.bySession(sessionId);
+    expect(rows.where((m) => m.refId?.startsWith('notice:compact:') ?? false), hasLength(1));
 
     await controller.send('next');
-    var rows = await messageRepo.bySession(sessionId);
+    rows = await messageRepo.bySession(sessionId);
     final notices = rows.where((m) => m.refId?.startsWith('notice:compact:') ?? false).toList();
     expect(notices, hasLength(1));
     expect(notices.single.content, ContextAssembler.compactNoticeText);
-    // 落库在用户消息之前(发送管线收口),标志已复位。
+    // 落库在用户消息之前(压缩先于下一次输入),标志已复位。
     final nextUser = rows.firstWhere((m) => m.isChat && m.content == 'next');
     expect(notices.single.seq, lessThan(nextUser.seq));
 
@@ -1324,6 +1328,178 @@ void main() {
     final after = await MessageRepository(db).bySession(sessionId);
     expect(after, isEmpty);
     expect(backend.calls, before); // 没有再次生成
+  });
+
+  test('rewrite replaces the latest reply with a transient instruction and draft', () async {
+    final backend = _RecordingBackend();
+    final container = makeContainer(backend);
+    addTearDown(container.dispose);
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(
+      sessionId: sessionId,
+      character: const CharacterCard(name: 'Alice'),
+    );
+    await controller.send('hi');
+    await awaitBackground(container);
+
+    final rows = await MessageRepository(db).bySession(sessionId);
+    final reply = rows.last;
+    expect(reply.role, 'assistant');
+    final mainRequests = backend.requests
+        .where((r) => !r.systemPrompt.contains('<background_task>'))
+        .toList();
+
+    expect(await controller.rewrite(reply.id!, '更短一些'), isNull);
+    await awaitBackground(container);
+
+    final after = await MessageRepository(db).bySession(sessionId);
+    // 仍旧一问一答:旧回复被替换,没有额外的"要求"消息落库。
+    expect(after.map((m) => m.role).toList(), ['user', 'assistant']);
+    expect(after.any((m) => m.content.contains('更短一些')), isFalse);
+    expect(after.any((m) => m.content.contains('用户要求重写')), isFalse);
+
+    final sentRequests = backend.requests
+        .where((r) => !r.systemPrompt.contains('<background_task>'))
+        .toList();
+    expect(sentRequests, hasLength(mainRequests.length + 1));
+    final rewriteRequest = sentRequests.last;
+    final sentText = rewriteRequest.messages.map((m) => m.content).join('\n');
+    // 修改要求与旧稿只随本次请求注入;旧稿在剪断后已不在库中。
+    expect(sentText, contains('更短一些'));
+    expect(sentText, contains(reply.content));
+    expect(rewriteRequest.messages.last.wireRole, 'user');
+    expect(rewriteRequest.messages.last.content, contains('修改要求(以此为准)'));
+  });
+
+  test('rewrite refuses non-latest replies, empty instructions and leaves history untouched', () async {
+    final backend = _RecordingBackend();
+    final container = makeContainer(backend);
+    addTearDown(container.dispose);
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(
+      sessionId: sessionId,
+      character: const CharacterCard(name: 'Alice'),
+    );
+    await controller.send('one');
+    await controller.send('two');
+    await awaitBackground(container);
+
+    var rows = await MessageRepository(db).bySession(sessionId);
+    expect(rows.map((m) => m.role).toList(), [
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+    ]);
+    final mainCalls = backend.requests
+        .where((r) => !r.systemPrompt.contains('<background_task>'))
+        .length;
+
+    expect(await controller.rewrite(rows[1].id!, '改一下'), contains('最新'));
+    expect(await controller.rewrite(rows.last.id!, '   '), contains('不能为空'));
+
+    rows = await MessageRepository(db).bySession(sessionId);
+    expect(rows.map((m) => m.role).toList(), [
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+    ]);
+    expect(
+      backend.requests
+          .where((r) => !r.systemPrompt.contains('<background_task>'))
+          .length,
+      mainCalls,
+    );
+  });
+
+  test('rewrite cuts trailing image messages and replaces the latest text reply', () async {
+    final backend = _RecordingBackend();
+    final container = makeContainer(backend);
+    addTearDown(container.dispose);
+    final repo = MessageRepository(db);
+    // 直接种出「文本回复 + 尾部图片消息」的形状(后台生图独立落库的空正文
+    // 助手行),一次 load 让控制器状态与库对齐。
+    await repo.append(sessionId: sessionId, role: 'user', content: 'hi');
+    final reply = await repo.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '这是一段回复。',
+    );
+    final image = await repo.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageBase64: 'AAAA',
+      imagePrompt: 'a cat',
+    );
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(
+      sessionId: sessionId,
+      character: const CharacterCard(name: 'Alice'),
+    );
+
+    // 最新一条对话行是图片消息,但重写入口在文本回复上,应当受理。
+    expect(await controller.rewrite(reply.id!, '更短一些'), isNull);
+    await awaitBackground(container);
+
+    final after = await repo.bySession(sessionId);
+    // 尾部图片消息随重写一并剪掉,旧稿替换为新回复,不残留图片行。
+    expect(after.map((m) => m.role).toList(), ['user', 'assistant']);
+    expect(after.map((m) => m.id), isNot(contains(image.id)));
+    expect(after.any((m) => m.content.contains('更短一些')), isFalse);
+    final sentText = backend.requests
+        .where((r) => !r.systemPrompt.contains('<background_task>'))
+        .map((r) => r.messages.map((m) => m.content).join('\n'))
+        .join('\n');
+    expect(sentText, contains('更短一些'));
+    expect(sentText, contains(reply.content));
+  });
+
+  test('rewrite refuses when a user message follows the trailing images', () async {
+    final backend = _RecordingBackend();
+    final container = makeContainer(backend);
+    addTearDown(container.dispose);
+    final repo = MessageRepository(db);
+    await repo.append(sessionId: sessionId, role: 'user', content: 'hi');
+    final reply = await repo.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '这是一段回复。',
+    );
+    await repo.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageBase64: 'AAAA',
+      imagePrompt: 'a cat',
+    );
+    await repo.append(sessionId: sessionId, role: 'user', content: '下一问');
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(
+      sessionId: sessionId,
+      character: const CharacterCard(name: 'Alice'),
+    );
+    final mainCalls = backend.requests
+        .where((r) => !r.systemPrompt.contains('<background_task>'))
+        .length;
+
+    // 重写会连带剪掉其后的用户消息,拒绝。
+    expect(await controller.rewrite(reply.id!, '改一下'), contains('最新'));
+
+    final rows = await repo.bySession(sessionId);
+    expect(rows.map((m) => m.role).toList(), [
+      'user',
+      'assistant',
+      'assistant',
+      'user',
+    ]);
+    expect(
+      backend.requests
+          .where((r) => !r.systemPrompt.contains('<background_task>'))
+          .length,
+      mainCalls,
+    );
   });
 
   test('resend trims from the user message and sends the same text again', () async {
@@ -1847,6 +2023,70 @@ void main() {
     expect(all.where((m) => m.isCompacted).length, 19);
   });
 
+  test('soft compact failure surfaces a one-shot notice instead of staying silent', () async {
+    // 摘要 4 次全失败:软挡是事后 best-effort,不阻塞回复,但必须让用户看到
+    // 这次没压成 —— 经 ChatState.notice 一次性闪示(不再完全静默)。
+    await seedCapacityModel(5000);
+    await disablePresetItems();
+    final backend = _SummaryAwareBackend(summaryFailures: 99);
+    final container = makeContainer(backend, maxTokens: 256);
+    addTearDown(container.dispose);
+    container.read(appSettingsProvider.notifier).state = const AppSettings(backgroundEnabled: false);
+
+    final messages = MessageRepository(db);
+    for (var i = 0; i < 22; i++) {
+      await messages.append(sessionId: sessionId, role: i.isEven ? 'user' : 'assistant', content: 's' * 450);
+    }
+
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(
+      sessionId: sessionId,
+      character: const CharacterCard(name: 'Alice'),
+    );
+    await controller.send('hi');
+
+    expect(backend.summaryCalls, 4);
+    expect(
+      container.read(chatControllerProvider).notice,
+      contains('自动上下文压缩未完成'),
+    );
+    // 回复照常落库(失败不掉轮)。
+    expect((await messages.bySession(sessionId)).last.content, 'reply.');
+    // UI 闪示后消费:清除后不再有通知。
+    controller.clearNotice();
+    expect(container.read(chatControllerProvider).notice, isNull);
+  });
+
+  test('custom trigger threshold postpones soft compact until occupancy reaches it', () async {
+    // 同一份数据在默认 60% 会触发软挡;把触发线调到 90% 后应保持原样。
+    await seedCapacityModel(5000);
+    await disablePresetItems();
+    final backend = _SummaryAwareBackend();
+    final container = makeContainer(backend, maxTokens: 256);
+    addTearDown(container.dispose);
+    container.read(appSettingsProvider.notifier).state = const AppSettings(
+      backgroundEnabled: false,
+      autoCompactThreshold: 0.90,
+    );
+
+    final messages = MessageRepository(db);
+    for (var i = 0; i < 22; i++) {
+      await messages.append(sessionId: sessionId, role: i.isEven ? 'user' : 'assistant', content: 's' * 450);
+    }
+
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(
+      sessionId: sessionId,
+      character: const CharacterCard(name: 'Alice'),
+    );
+    await controller.send('hi');
+
+    expect(backend.summaryCalls, 0, reason: '占用未达 90% 触发线,不应自动压缩');
+    final all = await messages.bySession(sessionId);
+    expect(all.where((m) => m.role == 'system'), isEmpty);
+    expect(all.where((m) => m.isCompacted), isEmpty);
+  });
+
   test('soft compact refreshes the snapshot so stale attachments leave the panel', () async {
     // 回归(2026-09-29):软挡压缩发生在 `lastContext: sentContext` 赋值**之后**
     // (事后路径),不重算快照的话面板会停在压缩前 —— 继续显示那些刚被折叠、
@@ -1881,12 +2121,26 @@ void main() {
 
     expect(backend.summaryCalls, 1);
     final all = await messages.bySession(sessionId);
-    expect(all.where((m) => !m.isChat && !m.isCompacted), isEmpty,
-        reason: '测试前提:附件行已被软挡压缩折叠');
+    // 压缩通知是压缩后新增的附件行(不属于被折叠的旧资料),排除后应无残留附件。
+    expect(
+      all.where(
+        (m) =>
+            !m.isChat &&
+            !m.isCompacted &&
+            !(m.refId?.startsWith('notice:') ?? false),
+      ),
+      isEmpty,
+      reason: '测试前提:压缩前的非通知附件行已被软挡压缩折叠',
+    );
 
-    // 面板快照必须跟上压缩后的状态 —— 折叠的附件行不得再出现在分段里。
+    // 面板快照必须跟上压缩后的状态 —— 折叠的世界书附件行不得再出现在分段里
+    // (压缩通知行属于新内容,允许出现)。
     final ctx = container.read(chatControllerProvider).lastContext!;
-    expect(ctx.segments.where((s) => s.key == 'attachments'), isEmpty,
+    final attachLabels = ctx.segments
+        .where((s) => s.key == 'attachments')
+        .expand((s) => s.subEntries)
+        .map((s) => s.label);
+    expect(attachLabels.any((l) => l.contains('圣剑')), isFalse,
         reason: '压缩后快照里不该再有已折叠的附件行');
   });
 

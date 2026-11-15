@@ -15,6 +15,7 @@ import '../backend/upstream_error.dart';
 import '../models/prompt_item.dart';
 import '../context/attachment_budget.dart';
 import '../context/context_assembler.dart';
+import '../data/message_repository.dart';
 import '../engine/background_engine.dart';
 import '../engine/background_status.dart';
 import '../engine/chat_engine.dart';
@@ -26,7 +27,8 @@ import '../models/character_card.dart';
 import '../models/context_snapshot.dart';
 import '../models/hook.dart';
 import '../models/image_result.dart';
-import '../models/app_settings.dart' show BackgroundFeatures, ReasoningLevel, BackgroundOutputTier;
+import '../models/app_settings.dart'
+    show BackgroundFeatures, ReasoningLevel, BackgroundOutputTier;
 import '../models/llm_units.dart';
 import '../models/message.dart';
 import '../models/skill.dart';
@@ -207,9 +209,10 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
   ///   主动点击「应用到上下文」([applyMemoryToContext])。
   String? _frozenMemory;
 
-  /// 压缩通知待发标志:主动/自动压缩成功后置位,下一次组装入口
-  /// ([_persistPendingNotices])落库为附件行并复位。硬挡压缩发生在发送
-  /// 管线内,当轮即落库。
+  /// 压缩通知待发标志:**仅硬挡路径**使用——硬挡压缩发生在发送管线内、用户
+  /// 消息已落库,当轮由 [_persistPendingNotices] 落库为附件行并复位。
+  /// 手动 `/compact` 与软挡压缩在完成时立即落库通知,不经过本标志
+  /// (延迟到下一次输入会在切换会话时丢失)。
   bool _compactNoticePending = false;
 
   /// 已发送过 diff 通知的记忆版本(库中内容哈希):同一版本不重复发 diff;

@@ -155,10 +155,46 @@ class AppSettings {
   final bool dialogueHighlightEnabled;
 
   /// 上下文自动压缩总开关(默认开启)。
-  /// 开启后自动压缩按**上下文窗口占用量**分级触发(三挡:回复后达 60% 软挡
-  /// 自动压缩、发送前超 80% 硬挡先压再发、每次压回 ≈20% 目标挡);
-  /// 关闭后只剩手动 /compact 与发送前机械截断兜底。
+  /// 开启后自动压缩按**上下文窗口占用量**触发(回复落库后达到
+  /// [autoCompactThreshold] 自动摘要、发送前超过强制线先压再发、每次压回
+  /// ≈20% 目标挡);关闭后只剩手动 /compact 与发送前机械截断兜底。
   final bool autoCompactEnabled;
+
+  /// 自动压缩触发线(窗口占用率,默认 0.60)。回复落库后的占用率估算达到
+  /// 该值即触发一次自动摘要压缩;发送前的强制线取
+  /// `max(0.80, 触发线 + 0.05)`,保证硬挡总比软挡晚一步。
+  ///
+  /// 可调范围 [minAutoCompactThreshold]–[maxAutoCompactThreshold]。持久化于
+  /// `app_settings.auto_compact_threshold`(schema v68);脏值/越界读入回落默认。
+  final double autoCompactThreshold;
+
+  /// 自动压缩触发线的可选下限。
+  static const double minAutoCompactThreshold = 0.30;
+
+  /// 自动压缩触发线的可选上限(硬挡仍留出 5 个百分点的缓冲)。
+  static const double maxAutoCompactThreshold = 0.90;
+
+  /// 自动压缩触发线默认值(与历史硬编码软挡一致)。
+  static const double defaultAutoCompactThreshold = 0.60;
+
+  /// 把触发线归一化到百分比精度(两位小数);越界返回 null。
+  ///
+  /// Slider 按 divisions 计算时会产生 `0.9000000000000001` 这类浮点尾差,
+  /// 既可能让 `Slider` 的 value 超出 max 断言,也可能把合法值误判为越界。
+  static double? normalizeAutoCompactThreshold(double value) {
+    final rounded = (value * 100).round() / 100;
+    if (rounded < minAutoCompactThreshold ||
+        rounded > maxAutoCompactThreshold) {
+      return null;
+    }
+    return rounded;
+  }
+
+  /// 同 [normalizeAutoCompactThreshold],但越界时夹到可选范围(供 UI 使用)。
+  static double clampAutoCompactThreshold(double value) =>
+      ((value * 100).round() / 100)
+          .clamp(minAutoCompactThreshold, maxAutoCompactThreshold)
+          .toDouble();
 
   /// 后台生图间隔:每隔多少**轮对话**允许生成一次。默认 1 = 每轮(可生成的
   /// 轮才生,后台引擎仍可能因无场景变化不产出提示词)。
@@ -188,6 +224,7 @@ class AppSettings {
     this.backgroundMemoryAnchor = true,
     this.backgroundDeletionConfirm = false,
     this.autoCompactEnabled = true,
+    this.autoCompactThreshold = defaultAutoCompactThreshold,
     this.imageInterval = 1,
     this.maxAutoAttachments = 5,
   });
@@ -201,6 +238,7 @@ class AppSettings {
     double? chatBackgroundBlur,
     bool? dialogueHighlightEnabled,
     bool? autoCompactEnabled,
+    double? autoCompactThreshold,
     int? imageInterval,
     int? maxAutoAttachments,
     ReasoningLevel? backgroundReasoningLevel,
@@ -220,6 +258,7 @@ class AppSettings {
     dialogueHighlightEnabled:
         dialogueHighlightEnabled ?? this.dialogueHighlightEnabled,
     autoCompactEnabled: autoCompactEnabled ?? this.autoCompactEnabled,
+    autoCompactThreshold: autoCompactThreshold ?? this.autoCompactThreshold,
     imageInterval: imageInterval ?? this.imageInterval,
     maxAutoAttachments: maxAutoAttachments ?? this.maxAutoAttachments,
     backgroundReasoningLevel:

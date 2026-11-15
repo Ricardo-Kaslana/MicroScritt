@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'common/edit_form_scaffold.dart';
 import 'common/form_field.dart';
 import 'common/section_header.dart';
 import '../backend/plugin_image_backend.dart';
@@ -64,7 +65,43 @@ class _ImageProviderEditScreenState
   bool _refreshingModels = false;
   bool _testingImage = false;
 
+  /// 保存中:禁用保存键,防止重复落库。
+  bool _saving = false;
+
+  /// 打开编辑器时的表单快照(未保存修改的判定基准)。
+  late String _initialSignature;
+
   bool get _isNew => widget.existing == null;
+
+  /// 当前表单的扁平快照:核心字段 + 插件选择/动态字段 + 画面风格参数。
+  String _signature() => [
+    _displayName.text,
+    _imgApiKey.text,
+    _imgBaseUrl.text,
+    _imgModel.text,
+    _imgSteps.text,
+    _pluginId ?? '',
+    _pluginValues.toString(),
+    for (final entry in _pluginControllers.entries)
+      '${entry.key}=${entry.value.text}',
+    _imgSize ?? '',
+    _imgArtist ?? '',
+    _imgSampler ?? '',
+    _imgNoise ?? '',
+    '$_imgScale',
+    '$_imgCfg',
+    _imgNegative ?? '',
+    '$_imgCount',
+  ].join('\u0000');
+
+  List<Listenable> get _textChanges => [
+    _displayName,
+    _imgApiKey,
+    _imgBaseUrl,
+    _imgModel,
+    _imgSteps,
+    ..._pluginControllers.values,
+  ];
 
   @override
   void initState() {
@@ -101,6 +138,7 @@ class _ImageProviderEditScreenState
     );
     _hasSavedConfig = img != null;
     _styleName = img == null ? null : _matchStyleIn(kImageStylePresets);
+    _initialSignature = _signature();
   }
 
   @override
@@ -353,6 +391,8 @@ class _ImageProviderEditScreenState
   /// 用当前表单值拉取模型列表(不落库);成功后若当前模型不在列表内则改选
   /// 第一个,空列表与异常都只是 SnackBar 提示,不阻塞编辑。
   Future<void> _refreshImageModels() async {
+    // 两个探测操作互斥:任一在飞时不再接受另一个,也防止同一按钮重复提交。
+    if (_refreshingModels || _testingImage) return;
     final plugin = _pluginById(ref.read(imagePluginsProvider), _pluginId);
     if (plugin == null) return _showSnack('请先选择生图插件');
     if (_imageUrlOrDefault().isEmpty) return _showSnack('请先填写服务地址');
@@ -383,6 +423,7 @@ class _ImageProviderEditScreenState
   /// 用当前表单值调用插件的 test 操作(不落库);插件未提供测试时给出说明,
   /// 失败只提示不断言配置可用。
   Future<void> _testImageConnection() async {
+    if (_refreshingModels || _testingImage) return;
     final plugin = _pluginById(ref.read(imagePluginsProvider), _pluginId);
     if (plugin == null) return _showSnack('请先选择生图插件');
     if (_imageUrlOrDefault().isEmpty) return _showSnack('请先填写服务地址');
@@ -416,6 +457,7 @@ class _ImageProviderEditScreenState
   /// 保存配置:校验名称/插件/地址与插件字段;字段校验失败只提示,不落库也
   /// 不关闭页面。成功后重新水合活跃配置并刷新列表。
   Future<void> _save() async {
+    if (_saving) return;
     final name = _displayName.text.trim();
     if (name.isEmpty) return _showSnack('请填写配置名称');
     final plugin = _pluginById(ref.read(imagePluginsProvider), _pluginId);
@@ -444,22 +486,27 @@ class _ImageProviderEditScreenState
       pluginId: plugin.id,
       pluginSettings: settings,
     );
-    final repo = ref.read(imageConfigRepositoryProvider);
-    await repo.saveProvider(
-      ImageProviderRecord(
-        id: widget.existing?.id ?? 0,
-        displayName: name,
-        isActive: widget.existing?.isActive ?? false,
-        position: widget.existing?.position ?? 0,
-        config: config,
-      ),
-    );
-    ref.read(imageConfigProvider.notifier).state = await repo
-        .loadActiveConfig();
-    ref.invalidate(imageProvidersProvider);
-    if (!mounted) return;
-    _showSnack('生图配置已保存');
-    Navigator.pop(context);
+    setState(() => _saving = true);
+    try {
+      final repo = ref.read(imageConfigRepositoryProvider);
+      await repo.saveProvider(
+        ImageProviderRecord(
+          id: widget.existing?.id ?? 0,
+          displayName: name,
+          isActive: widget.existing?.isActive ?? false,
+          position: widget.existing?.position ?? 0,
+          config: config,
+        ),
+      );
+      ref.read(imageConfigProvider.notifier).state = await repo
+          .loadActiveConfig();
+      ref.invalidate(imageProvidersProvider);
+      if (!mounted) return;
+      _showSnack('生图配置已保存');
+      Navigator.pop(context);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -490,206 +537,198 @@ class _ImageProviderEditScreenState
       if (_pluginId != null) _pluginId!,
     }.toList();
 
-    return Scaffold(
-      appBar: AppBar(title: Text(_isNew ? '新建生图配置' : '编辑生图配置')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          SectionHeader('配置', icon: Icons.image_outlined),
-          GroupCard(
-            children: [
-              FormTextField(
-                controller: _displayName,
-                label: '配置名称',
-                hint: '如 我的生图网关 / Nai2API',
-                onChanged: (_) => setState(() {}),
+    return EditFormScaffold(
+      title: _isNew ? '新建生图配置' : '编辑生图配置',
+      saving: _saving,
+      onSave: _save,
+      hasChanges: () => _signature() != _initialSignature,
+      changes: _textChanges,
+      saveLabel: '保存生图配置',
+      children: [
+        SectionHeader('配置', icon: Icons.image_outlined),
+        GroupCard(
+          children: [
+            FormTextField(
+              controller: _displayName,
+              label: '配置名称',
+              hint: '如 我的生图网关 / Nai2API',
+              onChanged: (_) => setState(() {}),
+            ),
+            FormDropdownField<String>(
+              fieldKey: ValueKey('image_plugin_${_pluginId ?? 'none'}'),
+              value: _pluginId,
+              label: '生图插件',
+              hint: imagePlugins.isEmpty ? '请先导入生图插件' : '选择生图插件',
+              items: pluginIds,
+              labelOf: (id) {
+                final plugin = _pluginById(imagePlugins, id);
+                if (plugin == null) return '缺失插件 ($id)';
+                return plugin.enabled ? plugin.name : '${plugin.name} (已停用)';
+              },
+              onChanged: _onPluginChanged,
+            ),
+            if (imagePlugins.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                child: TextButton.icon(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const ImagePluginsScreen(),
+                    ),
+                  ),
+                  icon: const Icon(Icons.extension_outlined),
+                  label: const Text('管理生图插件'),
+                ),
               ),
+            FormTextField(
+              controller: _imgApiKey,
+              label: 'API Key / Token',
+              hint: '粘贴该服务的密钥',
+              obscureText: !_showImgApiKey,
+              onChanged: (_) => setState(() {}),
+              suffixIcon: IconButton(
+                tooltip: _showImgApiKey ? '隐藏' : '显示',
+                icon: Icon(
+                  _showImgApiKey ? Icons.visibility_off : Icons.visibility,
+                ),
+                onPressed: () =>
+                    setState(() => _showImgApiKey = !_showImgApiKey),
+              ),
+            ),
+            FormTextField(
+              controller: _imgBaseUrl,
+              label: '服务地址 (base URL)',
+              hint: '如 https://your-service.example.com/v1',
+              onChanged: (_) => setState(() {}),
+            ),
+            if (selected != null &&
+                (selected.supportsListModels || selected.supportsTest))
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 2, 14, 14),
+                child: Row(
+                  children: [
+                    if (selected.supportsListModels) ...[
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: (_refreshingModels || _testingImage)
+                              ? null
+                              : _refreshImageModels,
+                          icon: _refreshingModels
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.refresh, size: 18),
+                          label: const Text('刷新模型列表'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    if (selected.supportsTest)
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: (_refreshingModels || _testingImage)
+                              ? null
+                              : _testImageConnection,
+                          icon: _testingImage
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.cable, size: 18),
+                          label: const Text('测试连接'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            FormTextField(
+              innerKey: const ValueKey('image_model_field'),
+              controller: _imgModel,
+              label: '模型',
+              hint: '输入模型 id;支持列表的插件可点「刷新模型列表」拉取候选',
+              onChanged: (_) => setState(() {}),
+            ),
+            if (_fetchedImageModels.isNotEmpty)
               FormDropdownField<String>(
-                fieldKey: ValueKey('image_plugin_${_pluginId ?? 'none'}'),
-                value: _pluginId,
-                label: '生图插件',
-                hint: imagePlugins.isEmpty ? '请先导入生图插件' : '选择生图插件',
-                items: pluginIds,
-                labelOf: (id) {
-                  final plugin = _pluginById(imagePlugins, id);
-                  if (plugin == null) return '缺失插件 ($id)';
-                  return plugin.enabled ? plugin.name : '${plugin.name} (已停用)';
-                },
-                onChanged: _onPluginChanged,
+                fieldKey: const ValueKey('image_model_picker'),
+                value: null,
+                label: '从已获取的模型中选择',
+                items: _fetchedImageModels,
+                labelOf: (m) => m,
+                onChanged: (v) => setState(() => _imgModel.text = v ?? ''),
               ),
-              if (imagePlugins.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+            if (selected != null)
+              for (final field in selected.fields) _buildPluginField(field),
+            // 尺寸 / 步数与模型、每次生图数量同级平铺,不再收进折叠区。
+            if (selected?.usesStandardParams == true) ...[
+              FormDropdownField<String?>(
+                value: _imgSize,
+                label: '尺寸',
+                hint: '留空用服务端默认',
+                items: const [null, '竖图', '横图', '方图'],
+                labelOf: (v) => v ?? '(服务端默认)',
+                onChanged: (v) => setState(() => _imgSize = v),
+              ),
+              FormTextField(
+                controller: _imgSteps,
+                label: '步数 (steps)',
+                hint: '留空用服务端默认',
+                keyboardType: TextInputType.number,
+              ),
+            ],
+            FormDropdownField<int>(
+              fieldKey: ValueKey('image_count_$_imgCount'),
+              value: _imgCount,
+              label: '每次生图数量',
+              helperText: '一次请求生成 1-6 张,逐张进入聊天流',
+              items: const [1, 2, 3, 4, 5, 6],
+              labelOf: (n) => '$n 张',
+              onChanged: (v) => setState(() => _imgCount = v ?? 1),
+            ),
+            if (selected?.usesStandardParams == true) ...[
+              FormDropdownField<String>(
+                fieldKey: ValueKey('image_style_${_styleName ?? '自定义'}'),
+                value: _styleName,
+                label: '画面风格',
+                hint: '选择预设或自定义风格,风格参数在管理入口维护',
+                items: [for (final p in allStyles) p.name],
+                labelOf: (s) => s,
+                onChanged: (v) {
+                  final preset = allStyles
+                      .where((p) => p.name == v)
+                      .firstOrNull;
+                  if (preset != null) _applyImageStyle(preset);
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                child: Align(
+                  alignment: Alignment.centerLeft,
                   child: TextButton.icon(
                     onPressed: () => Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => const ImagePluginsScreen(),
+                        builder: (_) =>
+                            ImageStylesScreen(prefill: _stylePrefill),
                       ),
                     ),
-                    icon: const Icon(Icons.extension_outlined),
-                    label: const Text('管理生图插件'),
-                  ),
-                ),
-              FormTextField(
-                controller: _imgApiKey,
-                label: 'API Key / Token',
-                hint: '粘贴该服务的密钥',
-                obscureText: !_showImgApiKey,
-                onChanged: (_) => setState(() {}),
-                suffixIcon: IconButton(
-                  tooltip: _showImgApiKey ? '隐藏' : '显示',
-                  icon: Icon(
-                    _showImgApiKey ? Icons.visibility_off : Icons.visibility,
-                  ),
-                  onPressed: () =>
-                      setState(() => _showImgApiKey = !_showImgApiKey),
-                ),
-              ),
-              FormTextField(
-                controller: _imgBaseUrl,
-                label: '服务地址 (base URL)',
-                hint: '如 https://your-service.example.com/v1',
-                onChanged: (_) => setState(() {}),
-              ),
-              if (selected != null &&
-                  (selected.supportsListModels || selected.supportsTest))
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 2, 14, 14),
-                  child: Row(
-                    children: [
-                      if (selected.supportsListModels) ...[
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _testingImage
-                                ? null
-                                : _refreshImageModels,
-                            icon: _refreshingModels
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Icon(Icons.refresh, size: 18),
-                            label: const Text('刷新模型列表'),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                      ],
-                      if (selected.supportsTest)
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _refreshingModels
-                                ? null
-                                : _testImageConnection,
-                            icon: _testingImage
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Icon(Icons.cable, size: 18),
-                            label: const Text('测试连接'),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              FormTextField(
-                innerKey: const ValueKey('image_model_field'),
-                controller: _imgModel,
-                label: '模型',
-                hint: '输入模型 id;支持列表的插件可点「刷新模型列表」拉取候选',
-                onChanged: (_) => setState(() {}),
-              ),
-              if (_fetchedImageModels.isNotEmpty)
-                FormDropdownField<String>(
-                  fieldKey: const ValueKey('image_model_picker'),
-                  value: null,
-                  label: '从已获取的模型中选择',
-                  items: _fetchedImageModels,
-                  labelOf: (m) => m,
-                  onChanged: (v) => setState(() => _imgModel.text = v ?? ''),
-                ),
-              if (selected != null)
-                for (final field in selected.fields) _buildPluginField(field),
-              // 尺寸 / 步数与模型、每次生图数量同级平铺,不再收进折叠区。
-              if (selected?.usesStandardParams == true) ...[
-                FormDropdownField<String?>(
-                  value: _imgSize,
-                  label: '尺寸',
-                  hint: '留空用服务端默认',
-                  items: const [null, '竖图', '横图', '方图'],
-                  labelOf: (v) => v ?? '(服务端默认)',
-                  onChanged: (v) => setState(() => _imgSize = v),
-                ),
-                FormTextField(
-                  controller: _imgSteps,
-                  label: '步数 (steps)',
-                  hint: '留空用服务端默认',
-                  keyboardType: TextInputType.number,
-                ),
-              ],
-              FormDropdownField<int>(
-                fieldKey: ValueKey('image_count_$_imgCount'),
-                value: _imgCount,
-                label: '每次生图数量',
-                helperText: '一次请求生成 1-6 张,逐张进入聊天流',
-                items: const [1, 2, 3, 4, 5, 6],
-                labelOf: (n) => '$n 张',
-                onChanged: (v) => setState(() => _imgCount = v ?? 1),
-              ),
-              if (selected?.usesStandardParams == true) ...[
-                FormDropdownField<String>(
-                  fieldKey: ValueKey('image_style_${_styleName ?? '自定义'}'),
-                  value: _styleName,
-                  label: '画面风格',
-                  hint: '选择预设或自定义风格,风格参数在管理入口维护',
-                  items: [for (final p in allStyles) p.name],
-                  labelOf: (s) => s,
-                  onChanged: (v) {
-                    final preset = allStyles
-                        .where((p) => p.name == v)
-                        .firstOrNull;
-                    if (preset != null) _applyImageStyle(preset);
-                  },
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton.icon(
-                      onPressed: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) =>
-                              ImageStylesScreen(prefill: _stylePrefill),
-                        ),
-                      ),
-                      icon: const Icon(Icons.palette_outlined, size: 18),
-                      label: const Text('管理自定义风格'),
-                    ),
-                  ),
-                ),
-              ],
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 6, 14, 14),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: _save,
-                    child: const Text('保存生图配置'),
+                    icon: const Icon(Icons.palette_outlined, size: 18),
+                    label: const Text('管理自定义风格'),
                   ),
                 ),
               ),
             ],
-          ),
-        ],
-      ),
+          ],
+        ),
+      ],
     );
   }
 }

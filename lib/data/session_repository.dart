@@ -56,6 +56,10 @@ class SessionInfo {
   /// 也计入此项 —— 与 [messageCount] 构成"文本 = 总数 - 图片"的干净划分。
   final int imageCount;
   final String? lastMessage;
+
+  /// 置顶时间(空值表示未置顶)。侧栏据此把置顶会话聚到分组之上;
+  /// 查询排序仍按活跃度,置顶只影响展示层。
+  final DateTime? pinnedAt;
   const SessionInfo({
     required this.id,
     required this.characterId,
@@ -64,8 +68,12 @@ class SessionInfo {
     required this.messageCount,
     this.imageCount = 0,
     required this.lastMessage,
+    this.pinnedAt,
   });
 }
+
+/// 自动生成的会话标题:「新会话」或「新会话 N」。
+final RegExp _defaultSessionTitlePattern = RegExp(r'^新会话(?: (\d+))?$');
 
 /// 会话仓储:CRUD、token 用量持久化与列表聚合。
 class SessionRepository {
@@ -77,6 +85,34 @@ class SessionRepository {
       'character_id': characterId,
       'title': title,
       'created_at': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  /// 以可区分的默认标题新建会话:同一角色内首个为「新会话」,此后按已有
+  /// 编号递增为「新会话 2」「新会话 3」……,避免连续新建的会话同名难辨。
+  /// 编号只统计本角色的会话;查询与插入同一事务,连续新建不会拿到相同编号。
+  Future<int> createWithDefaultTitle(int characterId) {
+    return db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'sessions',
+        columns: ['title'],
+        where: 'character_id = ?',
+        whereArgs: [characterId],
+      );
+      var next = 1;
+      for (final row in rows) {
+        final match = _defaultSessionTitlePattern.firstMatch(
+          row['title'] as String? ?? '',
+        );
+        if (match == null) continue;
+        final number = int.tryParse(match.group(1) ?? '') ?? 1;
+        if (number >= next) next = number + 1;
+      }
+      return txn.insert('sessions', {
+        'character_id': characterId,
+        'title': next == 1 ? '新会话' : '新会话 $next',
+        'created_at': DateTime.now().millisecondsSinceEpoch,
+      });
     });
   }
 
@@ -104,6 +140,19 @@ class SessionRepository {
     await db.db.update(
       'sessions',
       {'title': title},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// 置顶/取消置顶:置顶时记下时间戳(侧栏按置顶时间倒序展示),
+  /// 取消时清空。不触碰消息与其它元数据。
+  Future<void> setPinned(int id, bool pinned) async {
+    await db.db.update(
+      'sessions',
+      {
+        'pinned_at': pinned ? DateTime.now().millisecondsSinceEpoch : null,
+      },
       where: 'id = ?',
       whereArgs: [id],
     );
@@ -163,10 +212,20 @@ class SessionRepository {
   /// 末条是图片消息(正文为空)时预览显示「图片消息」而非空白。
   /// 排序按「最近有可见消息」倒序(messages.id 全局自增,可直接当活动时间轴);
   /// 空会话排在最后,彼此按创建时间倒序。
-  Future<List<SessionInfo>> infosByCharacter(int characterId) async {
-    final rows = await db.db.rawQuery(
-      '''
+  Future<List<SessionInfo>> infosByCharacter(int characterId) =>
+      _infos(where: 'WHERE s.character_id = ?', args: [characterId]);
+
+  /// 全部角色的会话聚合信息(桌面宽窗侧栏),口径与 [infosByCharacter] 相同;
+  /// 调用方按 characterId 自行分组。
+  Future<List<SessionInfo>> infosAll() => _infos();
+
+  Future<List<SessionInfo>> _infos({
+    String where = '',
+    List<Object?> args = const [],
+  }) async {
+    final rows = await db.db.rawQuery('''
       SELECT s.id AS id, s.character_id AS character_id, s.title AS title, s.created_at AS created_at,
+             s.pinned_at AS pinned_at,
              COUNT(m.id) AS message_count,
              SUM(CASE WHEN (m.image_base64 IS NOT NULL AND m.image_base64 != '') OR m.image_url IS NOT NULL
                       THEN 1 ELSE 0 END) AS image_count,
@@ -182,12 +241,10 @@ class SessionRepository {
       FROM sessions s
       LEFT JOIN messages m
         ON m.session_id = s.id AND m.kind = 'chat' AND m.role != 'system'
-      WHERE s.character_id = ?
+      $where
       GROUP BY s.id
       ORDER BY (last_activity IS NULL), last_activity DESC, s.created_at DESC, s.id DESC
-    ''',
-      [characterId],
-    );
+    ''', args);
     return rows
         .map(
           (r) => SessionInfo(
@@ -200,6 +257,9 @@ class SessionRepository {
             messageCount: r['message_count'] as int,
             imageCount: r['image_count'] as int? ?? 0,
             lastMessage: r['last_message'] as String?,
+            pinnedAt: r['pinned_at'] == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(r['pinned_at'] as int),
           ),
         )
         .toList();

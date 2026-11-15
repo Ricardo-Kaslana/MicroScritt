@@ -69,6 +69,12 @@ Future<void> main() async {
       // UI 偏好:恢复角色列表布局,切换时回写同一文件。
       uiPrefsFileProvider.overrideWithValue(uiPrefsFile),
       characterLayoutProvider.overrideWith((ref) => uiPrefs.characterLayout),
+      sidebarCollapsedProvider.overrideWith(
+        (ref) => uiPrefs.sidebarCollapsed,
+      ),
+      deckFrontCharacterIdProvider.overrideWith(
+        (ref) => uiPrefs.deckFrontCharacterId,
+      ),
       if (hookRuntime != null)
         hookRuntimeProvider.overrideWithValue(hookRuntime),
     ],

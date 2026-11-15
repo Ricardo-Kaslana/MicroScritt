@@ -16,12 +16,14 @@ void main() {
       textColor: 0xFFFFFFFF,
       radius: 22,
       opacity: 0.85,
+      fontSize: 18,
     );
     final out = BubbleStyle.fromJson(s.toJson());
     expect(out.bubbleColor, 0xFF283593);
     expect(out.textColor, 0xFFFFFFFF);
     expect(out.radius, 22);
     expect(out.opacity, 0.85);
+    expect(out.fontSize, 18);
     expect(out.isDefault, isFalse);
   });
 
@@ -49,5 +51,14 @@ void main() {
     // 空串视为未设置。
     expect(BubbleStyle.fromJson(const {}).fontFamily, isNull);
     expect(const BubbleStyle(fontFamily: '').isDefault, isTrue);
+  });
+
+  test('fontSize serializes and joins isDefault', () {
+    // 默认字号视为未定制;其它整数/小数照常往返。
+    expect(const BubbleStyle(fontSize: kBubbleDefaultFontSize).isDefault, isTrue);
+    expect(const BubbleStyle(fontSize: 18).isDefault, isFalse);
+    expect(const BubbleStyle(fontSize: 13.5).toJson(), {'font_size': 13.5});
+    expect(BubbleStyle.fromJson({'font_size': 18}).fontSize, 18);
+    expect(BubbleStyle.fromJson(const {}).fontSize, isNull);
   });
 }

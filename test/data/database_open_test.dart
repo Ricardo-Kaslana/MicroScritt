@@ -1,4 +1,4 @@
-// 基线数据库(v66):全新建库的表结构与种子;旧版本库的归档重建。
+// 基线数据库(v68):全新建库的表结构与种子;旧版本库的归档重建。
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -66,6 +66,15 @@ void main() {
       reason: 'v65 起保存生图原始描述,供图片重新生成',
     );
 
+    final sessionColumns = (await db.db.rawQuery(
+      "SELECT name FROM pragma_table_info('sessions')",
+    )).map((r) => r['name'] as String).toSet();
+    expect(
+      sessionColumns,
+      contains('pinned_at'),
+      reason: 'v67 起会话可置顶(pinned_at 空值表示未置顶)',
+    );
+
     final variableColumns = (await db.db.rawQuery(
       "SELECT name FROM pragma_table_info('variables')",
     )).map((r) => r['name'] as String).toSet();
@@ -82,6 +91,11 @@ void main() {
       appSettingsColumns,
       contains('background_deletion_confirm'),
       reason: 'v66 起支持删除前确认严格模式',
+    );
+    expect(
+      appSettingsColumns,
+      contains('auto_compact_threshold'),
+      reason: 'v68 起自动压缩触发线可配置',
     );
 
     final providerColumns = (await db.db.rawQuery(

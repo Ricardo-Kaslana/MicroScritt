@@ -1,12 +1,14 @@
 // 会话压缩服务测试:合并式单一摘要、机械折叠兜底、摘要重试与用量回调。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/llm_backend.dart';
+import 'package:microscritt/context/context_assembler.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/message_repository.dart';
 import 'package:microscritt/data/session_repository.dart';
 import 'package:microscritt/engine/compact_service.dart';
 import 'package:microscritt/models/character_card.dart';
+import 'package:microscritt/models/message.dart';
 import 'package:microscritt/models/token_usage.dart';
 import '../support/test_database.dart';
 
@@ -177,31 +179,36 @@ void main() {
     expect((await messages.bySession(sessionId)).where((m) => m.role == 'system'), isEmpty);
   });
 
-  test('waits for the minChunk before compacting (rate-limited auto compact)', () async {
-    // 自动路径按块降频(minChunk >1):掉出窗口的消息积攒够一批才压缩,
-    // 压缩间隔内不再每轮追加摘要 system 行 —— 摘要段字节稳定,缓存不随
-    // 每轮被破坏。默认 minChunk=1 保持旧行为(即时压缩)。
-    final sessionId = await seedSession(25); // 25 条活跃:掉出 5 条 < 10
-    final service = CompactService(_FakeBackend('SUMMARY'), messages);
+  test('includes folded attachment rows in the summary transcript as reference data', () async {
+    // 附件行(世界书/技能/通知)会随历史一起折叠,其资料性内容不能凭空消失:
+    // 摘要请求把它们单独成段送入,提示词只允许提取设定事实,不当作剧情。
+    final sessionId = await seedSession(10);
+    await messages.append(
+      sessionId: sessionId,
+      role: 'user',
+      content: ContextAssembler.worldbookAttachment('圣剑', 'The sword is cursed'),
+      kind: MessageKind.attachment,
+      refId: 'wb:1',
+    );
+    for (var i = 10; i < 20; i++) {
+      await messages.append(sessionId: sessionId, role: i.isEven ? 'user' : 'assistant', content: 'm$i');
+    }
+    final backend = _FakeBackend('SUMMARY');
 
-    final changed = await service.compact(sessionId: sessionId, model: 'fake', keep: 20, minChunk: 10);
+    final changed = await CompactService(backend, messages)
+        .compact(sessionId: sessionId, model: 'fake', keep: 5);
 
-    expect(changed, isFalse);
-    var all = await messages.bySession(sessionId);
-    expect(all.where((m) => m.role == 'system'), isEmpty);
-    expect(all.where((m) => m.isCompacted), isEmpty);
-
-    // 积攒到 30 条(掉出 10 条)后压缩执行。
-    await messages.append(sessionId: sessionId, role: 'user', content: 'm25');
-    await messages.append(sessionId: sessionId, role: 'assistant', content: 'm26');
-    await messages.append(sessionId: sessionId, role: 'user', content: 'm27');
-    await messages.append(sessionId: sessionId, role: 'assistant', content: 'm28');
-    await messages.append(sessionId: sessionId, role: 'user', content: 'm29');
-    final later = await service.compact(sessionId: sessionId, model: 'fake', keep: 20, minChunk: 10);
-    expect(later, isTrue);
-    all = await messages.bySession(sessionId);
-    expect(all.where((m) => m.role == 'system').length, 1);
-    expect(all.where((m) => m.isCompacted).length, 10); // 25 条中的前 10 条被压缩
+    expect(changed, isTrue);
+    final prompt = backend.lastRequest!.messages.single.content;
+    expect(prompt, contains('历史注入资料'));
+    expect(prompt, contains('世界书条目'));
+    expect(prompt, contains('The sword is cursed'));
+    final all = await messages.bySession(sessionId);
+    expect(
+      all.where((m) => m.refId == 'wb:1').single.isCompacted,
+      isTrue,
+      reason: '附件行随所属历史一并折叠(摘要已承接其设定事实)',
+    );
   });
 
   test('reports the summarization token usage via onUsage (D2)', () async {

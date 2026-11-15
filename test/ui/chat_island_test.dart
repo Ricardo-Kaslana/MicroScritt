@@ -151,7 +151,7 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 300));
-    expect(rich('后台agent'), findsOneWidget);
+    expect(rich('后台引擎'), findsOneWidget);
     expect(rich('状态维护中'), findsOneWidget);
     expect(find.byIcon(Icons.stop_rounded), findsOneWidget);
 
@@ -182,7 +182,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(rich('后台agent · 已完成'), findsOneWidget);
+    expect(rich('后台引擎 · 已完成'), findsOneWidget);
     expect(rich('变量 mood=calm'), findsOneWidget);
 
     // 点击闪示进状态面板。
@@ -193,7 +193,7 @@ void main() {
     // TTL(5s)过后收敛回用量粒,后台摘要不再常驻顶部。
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
-    expect(rich('后台agent'), findsNothing);
+    expect(rich('后台引擎'), findsNothing);
     expect(rich('in 100'), findsOneWidget);
   });
 
