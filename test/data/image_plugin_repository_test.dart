@@ -114,6 +114,7 @@ void main() {
     expect(all.map((p) => p.id).toSet(), {
       'microscritt.chat-completions',
       'microscritt.nai2',
+      'microscritt.novelai',
     });
     expect(all.every((p) => p.enabled), isTrue);
 

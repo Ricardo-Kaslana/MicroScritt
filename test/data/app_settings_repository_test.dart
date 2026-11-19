@@ -32,19 +32,13 @@ void main() {
     expect(s.chatBackgroundBlur, 18.0);
   });
 
-  test('defaults and roundtrips for compact/background turn settings', () async {
-    // 未保存过 → 自动压缩默认开启,生图间隔与旧硬编码一致(慢变间隔已随
-    // 逐轮记忆维护退役,不再可设)。
+  test('defaults and roundtrips for compact settings', () async {
+    // 未保存过 → 自动压缩默认开启。
     expect((await repo.load()).autoCompactEnabled, isTrue);
-    expect((await repo.load()).imageInterval, 1);
 
-    await repo.save(const AppSettings(
-      autoCompactEnabled: false,
-      imageInterval: 2,
-    ));
+    await repo.save(const AppSettings(autoCompactEnabled: false));
     final s = await repo.load();
     expect(s.autoCompactEnabled, isFalse); // 关闭自动压缩,须原样往返。
-    expect(s.imageInterval, 2);
 
     await repo.save(const AppSettings(autoCompactEnabled: true));
     expect((await repo.load()).autoCompactEnabled, isTrue);
@@ -155,6 +149,21 @@ void main() {
     final s = await repo.load();
     expect(s.backgroundReasoningLevel, ReasoningLevel.low);
     expect(s.reasoningLevel, ReasoningLevel.high);
+  });
+
+  test('roundtrips the background mode (default legacy, dirty value falls back)', () async {
+    // 默认 legacy:升级/新建库零行为变化。
+    expect((await repo.load()).backgroundMode, BackgroundMode.legacy);
+
+    await repo.save(const AppSettings(backgroundMode: BackgroundMode.agentic));
+    expect((await repo.load()).backgroundMode, BackgroundMode.agentic);
+
+    await repo.save(const AppSettings(backgroundMode: BackgroundMode.hybrid));
+    expect((await repo.load()).backgroundMode, BackgroundMode.hybrid);
+
+    // 旧库脏值读入回退 legacy,坏值不允许阻断启动。
+    await db.db.update('app_settings', {'background_mode': 'bogus'}, where: 'id = 1');
+    expect((await repo.load()).backgroundMode, BackgroundMode.legacy);
   });
 
   test('save replaces the previous settings row', () async {

@@ -1617,6 +1617,54 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       actions: appBarActions,
     );
 
+    // 灵动岛:错误警报 / 用量分账(主写·后台·压缩)/ 主写流式与后台维护
+    // 实况 / 后台运行后摘要闪示 / 初始化记忆行动项 / 命令反馈闪示,统一由
+    // 这颗悬浮胶囊承载。桌面端升到覆盖 AppBar 的外层 Stack,与头像/名字
+    // 同一条水平线;移动端仍贴消息区顶边。两处都是恒驻子树(hidden 时渲染
+    // 零高占位),不改变所在 Stack 其它元素的下标,State 稳定。
+    // 贴顶翻历史时收起用量粒(_nearTop 经 AnimatedBuilder 只重建这一小块);
+    // 入场收敛期整粒隐藏。
+    final island = AnimatedBuilder(
+      animation: Listenable.merge([_nearTop, _nearBottom]),
+      builder: (context, _) => ChatIsland(
+        key: const ValueKey('chat-island'),
+        chat: chat,
+        // 桌面端:收拢态胶囊高约 30,工具栏 56,顶部留 (56-30)/2 让岛面
+        // 与 AppBar 内容垂直居中;展开时从同一顶边向下生长。
+        topInset: desktopPlatform
+            ? MediaQuery.paddingOf(context).top + (kToolbarHeight - 30) / 2
+            : 6,
+        memoryInitPrompt:
+            !memoryInitDismissed &&
+            chat.backgroundStatus != BackgroundStatus.running &&
+            memoriesAsync.maybeWhen(
+              data: (list) => list.every((m) => m.content.trim().isEmpty),
+              orElse: () => false,
+            ),
+        compacting: chat.busyCommand == 'compact',
+        hidden: _entrySettling,
+        // 用量粒让位:仅当列表真的可滚动且用户翻到了顶部(贴顶但
+        // 不贴底)。内容不足一屏的会话贴顶也贴底,不存在"胶囊压住
+        // 正在翻看的历史",照常常驻。
+        idleHushed: _nearTop.value && !_nearBottom.value,
+        hub: _islandHub,
+        onOpenStatus: _openStatus,
+        onInterrupt: () => ref
+            .read(chatControllerProvider.notifier)
+            .interrupt(),
+        onInitMemory: () => ref
+            .read(chatControllerProvider.notifier)
+            .initializeMemory(),
+        onDismissMemoryInit: () {
+          final notifier = ref.read(memoryInitDismissedProvider.notifier);
+          notifier.state = {...notifier.state, widget.sessionId};
+        },
+        onDismissError: () => ref
+            .read(chatControllerProvider.notifier)
+            .clearError(),
+      ),
+    );
+
     final content = Stack(
       fit: StackFit.expand,
       children: [
@@ -1736,53 +1784,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         ),
                       ),
                     ),
-                    // 灵动岛:错误警报 / 用量分账(主写·后台·压缩)/ 主写流式与后台
-                    // 维护实况 / 后台运行后摘要闪示 / 初始化记忆行动项 / 命令反馈
-                    // 闪示,统一由这颗悬浮胶囊承载。
-                    // 贴顶翻历史时收起用量粒(_nearTop 经 AnimatedBuilder 只重建这
-                    // 一小块);入场收敛期整粒隐藏。恒驻 Stack 子树(hidden 时渲染
-                    // 零高占位),不改变消息区的元素下标,State 稳定。
-                    AnimatedBuilder(
-                      animation: Listenable.merge([_nearTop, _nearBottom]),
-                      builder: (context, _) => ChatIsland(
-                        key: const ValueKey('chat-island'),
-                        chat: chat,
-                        memoryInitPrompt:
-                            !memoryInitDismissed &&
-                            chat.backgroundStatus != BackgroundStatus.running &&
-                            memoriesAsync.maybeWhen(
-                              data: (list) =>
-                                  list.every((m) => m.content.trim().isEmpty),
-                              orElse: () => false,
-                            ),
-                        compacting: chat.busyCommand == 'compact',
-                        hidden: _entrySettling,
-                        // 用量粒让位:仅当列表真的可滚动且用户翻到了顶部(贴顶但
-                        // 不贴底)。内容不足一屏的会话贴顶也贴底,不存在"胶囊压住
-                        // 正在翻看的历史",照常常驻。
-                        idleHushed: _nearTop.value && !_nearBottom.value,
-                        hub: _islandHub,
-                        onOpenStatus: _openStatus,
-                        onInterrupt: () => ref
-                            .read(chatControllerProvider.notifier)
-                            .interrupt(),
-                        onInitMemory: () => ref
-                            .read(chatControllerProvider.notifier)
-                            .initializeMemory(),
-                        onDismissMemoryInit: () {
-                          final notifier = ref.read(
-                            memoryInitDismissedProvider.notifier,
-                          );
-                          notifier.state = {
-                            ...notifier.state,
-                            widget.sessionId,
-                          };
-                        },
-                        onDismissError: () => ref
-                            .read(chatControllerProvider.notifier)
-                            .clearError(),
-                      ),
-                    ),
+                    // 桌面端灵岛在外层 Stack 覆盖 AppBar 带(见 build 中的
+                    // island);移动端仍悬浮在消息区顶部。
+                    if (!desktopPlatform) island,
                     // 悬浮爬楼与首尾导航按键组:
                     // 顶部方向(回到顶部/上一条消息)与底部方向(下一条消息/回到底部),
                     // 「收起/展开滚动导航」夹在两组之间(列表中部时是第 3 颗,即正中间);
@@ -1878,10 +1882,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           ),
           Expanded(
-            child: Column(
+            // 桌面端灵岛要浮到 AppBar 带内(见 build 中的 island):用覆盖
+            // 整块右窗的 Stack 承载,Positioned 坐标从窗格顶边起算;移动端
+            // 岛在消息区自己的 Stack 里,这里只有基座一层。
+            child: Stack(
+              fit: StackFit.expand,
               children: [
-                appBar,
-                Expanded(child: content),
+                Column(
+                  children: [
+                    appBar,
+                    Expanded(child: content),
+                  ],
+                ),
+                if (desktopPlatform) island,
               ],
             ),
           ),

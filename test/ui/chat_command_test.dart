@@ -665,6 +665,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('推理等级'), findsOneWidget);
     expect(find.byType(Slider), findsOneWidget);
+    // 与模型选择/上下文用量底单一致的叉号关闭入口。
+    expect(find.byTooltip('关闭'), findsOneWidget);
     // 旧的档位说明文字已移除,只留滑块与刻度。
     expect(find.textContaining('不发送推理'), findsNothing);
 

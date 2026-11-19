@@ -14,6 +14,7 @@ import '../backend/llm_backend.dart';
 import '../backend/plugin_image_backend.dart';
 import '../data/app_config_file.dart';
 import '../data/app_settings_repository.dart';
+import '../data/card_studio_draft_file.dart';
 import '../data/character_repository.dart';
 import '../data/database.dart';
 import '../data/hook_repository.dart';
@@ -28,6 +29,7 @@ import '../data/prompt_item_repository.dart';
 import '../data/session_repository.dart';
 import '../data/skill_repository.dart';
 import '../data/ui_prefs_file.dart';
+import '../data/usage_repository.dart';
 import '../data/user_repository.dart';
 import '../data/variable_repository.dart';
 import '../data/memory_repository.dart';
@@ -46,6 +48,7 @@ import '../models/prompt_item.dart';
 import '../models/regex_script.dart';
 import '../models/skill.dart';
 import '../models/ui_prefs.dart';
+import '../models/usage_stats.dart';
 import '../models/user.dart';
 import '../models/variable.dart';
 import '../models/worldbook_entry.dart';
@@ -69,6 +72,11 @@ final sessionRepositoryProvider = Provider(
 /// 消息仓库(流式追加、窗口化读取与图片列更新)。
 final messageRepositoryProvider = Provider(
   (ref) => MessageRepository(ref.watch(databaseProvider)),
+);
+
+/// Token 用量明细仓库(逐请求 append-only 与统计聚合)。
+final usageRepositoryProvider = Provider(
+  (ref) => UsageRepository(ref.watch(databaseProvider)),
 );
 
 /// 提示词项仓库(preset/rule 两类)。
@@ -148,6 +156,12 @@ final appConfigFileProvider = Provider<AppConfigFile?>((ref) => null);
 /// 轻量 UI 偏好文件(角色列表布局等)。main() 注入真实文件;测试默认 null,
 /// 切换布局时跳过着盘。
 final uiPrefsFileProvider = Provider<UiPrefsFile?>((ref) => null);
+
+/// 制卡草稿文件(按目标分文件)。main() 注入真实文件;测试默认 null,
+/// 控制器不产生草稿文件 IO。
+final cardStudioDraftFileProvider = Provider<CardStudioDraftFile?>(
+  (ref) => null,
+);
 
 /// 角色列表布局:main() 按 [UiPrefsFile] 恢复,页面切换时回写文件。
 final characterLayoutProvider = StateProvider<CharacterLayout>(
@@ -330,15 +344,23 @@ Future<void> persistBackgroundReasoningLevel({
   await repo.save(next);
 }
 
-/// 更新后台 agent 输出上限档位并落库(schema v54)。与推理强度一样是后台
-/// 独立参数:仅影响后台维护/主动轮首试请求的 max_tokens,重试恒放开。
-Future<void> persistBackgroundOutputTier({
-  required BackgroundOutputTier tier,
+/// 后台引擎合并按钮的四态循环:启停与运行模式一次写入。
+///
+/// 一次点按可能同时改变 `backgroundEnabled` 与 `backgroundMode`;分别写启停
+/// 与模式会各自基于同一份旧快照生成整行,后写覆盖先写,导致其中一项丢失。
+Future<void> persistBackgroundEngineState({
+  required bool enabled,
+  required BackgroundMode mode,
+  required void Function(bool) enabledSetter,
   required void Function(AppSettings) appSettingsSetter,
   required AppSettingsRepository repo,
   required AppSettings current,
 }) async {
-  final next = current.copyWith(backgroundOutputTier: tier);
+  enabledSetter(enabled);
+  final next = current.copyWith(
+    backgroundEnabled: enabled,
+    backgroundMode: mode,
+  );
   appSettingsSetter(next);
   await repo.save(next);
 }
@@ -500,6 +522,12 @@ final pendingVariableDeletionsProvider =
 final imageGuideProvider = FutureProvider.family<List<ImageGuide>, int>(
   (ref, sessionId) =>
       ref.watch(imageGuideRepositoryProvider).bySession(sessionId),
+);
+
+/// 用量统计面板的一次性聚合数据(总览 + 全量每日 + 7/30 天/全量模型)。
+/// 页面关闭即释放;刷新由 `ref.invalidate(usageStatsProvider)` 触发。
+final usageStatsProvider = FutureProvider.autoDispose<UsageStatsBundle>(
+  (ref) => ref.watch(usageRepositoryProvider).loadBundle(),
 );
 
 /// 当前主写后端的运行时配置(设置页/启动水合写入);null 表示未配置。

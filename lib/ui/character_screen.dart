@@ -22,6 +22,7 @@ import '../models/ui_prefs.dart';
 import '../models/worldbook_entry.dart';
 import '../state/providers.dart';
 import '../state/ui_prefs_sync.dart';
+import 'card_studio/card_studio_screen.dart';
 import 'character_edit_screen.dart';
 import 'common/app_menu.dart';
 import 'common/confirm_dialog.dart';
@@ -30,7 +31,7 @@ import 'common/export_helper.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/progress_task.dart';
 import 'common/searchable_list.dart';
-import 'common/shrink_image.dart';
+import '../data/shrink_image.dart';
 import 'sessions_screen.dart';
 import 'settings_screen.dart';
 import 'widgets/character_avatar_preview.dart';
@@ -303,6 +304,11 @@ class CharacterScreen extends ConsumerWidget {
           icon: Icons.edit_outlined,
         ),
         const MenuAction(
+          value: 'ai',
+          label: 'AI 优化角色卡',
+          icon: Icons.auto_awesome_outlined,
+        ),
+        const MenuAction(
           value: 'worldbook',
           label: '世界书',
           icon: Icons.book_outlined,
@@ -333,6 +339,13 @@ class CharacterScreen extends ConsumerWidget {
           context,
           MaterialPageRoute(
             builder: (_) => CharacterEditScreen(characterId: c.id),
+          ),
+        );
+      case 'ai':
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => CardStudioScreen(characterId: c.id),
           ),
         );
       case 'worldbook':
@@ -523,6 +536,12 @@ class CharacterScreen extends ConsumerWidget {
       context,
       actions: const [
         MenuAction(
+          value: 'ai',
+          label: 'AI 制卡',
+          icon: Icons.auto_awesome,
+          subtitle: '描述想法，自动生成角色卡、世界书与头像',
+        ),
+        MenuAction(
           value: 'import',
           label: '导入角色卡',
           icon: Icons.file_upload_outlined,
@@ -537,13 +556,19 @@ class CharacterScreen extends ConsumerWidget {
       ],
     );
     if (picked == null || !context.mounted) return;
-    if (picked == 'import') {
-      _import(context, ref);
-    } else {
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const CharacterEditScreen()),
-      );
+    switch (picked) {
+      case 'ai':
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const CardStudioScreen()),
+        );
+      case 'import':
+        _import(context, ref);
+      case 'create':
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const CharacterEditScreen()),
+        );
     }
   }
 }

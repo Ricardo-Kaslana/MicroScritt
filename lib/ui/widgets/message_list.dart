@@ -470,7 +470,15 @@ class MessageListState extends State<MessageList> {
   /// 流结束时一次性补齐。
   Widget _draftBody(BuildContext context) {
     final text = widget.draft.isEmpty ? '…' : widget.draft;
-    final style = chatBubbleTextStyle(Theme.of(context).colorScheme.onSurface);
+    // 草稿气泡与落库后的助手气泡共用角色级样式(字体/字号/文字色):
+    // 漏掉该样式时,流式期间显示应用默认字体,流结束落库的瞬间才跳成
+    // 角色设定的衬线字体。
+    final scheme = Theme.of(context).colorScheme;
+    final style = chatBubbleTextStyle(
+      resolveAssistantTextColor(scheme, widget.assistantBubbleStyle),
+      fontFamily: widget.assistantBubbleStyle?.fontFamily,
+      fontSize: widget.assistantBubbleStyle?.fontSize,
+    );
     if (text.length > kStreamingDraftPlainThreshold) {
       return Text.rich(
         TextSpan(

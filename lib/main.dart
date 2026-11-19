@@ -9,6 +9,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'app.dart';
 import 'data/app_config_file.dart';
 import 'data/app_settings_repository.dart';
+import 'data/card_studio_draft_file.dart';
 import 'data/database.dart';
 import 'data/image_config_repository.dart';
 import 'data/image_plugin_repository.dart';
@@ -48,6 +49,8 @@ Future<void> main() async {
   // UI 偏好(角色列表布局):坏文件一律回落默认,启动不因它失败。
   final uiPrefsFile = await UiPrefsFile.openDefault();
   final uiPrefs = await uiPrefsFile.read();
+  // 制卡草稿文件:控制器进入工作台时读取,保存为尽力而为。
+  final cardStudioDraftFile = await CardStudioDraftFile.openDefault();
   // 接线真实 JS Hook 运行时。非致命:原生 QuickJS 桥接库加载失败时保持
   // hookRuntimeProvider 为 null,应用仍可启动(hooks 只是不生效)。
   final hookRuntime = await _createHookRuntime();
@@ -68,6 +71,7 @@ Future<void> main() async {
       appConfigFileProvider.overrideWithValue(configFile),
       // UI 偏好:恢复角色列表布局,切换时回写同一文件。
       uiPrefsFileProvider.overrideWithValue(uiPrefsFile),
+      cardStudioDraftFileProvider.overrideWithValue(cardStudioDraftFile),
       characterLayoutProvider.overrideWith((ref) => uiPrefs.characterLayout),
       sidebarCollapsedProvider.overrideWith(
         (ref) => uiPrefs.sidebarCollapsed,

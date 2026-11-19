@@ -150,10 +150,11 @@ void main() {
       await tester.pumpAndSettle();
 
       // 状态闪示可见且带维护摘要(技能已迁出后台维护,不再出现在摘要里;
-      // 后台返回的 variables 更新仍在)。闪示文案是富文本双段 span,
-      // findRichText 才能匹配。
+      // 后台返回的 variables 更新仍在)。灵动岛只报变量改动数量,
+      // 具体键值明细留给状态面板。
       expect(find.textContaining('后台引擎', findRichText: true), findsOneWidget);
-      expect(find.textContaining('变量 mood=calm', findRichText: true), findsOneWidget);
+      expect(find.text('新增 1'), findsOneWidget);
+      expect(find.textContaining('mood=calm', findRichText: true), findsNothing);
 
       await tester.runAsync(() => db.db.close());
     },

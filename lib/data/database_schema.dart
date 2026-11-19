@@ -108,8 +108,7 @@ Future<void> _createSchema(Database db) async {
         is_active INTEGER NOT NULL DEFAULT 0,
         position INTEGER NOT NULL DEFAULT 0,
         extra_headers TEXT NOT NULL DEFAULT '',
-        modern_params INTEGER NOT NULL DEFAULT 0,
-        compat_flags TEXT NOT NULL DEFAULT ''
+        modern_params INTEGER NOT NULL DEFAULT 0
       )
     ''');
   await db.execute('''
@@ -234,7 +233,8 @@ Future<void> _createSchema(Database db) async {
         max_auto_attachments INTEGER NOT NULL DEFAULT 5,
         background_character_anchor INTEGER NOT NULL DEFAULT 1,
         background_memory_anchor INTEGER NOT NULL DEFAULT 1,
-        background_deletion_confirm INTEGER NOT NULL DEFAULT 0
+        background_deletion_confirm INTEGER NOT NULL DEFAULT 0,
+        background_mode TEXT NOT NULL DEFAULT 'legacy'
       )
     ''');
   await db.execute('''
@@ -266,6 +266,24 @@ Future<void> _createSchema(Database db) async {
         negative TEXT
       )
     ''');
+  // 逐请求用量明细(append-only):会话行上的用量列是"最近一轮快照",无法
+  // 支撑全量/按日/按模型统计。session_id 不设外键 —— 删除会话不应抹掉历史账。
+  await db.execute('''
+      CREATE TABLE usage_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        kind TEXT NOT NULL DEFAULT 'main',
+        provider_id TEXT NOT NULL DEFAULT '',
+        provider_name TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        model_name TEXT NOT NULL DEFAULT '',
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+        reported INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+      )
+    ''');
 
   // 全新安装:种入内置默认预设提示词(全部启用)。
   await _seedDefaultPresets(db);
@@ -275,10 +293,17 @@ Future<void> _createSchema(Database db) async {
   await _seedDefaultLlmProvider(db);
   // 全新安装:种入默认正则脚本(斜体动作/时间戳胶囊,管理页可见可关)。
   await _seedDefaultRegexScripts(db);
-  // 全新安装:种入两个内置生图协议插件(对话式网关 / Nai2API,取代旧 Dart 后端)。
+  // 全新安装:种入内置生图协议插件(对话式网关 / Nai2API / NovelAI 官方 API)。
   await _seedImagePlugins(db);
   // 消息窗口查询索引:messages 按 session_id + seq 倒序取页。
   await db.execute(
     'CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq DESC)',
+  );
+  // 统计索引:按时间聚合(热力图/趋势/近 N 天)与按模型聚合。
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_usage_records_created ON usage_records(created_at)',
+  );
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_usage_records_model ON usage_records(model, created_at)',
   );
 }

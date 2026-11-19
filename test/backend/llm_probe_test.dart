@@ -11,6 +11,27 @@ void main() {
   const gatewayPolicy403 =
       '{"type":"error","error":{"type":"FreeTierError","message":"endpoint policy violation"}}';
 
+  test('测试连接透传模型配置的温度', () async {
+    late Map<String, dynamic> body;
+    final probe = LlmProbe(
+      config: const BackendConfig(
+        provider: BackendProvider.openai,
+        baseUrl: 'https://x',
+        apiKey: 'k',
+        model: 'm',
+        temperature: 0.4,
+      ),
+      clientFactory: () => MockClient((req) async {
+        body = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response.bytes(utf8.encode(ssePong), 200);
+      }),
+    );
+
+    await probe.run();
+
+    expect(body['temperature'], 0.4);
+  });
+
   test('端点受理请求(流式正文)→ 连接正常', () async {
     var clients = 0;
     final probe = LlmProbe(

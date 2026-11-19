@@ -133,6 +133,9 @@ class FormDropdownField<T> extends StatelessWidget {
   final ValueChanged<T?> onChanged;
   final Key? fieldKey;
 
+  /// helper 说明的最大行数;默认 3,窄屏与大字号下换行展示而不是单行省略。
+  final int? helperMaxLines;
+
   /// 弹出菜单限高:超过即内部滚动。菜单条目仍会全部构建(不是惰性列表),
   /// 限高只解决超高菜单遮挡,不降低长候选的构建成本。
   final double? menuMaxHeight;
@@ -146,6 +149,7 @@ class FormDropdownField<T> extends StatelessWidget {
     required this.onChanged,
     this.hint,
     this.helperText,
+    this.helperMaxLines = 3,
     this.fieldKey,
     this.menuMaxHeight,
   });
@@ -176,6 +180,7 @@ class FormDropdownField<T> extends StatelessWidget {
             decoration: InputDecoration(
               hintText: hint,
               helperText: helperText,
+              helperMaxLines: helperMaxLines,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 14,
                 vertical: 12,

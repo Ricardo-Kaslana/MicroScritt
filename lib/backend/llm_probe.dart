@@ -129,6 +129,8 @@ class LlmProbe {
           model: config.model,
           systemPrompt: '',
           messages: const [ChatMessage(ChatRole.user, 'ping')],
+          // 探测与正式请求同口径:只透传模型配置的温度。
+          temperature: config.temperature,
         ))
         .listen(
           (event) {
@@ -147,6 +149,8 @@ class LlmProbe {
                     detail: _redact(message),
                   ));
                 }
+              case ToolCallsEvent():
+                break; // 探测不带 tools,此事件不会出现。
               case DoneEvent():
                 // 收到 [DONE] 但零正文:契约层面算通(端点受理了请求)。
                 if (!completer.isCompleted) {
@@ -174,7 +178,7 @@ class LlmProbe {
         stageTimeout,
         onTimeout: () => const LlmProbeStage.failure(
           kind: UpstreamErrorKind.transient,
-          detail: '探测超时:服务器长时间未响应',
+          detail: '测试超时:服务器长时间未响应。',
         ),
       );
     } finally {

@@ -12,7 +12,6 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/data_root.dart';
-import '../models/endpoint_compat.dart';
 import '../models/llm_provider.dart';
 import 'app_settings_repository.dart';
 import 'database.dart';
@@ -155,7 +154,6 @@ class AppConfigFile {
               position: incoming.position,
               extraHeaders: incoming.extraHeaders,
               modernParams: incoming.modernParams,
-              compat: incoming.compat,
               models: [
                 for (final model in incoming.models)
                   LlmModelEntry(
@@ -307,7 +305,6 @@ class AppConfigProvider {
   final int position;
   final Map<String, String> extraHeaders;
   final bool modernParams;
-  final EndpointCompat compat;
   final List<AppConfigModel> models;
 
   const AppConfigProvider({
@@ -320,7 +317,6 @@ class AppConfigProvider {
     required this.position,
     required this.extraHeaders,
     required this.modernParams,
-    required this.compat,
     required this.models,
   });
 
@@ -334,7 +330,6 @@ class AppConfigProvider {
     position: config.position,
     extraHeaders: Map<String, String>.from(config.extraHeaders),
     modernParams: config.modernParams,
-    compat: config.compat,
     models: [
       for (final model in config.models)
         AppConfigModel(
@@ -369,13 +364,6 @@ class AppConfigProvider {
           headers[entry.key as String] = entry.value as String;
         }
       }
-    }    final rawCompat = raw['compat'];
-    var compat = EndpointCompat.standard;
-    if (rawCompat is Map) {
-      compat = EndpointCompat(
-        replyViaTool: rawCompat['replyViaTool'] == true,
-        noncePrefix: rawCompat['noncePrefix'] == true,
-      );
     }
     final rawModels = raw['models'];
     final models = <AppConfigModel>[];
@@ -397,7 +385,6 @@ class AppConfigProvider {
       // 与落库口径一致(键小写/去空白),保证"库快照 vs 文件快照"的可比性。
       extraHeaders: LlmProviderConfig.normalizeExtraHeaders(headers),
       modernParams: raw['modernParams'] == true,
-      compat: compat,
       models: models,
     );
   }
@@ -412,7 +399,6 @@ class AppConfigProvider {
     position: position,
     extraHeaders: extraHeaders,
     modernParams: modernParams,
-    compat: compat,
     models: models ?? this.models,
   );
 
@@ -427,10 +413,6 @@ class AppConfigProvider {
     // 键排序保证与库快照比较时不受 Map 插入顺序影响。
     'extraHeaders': {for (final key in extraHeaders.keys.toList()..sort()) key: extraHeaders[key]},
     'modernParams': modernParams,
-    'compat': {
-      'replyViaTool': compat.replyViaTool,
-      'noncePrefix': compat.noncePrefix,
-    },
     'models': [for (final model in models) model.toJson()],
   };
 }
@@ -441,7 +423,9 @@ class AppConfigModel {
   final String displayName;
   final int contextCapacity;
   final int? maxOutput;
-  final double? temperature;
+
+  /// 采样温度;文件缺省/非法时回落模型默认 1.0,与库内解析同口径。
+  final double temperature;
   final bool isActive;
   final int position;
 
@@ -470,7 +454,9 @@ class AppConfigModel {
           : modelId,
       contextCapacity: raw['contextCapacity'] is int ? raw['contextCapacity'] as int : 0,
       maxOutput: raw['maxOutput'] is int ? raw['maxOutput'] as int : null,
-      temperature: raw['temperature'] is num ? (raw['temperature'] as num).toDouble() : null,
+      temperature: raw['temperature'] is num
+          ? (raw['temperature'] as num).toDouble()
+          : LlmModelEntry.defaultTemperature,
       isActive: raw['isActive'] == true,
       position: raw['position'] is int ? raw['position'] as int : index,
     );

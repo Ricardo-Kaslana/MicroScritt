@@ -18,5 +18,5 @@ OpenAI Images 风格的 `POST images/generations` 接口。服务地址、API Ke
 `http / sleep / done / error` 状态机执行;宿主负责网络、超时、大小限制与
 origin 权限校验。完整契约见仓库根目录的 `AGENTS.md`。
 
-仓库还内置两个协议插件(OpenAI 兼容对话式网关 / Nai2API),它们与服务端地址
-一样由用户配置,不包含任何可用密钥或代理服务。
+仓库还内置三个协议插件(OpenAI 兼容对话式网关 / Nai2API / NovelAI 官方 API),
+它们的服务端地址一样由用户配置,不包含任何可用密钥或代理服务。

@@ -6,6 +6,7 @@ library;
 
 import '../models/app_settings.dart';
 import '../models/chat_message.dart';
+import '../models/llm_tool.dart';
 import '../models/token_usage.dart';
 import 'upstream_error.dart';
 
@@ -14,6 +15,14 @@ class LlmRequest {
   final String model;
   final String systemPrompt;
   final List<ChatMessage> messages;
+
+  /// 本次请求可供模型调用的工具;空(默认)= 不发送 tools 字段,旧请求字节
+  /// 不变。非空时后端发送工具定义并把模型的工具调用解析为 [ToolCallsEvent]。
+  final List<LlmTool> tools;
+
+  /// 采样温度。唯一来源是模型配置(`llm_models.temperature`,经
+  /// `BackendConfig` 解析):调用方必须逐请求显式透传,这里不设默认值,
+  /// 避免任何请求路径隐式偏离模型配置。
   final double temperature;
   final int? maxTokens;
 
@@ -48,7 +57,8 @@ class LlmRequest {
     required this.model,
     required this.systemPrompt,
     required this.messages,
-    this.temperature = 0.7,
+    this.tools = const [],
+    required this.temperature,
     this.maxTokens,
     this.reasoningLevel = ReasoningLevel.off,
     this.cacheContext = false,
@@ -69,6 +79,19 @@ class TextDelta extends LlmEvent {
   final String text;
 
   const TextDelta(this.text);
+}
+
+/// 一次请求里模型发起的全部工具调用,流结束时一次性发出(按到达顺序)。
+/// 仅 [LlmRequest.tools] 非空的请求会产出;消费方执行后经 tool 角色消息按
+/// [ToolCall.id] 配对回传结果。无工具消费方的请求不会收到此事件。
+class ToolCallsEvent extends LlmEvent {
+  final List<ToolCall> calls;
+
+  /// 本轮 assistant 需原样回传的后端专属内容块(Anthropic thinking 等),
+  /// 消费方存到回放 assistant 消息的 [ChatMessage.opaqueBlocks];OpenAI 恒空。
+  final List<Map<String, dynamic>> replayBlocks;
+
+  const ToolCallsEvent(this.calls, {this.replayBlocks = const []});
 }
 
 /// 一次请求的 token 用量:**最终快照**,每次请求至多发出一次(流结束时)。

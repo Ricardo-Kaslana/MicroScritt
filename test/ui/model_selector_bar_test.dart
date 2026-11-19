@@ -107,7 +107,15 @@ void main() {
       expect(find.text('推理等级'), findsOneWidget);
       expect(find.byType(Slider), findsOneWidget);
 
-      // 选择第二个模型。
+      // 与推理等级/上下文用量底单一致的叉号关闭入口。
+      expect(find.byTooltip('关闭'), findsOneWidget);
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      expect(find.text('选择模型'), findsNothing);
+
+      // 重新打开并选择第二个模型。
+      await tester.tap(find.byKey(const ValueKey('model_selector')));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Claude Opus'));
       await tester.pumpAndSettle();
 

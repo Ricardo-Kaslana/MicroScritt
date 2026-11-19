@@ -28,7 +28,7 @@ class AppSettingsRepository {
     final dialogueRaw = rows.first['dialogue_highlight_enabled'];
     final bgModelRaw = rows.first['background_model_id'];
     final bgReasoningRaw = rows.first['background_reasoning_level'];
-    final bgTierRaw = rows.first['background_output_tier'];
+    final bgModeRaw = rows.first['background_mode'];
     final compactEnabledRaw = rows.first['auto_compact_enabled'];
     final compactThresholdRaw = rows.first['auto_compact_threshold'];
     // 先归一化到百分比精度再校验,避免 Slider 浮点尾差(0.9000000000000001)
@@ -39,7 +39,6 @@ class AppSettingsRepository {
               ) ??
               AppSettings.defaultAutoCompactThreshold
         : AppSettings.defaultAutoCompactThreshold;
-    final imageIntervalRaw = rows.first['image_interval'];
     final maxAutoRaw = rows.first['max_auto_attachments'];
     final charAnchorRaw = rows.first['background_character_anchor'];
     final memAnchorRaw = rows.first['background_memory_anchor'];
@@ -62,18 +61,15 @@ class AppSettingsRepository {
       backgroundReasoningLevel: bgReasoningRaw is String
           ? ReasoningLevel.fromWire(bgReasoningRaw)
           : ReasoningLevel.off,
-      // 脏值/缺失回落 standard,与列默认一致。
-      backgroundOutputTier: bgTierRaw is String
-          ? BackgroundOutputTier.fromWire(bgTierRaw)
-          : BackgroundOutputTier.standard,
+      // 脏值/缺失回落 legacy,与列默认一致(升级零行为变化)。
+      backgroundMode: bgModeRaw is String
+          ? BackgroundMode.fromWire(bgModeRaw)
+          : BackgroundMode.legacy,
       autoCompactEnabled: compactEnabledRaw is int
           ? compactEnabledRaw != 0
           : true,
       // 触发线脏值/越界一律回落默认,坏值不允许阻断启动。
       autoCompactThreshold: compactThreshold,
-      imageInterval: imageIntervalRaw is int && imageIntervalRaw > 0
-          ? imageIntervalRaw
-          : 1,
       maxAutoAttachments: maxAutoRaw is int && maxAutoRaw >= 0 ? maxAutoRaw : 5,
       // 脏值/缺失回落默认开,与列默认一致。
       backgroundCharacterAnchor: charAnchorRaw is int
@@ -99,13 +95,12 @@ class AppSettingsRepository {
       'dialogue_highlight_enabled': s.dialogueHighlightEnabled ? 1 : 0,
       'background_model_id': s.backgroundModelId,
       'background_reasoning_level': s.backgroundReasoningLevel.name,
-      'background_output_tier': s.backgroundOutputTier.name,
-      // `auto_compact_chunk` / `slow_state_interval` 两列随对应功能退役:
-      // 基线 DDL 保留(带 DEFAULT)但不再写入,缺省插入即回填历史默认值,
-      // 无需为删列重建数据库。
+      'background_mode': s.backgroundMode.name,
+      // `auto_compact_chunk` / `slow_state_interval` / `background_output_tier`
+      // / `image_interval` 四列随对应功能退役:基线 DDL 保留(带 DEFAULT),
+      // 但不再读写;缺省插入即回填历史默认值,无需为删列重建数据库。
       'auto_compact_enabled': s.autoCompactEnabled ? 1 : 0,
       'auto_compact_threshold': s.autoCompactThreshold,
-      'image_interval': s.imageInterval,
       'max_auto_attachments': s.maxAutoAttachments,
       'background_character_anchor': s.backgroundCharacterAnchor ? 1 : 0,
       'background_memory_anchor': s.backgroundMemoryAnchor ? 1 : 0,

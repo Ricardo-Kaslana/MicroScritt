@@ -37,7 +37,11 @@ class AppDatabase {
   /// v67 起会话支持置顶(`pinned_at` 记录置顶时间,空值表示未置顶)。
   /// v68 起自动压缩触发线可配置(`app_settings.auto_compact_threshold`,
   /// 默认 0.6,范围 30%–90%)。
-  static const int schemaVersion = 68;
+  /// v69 起新增逐请求用量明细表 `usage_records`(全量统计面板与导出)。
+  /// v70 起移除历史遗留端点兼容选项(`llm_providers.compat_flags` 列删除)。
+  /// v71 起后台运行模式可配置(`app_settings.background_mode`:
+  /// legacy/agentic/hybrid,坏值回落 legacy,默认零行为变化)。
+  static const int schemaVersion = 71;
 
   /// 在单个事务里执行 [action](供编排器等跨多个 repository 的原子写入用)。
   Future<T> transaction<T>(Future<T> Function(Transaction txn) action) =>

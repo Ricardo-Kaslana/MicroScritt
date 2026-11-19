@@ -74,8 +74,6 @@ void main() {
     final provider = (decoded['llm'] as Map)['providers'][0] as Map;
     expect(provider['providerId'], 'openai');
     expect(provider['apiKey'], 'sk-test');
-    // 端点兼容选项以 compat 对象随 provider 一并落文件。
-    expect(provider['compat'], isA<Map>());
     expect((provider['models'] as List).single['modelId'], 'gpt-test');
 
     final result = await file.applyIfPresent(db);

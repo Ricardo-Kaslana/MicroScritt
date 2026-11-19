@@ -8,6 +8,7 @@ import 'dart:convert';
 import '../models/character_card.dart';
 import '../models/worldbook_entry.dart';
 import 'database.dart';
+import 'worldbook_repository.dart';
 
 /// 列表投影:角色卡 + 头像/背景是否存在的布尔标记。
 ///
@@ -51,30 +52,27 @@ class CharacterRepository {
   /// 用字节而非字符判断,CJK/emoji 卡片不会再"字数看着不多"却撑爆窗口。
   static const int _listJsonByteLimit = 1024 * 1024;
 
+  /// characters 行的统一投影:头像/背景独立列,data_json 不落内嵌头像。
+  static Map<String, Object?> _characterValues(CharacterCard c) => {
+        'name': c.name,
+        'avatar_base64': c.avatarBase64,
+        'background_base64': c.backgroundBase64,
+        'data_json': jsonEncode(c.toStorageJson()),
+      };
+
   /// 新建角色卡,返回自增 id。
   ///
   /// data_json 用 `toStorageJson()`:内嵌头像只落 `avatar_base64` 列,否则大卡
   /// 单行超过 Android CursorWindow,列表/详情会整屏失效。
   Future<int> insert(CharacterCard c) async {
-    return db.db.insert('characters', {
-      'name': c.name,
-      'avatar_base64': c.avatarBase64,
-      'background_base64': c.backgroundBase64,
-      'data_json': jsonEncode(c.toStorageJson()),
-    });
+    return db.db.insert('characters', _characterValues(c));
   }
 
   /// 角色卡片与其世界书在同一个事务内落库:replace 语义(先清后插)。
   /// 消除了"角色已插入但世界书写入失败 → 角色缺世界书"的崩溃窗口。
   Future<int> insertWithWorldbook(CharacterCard c, List<WorldbookEntry> entries) async {
     return db.db.transaction((txn) async {
-      final id = await txn.insert('characters', {
-        'name': c.name,
-        'avatar_base64': c.avatarBase64,
-        'background_base64': c.backgroundBase64,
-        // 见 [insert]:data_json 不落内嵌头像,避免大卡单行撑爆 CursorWindow。
-        'data_json': jsonEncode(c.toStorageJson()),
-      });
+      final id = await txn.insert('characters', _characterValues(c));
       final batch = txn.batch();
       batch.delete('worldbook_entries', where: 'character_id = ?', whereArgs: [id]);
       for (final e in entries) {
@@ -106,16 +104,29 @@ class CharacterRepository {
   Future<void> update(int id, CharacterCard c) async {
     await db.db.update(
       'characters',
-      {
-        'name': c.name,
-        'avatar_base64': c.avatarBase64,
-        'background_base64': c.backgroundBase64,
-        // 见 [insert]:data_json 不落内嵌头像,避免大卡单行撑爆 CursorWindow。
-        'data_json': jsonEncode(c.toStorageJson()),
-      },
+      _characterValues(c),
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  /// 单事务更新角色卡与世界书:制卡应用需要卡片与世界书原子提交。
+  /// 世界书按 id 稳定增删改(见 [WorldbookRepository.replaceForCharacterInTxn]),
+  /// 保持附件去重账本的 `wb:<id>` 仍然有效。
+  Future<void> updateWithWorldbook(
+    int id,
+    CharacterCard c,
+    List<WorldbookEntry> entries,
+  ) async {
+    await db.db.transaction((txn) async {
+      await txn.update(
+        'characters',
+        _characterValues(c),
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      await WorldbookRepository.replaceForCharacterInTxn(txn, id, entries);
+    });
   }
 
   /// sqflite 默认不启用外键级联,手动在单事务内清掉角色的一切依赖:

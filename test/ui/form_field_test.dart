@@ -88,4 +88,30 @@ void main() {
     expect(button.onPressed, isNull);
     expect(copied, isEmpty);
   });
+
+  testWidgets('下拉字段的长 helper 自动换行,不再单行省略', (tester) async {
+    tester.view.physicalSize = const Size(320, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    const helper = '仅影响后台请求,与主对话的推理等级互相独立;默认关闭。';
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: FormDropdownField<String>(
+            value: 'off',
+            label: '推理强度',
+            helperText: helper,
+            items: const ['off'],
+            labelOf: (value) => value,
+            onChanged: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    final helperText = tester.widget<Text>(find.text(helper));
+    expect(helperText.maxLines, 3);
+    // 320 宽下该说明至少占两行,证明实际发生了换行而非单行省略。
+    expect(tester.getSize(find.text(helper)).height, greaterThan(20));
+  });
 }

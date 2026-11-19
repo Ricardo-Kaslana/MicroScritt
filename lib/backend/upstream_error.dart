@@ -15,7 +15,7 @@ enum UpstreamErrorKind {
   quota,
 
   /// 网关按客户端特征/渠道策略拒绝(403 裸拒、FreeTierError、地区封锁、
-  /// "无可用渠道")。处置:检查自定义请求头与端点兼容选项。
+  /// "无可用渠道")。处置:检查自定义请求头。
   gatewayPolicy,
 
   /// 内容被上游风控拦截(400「提示词已被标记」、finish_reason=content_filter、
@@ -27,6 +27,10 @@ enum UpstreamErrorKind {
 
   /// 网络/服务端瞬态故障(超时、断连、5xx)。可重试。
   transient,
+
+  /// 本地模型配置不完整(如 Anthropic 协议未填「最大输出 tokens」)。
+  /// 非上游故障,不应重试;补全模型配置后可直接重发。
+  configuration,
 
   /// 契约不符:SSE 载荷损坏、未知字段被拒、只回工具调用、以及一切
   /// "响应形状对不上已知协议"的情形 —— 上游协议漂移的首要信号。
@@ -40,6 +44,7 @@ enum UpstreamErrorKind {
         UpstreamErrorKind.contentFlag => '内容风控拦截',
         UpstreamErrorKind.rateLimit => '触发限流',
         UpstreamErrorKind.transient => '瞬态故障',
+        UpstreamErrorKind.configuration => '配置错误',
         UpstreamErrorKind.contractViolation => '契约不符',
       };
 
@@ -47,10 +52,11 @@ enum UpstreamErrorKind {
   String get hint => switch (this) {
         UpstreamErrorKind.auth => 'API Key 无效或被禁用;检查密钥与自定义请求头配置',
         UpstreamErrorKind.quota => '账户在该渠道的额度不足;若额度正常,可能上游已调整计费方式,请用「测试连接」复核',
-        UpstreamErrorKind.gatewayPolicy => '请求被网关按客户端特征或渠道策略拒绝;检查自定义请求头与端点兼容选项,或该服务仅限特定客户端使用',
+        UpstreamErrorKind.gatewayPolicy => '请求被网关按客户端特征或渠道策略拒绝;检查自定义请求头,或该服务仅限特定客户端使用',
         UpstreamErrorKind.contentFlag => '请求内容被上游风控标记;调整内容后重试,或更换服务',
         UpstreamErrorKind.rateLimit => '请求频率超限;稍后重试',
         UpstreamErrorKind.transient => '网络或服务端临时故障;可重试',
+        UpstreamErrorKind.configuration => '模型配置不完整;请在设置 → LLM Provider 的模型编辑中补全所需字段',
         UpstreamErrorKind.contractViolation => '响应与已知契约不符 —— 上游协议可能已变更;请用「测试连接」复核',
       };
 }

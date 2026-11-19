@@ -674,4 +674,460 @@ void main() {
     ).listModels();
     expect(models, ['nai-diffusion-4-5-full', 'nai-diffusion-5-full']);
   });
+
+  PluginImageBackend novelai(
+    String baseUrl, {
+    String apiKey = 'pst-abc',
+    String model = '',
+    String? negative,
+    String? size,
+    int? scale,
+    double? cfg,
+    int? steps,
+    String? sampler,
+    String? noiseSchedule,
+    String? artist,
+    Duration timeout = const Duration(minutes: 5),
+    Duration requestTimeout = const Duration(seconds: 30),
+  }) => PluginImageBackend(
+    config: ImageConfig(
+      kind: ImageBackendKind.plugin,
+      apiKey: apiKey,
+      model: model,
+      baseUrl: baseUrl,
+      negative: negative,
+      size: size,
+      scale: scale,
+      cfg: cfg,
+      steps: steps,
+      sampler: sampler,
+      noiseSchedule: noiseSchedule,
+      artist: artist,
+      pluginId: 'microscritt.novelai',
+    ),
+    plugin: seed('microscritt.novelai'),
+    evaluator: js!.evaluate,
+    timeout: timeout,
+    requestTimeout: requestTimeout,
+  );
+
+  List<int> jsonImages(String b64) => utf8.encode(
+    jsonEncode({
+      'images': [
+        {'image': b64, 'index': 0, 'seed': 1},
+      ],
+    }),
+  );
+
+  test('novelai:Accept JSON + v4 结构、尺寸映射与默认参数', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    Map<String, dynamic>? body;
+    String? path;
+    String? accept;
+    String? auth;
+    String? contentType;
+    final server = await serve((request) async {
+      path = request.uri.path;
+      accept = request.headers.value('accept');
+      auth = request.headers.value(HttpHeaders.authorizationHeader);
+      contentType = request.headers.contentType?.mimeType;
+      body = jsonDecode(await utf8.decoder.bind(request).join())
+          as Map<String, dynamic>;
+      request.response
+        // 官方 JSON 分支回 201(默认的 ZIP 分支是 200)。
+        ..statusCode = 201
+        ..headers.contentType = ContentType.json
+        ..add(jsonImages('UE5H'));
+      await request.response.close();
+    });
+
+    final result = await novelai(
+      origin(server),
+      artist: 'best quality, anime illustration',
+    ).generateImage('1girl, silver hair');
+
+    // Accept: application/json 是整条路径的关键:官方端点默认回 ZIP,
+    // 沙箱里没有解压库,缺这个头就只能失败。
+    expect(path, '/ai/generate-image');
+    expect(accept, 'application/json');
+    expect(auth, 'Bearer pst-abc');
+    expect(contentType, 'application/json');
+    expect(result.images.single.base64, 'UE5H');
+
+    expect(body!['action'], 'generate');
+    expect(body!['model'], 'nai-diffusion-4-5-full', reason: '模型留空时回落到 V4.5');
+    // 官方 API 没有画师串字段,画师/风格词并入正面提示词。
+    expect(body!['input'], '1girl, silver hair, best quality, anime illustration');
+    final p = body!['parameters'] as Map<String, dynamic>;
+    expect(p['params_version'], 3);
+    expect(p['width'], 832);
+    expect(p['height'], 1216);
+    expect(p['scale'], 5);
+    expect(p['steps'], 28);
+    expect(p['sampler'], 'k_euler_ancestral');
+    expect(p['noise_schedule'], 'karras');
+    expect(p['cfg_rescale'], 0);
+    expect(p['n_samples'], 1, reason: '每次请求只画一张,多张由上层展开');
+    expect(p['seed'], isA<int>());
+    expect(p['negative_prompt'], contains('bad anatomy'), reason: '未配置时用兜底负面词');
+    final v4 = p['v4_prompt'] as Map<String, dynamic>;
+    expect(v4['caption']['base_caption'], body!['input']);
+    expect(v4['use_coords'], false);
+    expect(v4['use_order'], true);
+    final uc = p['v4_negative_prompt'] as Map<String, dynamic>;
+    expect(uc['caption']['base_caption'], p['negative_prompt']);
+    expect(uc['legacy_uc'], false);
+    expect(p.containsKey('prompt'), isFalse, reason: 'V5 才镜像平铺 prompt');
+  });
+
+  test('novelai:V5 用 params_version 4,模型后缀剥离,显式参数覆盖默认', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    Map<String, dynamic>? body;
+    final server = await serve((request) async {
+      body = jsonDecode(await utf8.decoder.bind(request).join())
+          as Map<String, dynamic>;
+      request.response
+        ..headers.contentType = ContentType.json
+        ..add(jsonImages('UE5H'));
+      await request.response.close();
+    });
+
+    await novelai(
+      origin(server),
+      model: 'nai-diffusion-5-full:k_euler',
+      size: '横图',
+      scale: 7,
+      cfg: 1,
+      steps: 35,
+      sampler: 'k_dpmpp_2m',
+      noiseSchedule: 'exponential',
+      negative: 'lowres',
+    ).generateImage('x');
+
+    // 对话式网关时代的 `模型:采样器` 写法不能原样下发给官方 API。
+    expect(body!['model'], 'nai-diffusion-5-full');
+    final p = body!['parameters'] as Map<String, dynamic>;
+    expect(p['params_version'], 4);
+    expect(p['width'], 1216);
+    expect(p['height'], 832);
+    expect(p['scale'], 7);
+    expect(p['cfg_rescale'], 1);
+    expect(p['steps'], 35);
+    expect(p['sampler'], 'k_dpmpp_2m');
+    expect(p['noise_schedule'], 'exponential');
+    expect(p['negative_prompt'], 'lowres');
+    expect(p['prompt'], 'x', reason: 'V5 客户端把平铺 prompt 一并镜像');
+    expect(p['extra_noise_seed'], p['seed']);
+  });
+
+  test('novelai:base URL 带 /ai 后缀时仍拼出官方固定路径', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    String? path;
+    final server = await serve((request) async {
+      path = request.uri.path;
+      await utf8.decoder.bind(request).join();
+      request.response
+        ..headers.contentType = ContentType.json
+        ..add(jsonImages('UE5H'));
+      await request.response.close();
+    });
+
+    // 官方文档给的是 .../ai/generate-image;用户可能把 .../ai 直接当 base URL。
+    final result = await novelai('${origin(server)}/ai').generateImage('x');
+    expect(result.images.single.base64, 'UE5H');
+    expect(path, '/ai/generate-image');
+  });
+
+  test('novelai:响应数组与 data URL 包装都能取到裸 base64', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    final arrays = await serve((request) async {
+      await utf8.decoder.bind(request).join();
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode([
+          {'image': 'UE5H'},
+        ]));
+      await request.response.close();
+    });
+    expect(
+      (await novelai(origin(arrays)).generateImage('x')).images.single.base64,
+      'UE5H',
+    );
+
+    final dataUrl = await serve((request) async {
+      await utf8.decoder.bind(request).join();
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'images': [
+            {'image': 'data:image/png;base64,UE5H'},
+          ],
+        }));
+      await request.response.close();
+    });
+    expect(
+      (await novelai(origin(dataUrl)).generateImage('x')).images.single.base64,
+      'UE5H',
+      reason: '宿主只接受裸 base64,数据 URL 前缀必须剥掉',
+    );
+  });
+
+  test('novelai:HTTP 402 回显服务端原因,鉴权失败提示持久令牌', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    final server = await serve((request) async {
+      await utf8.decoder.bind(request).join();
+      request.response
+        ..statusCode = 402
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({'statusCode': 402, 'message': 'Anlas depletion'}));
+      await request.response.close();
+    });
+    var message = '';
+    try {
+      await novelai(origin(server)).generateImage('x');
+    } on ImagePluginException catch (e) {
+      message = e.message;
+    }
+    expect(message, contains('HTTP 402'));
+    expect(message, contains('Anlas depletion'), reason: '否则用户只能看到状态码');
+
+    final unauthorized = await serve((request) async {
+      await utf8.decoder.bind(request).join();
+      request.response
+        ..statusCode = 401
+        ..headers.contentType = ContentType.json
+        // 坏代理可能把请求头/令牌原样回显:横幅里必须脱敏。
+        ..write(jsonEncode({
+          'statusCode': 401,
+          'message': 'bad key pst-secret',
+        }));
+      await request.response.close();
+    });
+    await expectLater(
+      novelai(origin(unauthorized), apiKey: 'pst-secret').generateImage('x'),
+      throwsA(
+        predicate<ImagePluginException>(
+          (e) =>
+              e.message.contains('Persistent API Token') &&
+              e.message.contains('***') &&
+              !e.message.contains('pst-secret'),
+        ),
+      ),
+    );
+
+    // 免费试用账号:官方要求试用生图带 reCAPTCHA,第三方 API 无法也不该代过;
+    // 英文原始报错要点成可操作的中文说明。
+    final trial = await serve((request) async {
+      await utf8.decoder.bind(request).join();
+      request.response
+        ..statusCode = 400
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'statusCode': 400,
+          'message': 'Recaptcha token is required for trial generation',
+        }));
+      await request.response.close();
+    });
+    await expectLater(
+      novelai(origin(trial)).generateImage('x'),
+      throwsA(
+        predicate<ImagePluginException>(
+          (e) =>
+              e.message.contains('免费试用账号') &&
+              e.message.contains('reCAPTCHA') &&
+              e.message.contains('订阅'),
+        ),
+      ),
+    );
+  });
+
+  test('novelai:超时不重提,网络断连只在零字节且未重试时重提', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    final plugin = seed('microscritt.novelai');
+    Future<Map<String, dynamic>> stepWith(
+      Map<String, dynamic> response, {
+      bool retried = false,
+    }) async {
+      final context = <String, dynamic>{
+        'operation': 'generate',
+        'phase': 'http',
+        'prompt': 'x',
+        'negativePrompt': 'n',
+        'params': <String, dynamic>{},
+        'settings': {
+          'baseUrl': 'https://image.novelai.net',
+          'apiKey': 'pst-secret',
+          'model': '',
+        },
+        'state': {'seed': 7, 'retried': retried},
+        'response': response,
+      };
+      final result = await js!.evaluate(
+        '(function(){var ctx=${jsonEncode(context)};\n${plugin.code}\n'
+        'return JSON.stringify(step(ctx));})()',
+      );
+      expect(result, isNotNull, reason: 'JS 求值失败');
+      return jsonDecode(result!) as Map<String, dynamic>;
+    }
+
+    // 非流式请求在出图前没有字节,超时后任务可能已受理:不重提。
+    final timeout = await stepWith({
+      'error': 'timeout',
+      'receivedBytes': false,
+    });
+    expect(timeout['action'], 'error');
+    expect(timeout['message'], contains('未自动重试'));
+
+    // 连接级失败 + 零字节 + 未重试:请求很可能没送达,允许重提一次。
+    final network = await stepWith({
+      'error': 'network',
+      'receivedBytes': false,
+    });
+    expect(network['action'], 'http');
+    expect((network['state'] as Map)['retried'], true);
+    expect((network['state'] as Map)['seed'], 7, reason: '重试沿用同一个种子');
+
+    // 已重试过、或收到过任何字节:绝不再提。
+    expect(
+      (await stepWith({
+        'error': 'network',
+        'receivedBytes': false,
+      }, retried: true))['action'],
+      'error',
+    );
+    expect(
+      (await stepWith({
+        'error': 'network',
+        'receivedBytes': true,
+      }))['action'],
+      'error',
+    );
+  });
+
+  test('novelai:零字节断连才重试一次,已收到响应字节绝不重提', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    var hits = 0;
+    final retrying = await scripted([
+      (request, _) async {
+        hits++;
+        await utf8.decoder.bind(request).join();
+        final socket = await request.response.detachSocket();
+        socket.destroy(); // 请求送达前断连:未收到任何数据,可安全重试
+      },
+      (request, _) async {
+        hits++;
+        await utf8.decoder.bind(request).join();
+        request.response
+          ..headers.contentType = ContentType.json
+          ..add(jsonImages('UE5H'));
+        await request.response.close();
+      },
+    ]);
+    final result = await novelai(origin(retrying)).generateImage('x');
+    expect(result.images.single.base64, 'UE5H');
+    expect(hits, 2);
+
+    // 已收到分片(=服务端已受理)后断连:重发就是重复出图重复计费。
+    var resubmits = 0;
+    final poisoned = await serve((request) async {
+      resubmits++;
+      await utf8.decoder.bind(request).join();
+      final socket = await request.response.detachSocket(writeHeaders: false);
+      socket.write(
+        'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n'
+        'transfer-encoding: chunked\r\n\r\n',
+      );
+      final frame = utf8.encode('{"images":[');
+      socket.write('${frame.length.toRadixString(16)}\r\n');
+      socket.add(frame);
+      socket.write('\r\n');
+      await socket.flush();
+      // 先让客户端读走这一帧再断,否则解析器在交付缓冲前就报错。
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await socket.close();
+    });
+    await expectLater(
+      novelai(origin(poisoned)).generateImage('x'),
+      throwsA(isA<ImagePluginException>()),
+    );
+    expect(resubmits, 1, reason: '收到过响应字节就不能再提交第二次');
+  });
+
+  test('novelai:probe 解析订阅用量且不回显账号信息', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    String? path;
+    String? auth;
+    final server = await serve((request) {
+      path = request.uri.path;
+      auth = request.headers.value(HttpHeaders.authorizationHeader);
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'tier': 3,
+          'active': true,
+          'trainingStepsLeft': {
+            'fixedTrainingStepsLeft': 9000,
+            'purchasedTrainingSteps': 88,
+          },
+          'usage': {'percent': 97, 'isNegative': false},
+          'plainTextEmail': 'SECRET@example.com',
+        }));
+      request.response.close();
+    });
+
+    final probe = await novelai(origin(server)).probe();
+    expect(path, '/user/subscription');
+    expect(auth, 'Bearer pst-abc');
+    expect(probe?.summary, contains('密钥有效'));
+    expect(probe?.summary, contains('订阅等级 3'));
+    expect(probe?.summary, contains('Anlas 9088'));
+    expect(probe?.summary, contains('剩余电量 97%'));
+    expect(probe?.summary, isNot(contains('SECRET')));
+
+    final bad = await serve((request) {
+      request.response
+        ..statusCode = 401
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({'statusCode': 401, 'message': 'Unauthorized'}));
+      request.response.close();
+    });
+    await expectLater(
+      novelai(origin(bad)).probe(),
+      throwsA(
+        predicate<ImagePluginException>(
+          (e) => e.message.contains('鉴权失败') && e.message.contains('401'),
+        ),
+      ),
+    );
+
+    // 试用账号(tier 0 / active false):连接测试就暴露状态,别等生图撞 400。
+    final trial = await serve((request) {
+      request.response
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({'tier': 0, 'active': false}));
+      request.response.close();
+    });
+    final trialProbe = await novelai(origin(trial)).probe();
+    expect(trialProbe?.summary, contains('试用账号(未订阅)'));
+  });
+
+  test('novelai:api.novelai.net 在发请求前给出可操作提示', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    await expectLater(
+      novelai('https://api.novelai.net').generateImage('x'),
+      throwsA(
+        predicate<ImagePluginException>(
+          (e) => e.message.contains('https://image.novelai.net'),
+        ),
+      ),
+    );
+  });
+
+  test('novelai:listModels 静态候选(该服务无模型列表端点)', () async {
+    if (js == null) return markTestSkipped('QuickJS 与 Node 均不可用,种子 JS 未执行');
+    final models = await novelai('http://127.0.0.1:12345').listModels();
+    expect(models, contains('nai-diffusion-5-full'));
+    expect(models, contains('nai-diffusion-4-5-full'));
+    expect(models, contains('nai-diffusion-3'));
+  });
 }

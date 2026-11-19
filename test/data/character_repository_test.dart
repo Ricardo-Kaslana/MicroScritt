@@ -35,6 +35,61 @@ void main() {
     expect((await repo.all()).length, 1);
   });
 
+  test('updateWithWorldbook replaces card and worldbook with stable entry ids', () async {
+    final repo = CharacterRepository(db);
+    final worldbook = WorldbookRepository(db);
+    final id = await repo.insertWithWorldbook(
+      const CharacterCard(name: 'Old', description: 'old'),
+      const [
+        WorldbookEntry(
+          characterId: 0,
+          name: 'Keep',
+          keys: ['k'],
+          content: 'old',
+          position: 0,
+          extra: {'probability': 100},
+        ),
+        WorldbookEntry(
+          characterId: 0,
+          name: 'Drop',
+          keys: ['d'],
+          content: 'gone',
+          position: 1,
+        ),
+      ],
+    );
+    final before = await worldbook.byCharacter(id);
+    final keep = before[0];
+    final drop = before[1];
+
+    await repo.updateWithWorldbook(
+      id,
+      const CharacterCard(name: 'New', description: 'new', avatarBase64: 'AV'),
+      [
+        keep.copyWith(content: 'updated'),
+        WorldbookEntry(
+          characterId: id,
+          name: 'Added',
+          keys: ['a'],
+          content: 'new entry',
+          position: 2,
+        ),
+      ],
+    );
+
+    final card = await repo.get(id);
+    expect(card?.name, 'New');
+    expect(card?.description, 'new');
+    expect(card?.avatarBase64, 'AV');
+
+    final after = await worldbook.byCharacter(id);
+    expect(after.map((e) => e.name), ['Keep', 'Added']);
+    expect(after.first.id, keep.id, reason: '既有条目 id 必须保持稳定');
+    expect(after.first.content, 'updated');
+    expect(after.first.extra, {'probability': 100});
+    expect(after.any((e) => e.id == drop.id), isFalse);
+  });
+
   test('roundtrips character background through the column', () async {
     final repo = CharacterRepository(db);
     final id = await repo.insert(const CharacterCard(name: 'Alice', backgroundBase64: 'aGVsbG8=bg'));

@@ -18,7 +18,7 @@
 
 移动端优先的极简 AI 角色扮演(RP)聊天应用。纯客户端 Flutter,无后端服务:对话、生图、Hook 脚本执行与数据存储全部在本地完成。
 
-> 当前版本 **2.3.2** · 数据库 schema **v68** · Android / Windows 可用;iOS 源码存在,但 JS runtime 尚未接线,生图在这些平台不可用。
+> 当前版本 **2.3.2** · 数据库 schema **v71** · Android / Windows 可用;iOS 源码存在,但 JS runtime 尚未接线,生图在这些平台不可用。
 
 ### 功能
 
@@ -26,10 +26,9 @@
 - **上下文组装管线**:角色卡 / 预设提示词 / 世界书 / 记忆 / @技能 / 压缩摘要统一组装为纯文本上下文;附件式注入、单轮限额、按 token 占用率自动压缩,兼容上游提示缓存。
 - **后台维护引擎**:回复落库后由后台 agent 维护变量与自动生图;失败跳过、不落库、不掉轮。变量支持三档权限、显式删除、回收站与严格模式待确认。
 - **角色卡导入导出**:SillyTavern V2/V3 角色卡(JSON 与 PNG 内嵌),世界书条目与 SillyTavern World Info 双向导入导出;支持 PNG 角色卡导出。
-- **生图插件**:单文件 JSON 插件接入 HTTP(S) 生图服务;内置 OpenAI 兼容对话式网关与 Nai2API 两个协议插件,也可导入自定义插件。画面风格预设与自定义风格管理,生成图本地化落库。**不内置任何可用密钥或代理服务**,服务地址由用户配置。
+- **生图插件**:单文件 JSON 插件接入 HTTP(S) 生图服务;内置 OpenAI 兼容对话式网关、Nai2API 与 NovelAI 官方 API 三个协议插件,也可导入自定义插件。画面风格预设与自定义风格管理,生成图本地化落库。**不内置任何可用密钥或代理服务**,服务地址由用户配置。
 - **Hook 脚本**:QuickJS 沙箱执行 JS,在输入改写 / 上下文组装 / 生成前 / 流式后 / 落库前五个触发点改写数据;另有显示层正则脚本。
 - **本地优先**:全部数据存于本地 SQLite;会话归档流式导入导出(支持超大带图会话),角色卡 JSON/PNG 导出,桌面端 `.part` 原子写入,移动端可保存到本地或系统分享。
-- **端点兼容选项**:工具通道回复 / 提示词随机前缀,按 provider 声明式开启,默认全关。
 
 ### 平台支持
 
@@ -126,7 +125,7 @@ Data(sqflite) → Backend(LLM/生图抽象) → Context(组装管线)
 
 A minimal, mobile-first AI roleplay (RP) chat app. Pure client-side Flutter — no backend service: chat, image generation, hook scripts and storage all happen locally on your device.
 
-> Version **2.3.2** · database schema **v68** · Android and Windows are usable; iOS sources exist but the JS runtime is not wired yet, so image generation is unavailable there.
+> Version **2.3.2** · database schema **v71** · Android and Windows are usable; iOS sources exist but the JS runtime is not wired yet, so image generation is unavailable there.
 
 ### Features
 
@@ -134,10 +133,9 @@ A minimal, mobile-first AI roleplay (RP) chat app. Pure client-side Flutter — 
 - **Context assembly pipeline**: character cards / prompt presets / world books / memories / @skills / compaction summaries assembled into a plain-text context snapshot; attachment-style injection, per-turn budgets and token-usage-driven auto-compaction that stays cache-friendly.
 - **Background maintenance engine**: after each reply lands, a background agent maintains variables and automatic image generation; failures are skipped, never persisted, never fatal.
 - **Character card import/export**: SillyTavern V2/V3 cards (JSON and PNG-embedded), two-way world book import/export with SillyTavern World Info, plus PNG card export.
-- **Image generation plugins**: single-file JSON plugins for HTTP(S) image services. Two protocol plugins ship with the repo (OpenAI-compatible chat gateway and Nai2API), and you can import your own. Style presets and custom styles are supported. **No usable key or proxy service is bundled**; you configure the service address.
+- **Image generation plugins**: single-file JSON plugins for HTTP(S) image services. Three protocol plugins ship with the repo (OpenAI-compatible chat gateway, Nai2API and the official NovelAI API), and you can import your own. Style presets and custom styles are supported. **No usable key or proxy service is bundled**; you configure the service address.
 - **Hook scripts**: QuickJS-sandboxed JS at five trigger points (input rewrite, context assembly, pre-generation, post-stream, pre-persist), plus display-layer regex scripts.
 - **Local-first**: local SQLite only; streaming session archive import/export (including very large image-heavy sessions), character card JSON/PNG export, atomic `.part` writes on desktop, save-to-local or system share on mobile.
-- **Endpoint compatibility options**: tool-channel replies and a prompt nonce prefix, enabled per provider and off by default.
 
 ### Platform support
 

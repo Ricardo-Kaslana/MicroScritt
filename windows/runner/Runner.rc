@@ -59,6 +59,11 @@ END
 // remains consistent on all systems.
 IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
 
+// 标题栏专用图标:透明底胶囊,不复用带浅灰方底的应用图标。保持 ID 大于
+// IDI_APP_ICON,不参与 exe 默认图标的选择。
+IDI_TITLE_ICON_LIGHT    ICON                    "resources\\title_icon_light.ico"
+IDI_TITLE_ICON_DARK     ICON                    "resources\\title_icon_dark.ico"
+
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -68,13 +73,13 @@ IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
 #if defined(FLUTTER_VERSION_MAJOR) && defined(FLUTTER_VERSION_MINOR) && defined(FLUTTER_VERSION_PATCH) && defined(FLUTTER_VERSION_BUILD)
 #define VERSION_AS_NUMBER FLUTTER_VERSION_MAJOR,FLUTTER_VERSION_MINOR,FLUTTER_VERSION_PATCH,FLUTTER_VERSION_BUILD
 #else
-#define VERSION_AS_NUMBER 2,3,2,5
+#define VERSION_AS_NUMBER 2,3,3,6
 #endif
 
 #if defined(FLUTTER_VERSION)
 #define VERSION_AS_STRING FLUTTER_VERSION
 #else
-#define VERSION_AS_STRING "2.3.2"
+#define VERSION_AS_STRING "2.3.3"
 #endif
 
 VS_VERSION_INFO VERSIONINFO

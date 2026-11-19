@@ -6,7 +6,7 @@
 /// 同一份中立类型而不互相 import。
 library;
 
-import 'endpoint_compat.dart';
+import 'llm_provider.dart';
 
 /// API 协议;决定工厂创建哪个后端实现。
 enum BackendProvider { openai, anthropic }
@@ -25,7 +25,17 @@ class BackendConfig {
   /// 模型标识,直接发送给 API。
   final String model;
 
-  /// 采样温度。
+  /// provider 逻辑标识(落库/统计用);未知时为空串。
+  final String providerId;
+
+  /// provider 展示名;未知时为空串(展示方可回退协议名)。
+  final String providerName;
+
+  /// 模型展示名;未知时为空串(展示方可回退 [model])。
+  final String modelName;
+
+  /// 采样温度;由模型配置解析而来(未配置时取模型默认值)。运行链路的所有
+  /// 请求只透传该值,后端与各引擎不另设默认或夹取。
   final double temperature;
 
   /// 最大输出 tokens;null 表示由协议默认值决定。
@@ -41,20 +51,18 @@ class BackendConfig {
   /// 见 `LlmProviderConfig.modernParams` 的取舍说明。
   final bool modernParams;
 
-  /// 端点兼容选项(来自 provider 配置):replyViaTool(回复经工具参数通道)/
-  /// noncePrefix(提示词随机前缀),由后端在发送/解析侧消化,调用方零感知。
-  final EndpointCompat compat;
-
   const BackendConfig({
     required this.provider,
     required this.baseUrl,
     required this.apiKey,
     required this.model,
-    this.temperature = 0.7,
+    this.providerId = '',
+    this.providerName = '',
+    this.modelName = '',
+    this.temperature = LlmModelEntry.defaultTemperature,
     this.maxTokens,
     this.extraHeaders = const {},
     this.modernParams = false,
-    this.compat = EndpointCompat.standard,
   });
 
   /// provider 的落库字面值。

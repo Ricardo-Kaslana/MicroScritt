@@ -1,15 +1,15 @@
 /// OpenAI 兼容 `chat/completions` 的流式后端。
 ///
-/// 负责 SSE 解析、工具通道回复(`replyViaTool`)、提示词随机前缀
-/// (`noncePrefix`)、用量快照合并与上游故障分类;每次请求独享连接,
+/// 负责 SSE 解析、用量快照合并与上游故障分类;每次请求独享连接,
 /// 取消订阅即断链。
 library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
 import 'package:http/http.dart' as http;
 import '../models/app_settings.dart';
+import '../models/chat_message.dart';
+import '../models/llm_tool.dart';
 import '../models/token_usage.dart';
 import '../models/backend_config.dart';
 import 'llm_backend.dart';
@@ -24,29 +24,6 @@ const String kForbiddenHeaderHint =
     ' —— 部分站点要求特定请求头(如 Origin / Referer / User-Agent)才放行,'
     '可在 Provider 编辑页「自定义请求头」中补充后重试';
 
-/// 兼容选项 replyViaTool 注入的回复通道工具:整条回复改经 output_reply 的
-/// content 参数输出 —— 适用于对普通正文流式截断/丢块、但工具调用参数能
-/// 完整送达的端点。
-const Map<String, dynamic> kReplyViaToolTool = {
-  'type': 'function',
-  'function': {
-    'name': 'output_reply',
-    'description': '将本次回复交给聊天界面显示。把完整回复原文放入 content 参数,作为 JSON 字符串正确转义;不要在普通消息中重复输出。',
-    'parameters': {
-      'type': 'object',
-      'properties': {
-        'content': {'type': 'string', 'description': '本次回复的原文,保留原有格式;作为 JSON 字符串正确转义。'},
-      },
-      'required': ['content'],
-      'additionalProperties': false,
-    },
-  },
-};
-
-/// replyViaTool 收尾的结构错误与空回文案。
-const String kReplyInvalidArgumentsMessage = '回复工具的参数格式错误,应为仅含 content 字符串的 JSON 对象';
-const String kReplyEmptyMessage = 'API 未返回工具通道输出,可能为空回复或端点不支持该输出方式,请重试';
-
 /// 一轮请求的结局:驱动层据此决定重试/透出错误。
 class _RoundOutcome {
   /// 该轮用量终值(轮内多块累计快照已 mergeMax)。
@@ -60,14 +37,10 @@ class _RoundOutcome {
   /// [failure] 属于零正文可透明重试的瞬态失败。
   final bool retryableTransient;
 
-  /// 干净收尾但零正文零工具零思考(replyViaTool 空回重试判据)。
-  final bool emptyRound;
-
   const _RoundOutcome({
     this.usage,
     this.failure,
     this.retryableTransient = false,
-    this.emptyRound = false,
   });
 }
 
@@ -77,114 +50,6 @@ class _ToolCallAccum {
   String? id;
   String? name;
   String arguments = '';
-
-  // replyViaTool:output_reply 的 content 增量解码状态(仅回复工具使用)。
-  bool replyStarted = false; // 已匹配 `{"content":"` 头
-  bool replyClosed = false; // content 字符串已闭合
-  bool replyInvalid = false; // 结构非法(控制字符/非法转义)
-  int replyPosition = 0; // 已解码到的 arguments 索引
-  final StringBuffer replyDecoded = StringBuffer(); // 已解码正文(供收尾校验)
-}
-
-/// JSON 简单转义 → 实际字符(\uXXXX 由数值路径处理)。
-const Map<String, String> _kSimpleJsonEscapes = {
-  '"': '"',
-  r'\': r'\',
-  '/': '/',
-  'b': '\b',
-  'f': '\f',
-  'n': '\n',
-  'r': '\r',
-  't': '\t',
-};
-
-/// replyViaTool 增量解码:把 [call.arguments] 中尚未解码的部分按 JSON 字符串
-/// 语义推进,返回新解码出的正文增量。
-///
-/// 只解码**已收齐**的字符 —— JSON 外壳与未收齐的转义序列不进入正文;流被
-/// 风控/长度中途掐断时,已解码前缀照常透出(截断容忍的核心)。结构非法
-/// 置 [call.replyInvalid],由调用方报错。高代理悬在块尾时回滚等低代理到齐,
-/// 不发孤立代理。
-String _feedReplyDecoder(_ToolCallAccum call) {
-  if (call.replyClosed || call.replyInvalid) return '';
-  final source = call.arguments;
-  if (!call.replyStarted) {
-    final header = RegExp(r'^\s*\{\s*"content"\s*:\s*"').firstMatch(source);
-    if (header == null) return '';
-    call.replyStarted = true;
-    call.replyPosition = header.end;
-  }
-  final units = <int>[];
-  var lastUnitSize = 0;
-  while (call.replyPosition < source.length) {
-    final ch = source[call.replyPosition];
-    if (ch == '"') {
-      call.replyPosition++;
-      call.replyClosed = true;
-      break;
-    }
-    if (ch.codeUnitAt(0) < 32) {
-      call.replyInvalid = true;
-      return '';
-    }
-    var size = 1;
-    if (ch == r'\') {
-      if (call.replyPosition + 1 >= source.length) break; // 转义未收齐,等下一块
-      final esc = source[call.replyPosition + 1];
-      if (esc == 'u') {
-        if (call.replyPosition + 6 > source.length) break; // \uXXXX 未收齐,等下一块
-        final hex = source.substring(call.replyPosition + 2, call.replyPosition + 6);
-        final code = int.tryParse(hex, radix: 16);
-        if (code == null) {
-          call.replyInvalid = true;
-          return '';
-        }
-        size = 6;
-        units.add(code);
-        lastUnitSize = 6;
-      } else {
-        final decoded = _kSimpleJsonEscapes[esc];
-        if (decoded == null) {
-          call.replyInvalid = true;
-          return '';
-        }
-        size = 2;
-        units.add(decoded.codeUnitAt(0));
-        lastUnitSize = 1;
-      }
-    } else {
-      units.add(ch.codeUnitAt(0));
-      lastUnitSize = 1;
-    }
-    call.replyPosition += size;
-  }
-  // 未闭合且块尾悬着高代理:回滚该单元(等低代理下一块到齐再解码),
-  // \uXXXX 转义回滚整个转义序列,裸字符回滚一个码元。
-  if (!call.replyClosed && units.isNotEmpty) {
-    final last = units.last;
-    if (last >= 0xD800 && last <= 0xDBFF) {
-      call.replyPosition -= lastUnitSize;
-      units.removeLast();
-    }
-  }
-  if (units.isEmpty) return '';
-  final delta = String.fromCharCodes(units);
-  call.replyDecoded.write(delta);
-  return delta;
-}
-
-/// 生成提示词随机前缀:6–8 位小写字母数字,至少含一个字母与一个数字。
-/// 各次生成相互独立,使每轮请求的 system 字节不同。
-String _generateNonce() {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  final random = Random();
-  while (true) {
-    final length = 6 + random.nextInt(3); // 6–8 位
-    final units = [for (var i = 0; i < length; i++) chars[random.nextInt(chars.length)]];
-    final hasLetter = units.any((c) => c.contains(RegExp(r'[a-z]')));
-    final hasDigit = units.any((c) => c.contains(RegExp(r'[0-9]')));
-    if (hasLetter && hasDigit) return units.join();
-  }
 }
 
 /// OpenAI 兼容协议后端。
@@ -230,25 +95,13 @@ class OpenAiBackend implements LlmBackend {
     unawaited(() async {
       try {
         final uri = Uri.parse('${config.baseUrl}/chat/completions');
-        // 兼容选项 noncePrefix:system 头部前置随机 nonce,每轮请求字节不同。
-        // 同一轮的续写/重试共用同一 nonce(同一个逻辑请求)。
-        var systemContent = request.systemPrompt;
-        if (config.compat.noncePrefix) {
-          systemContent = '${_generateNonce()}\n$systemContent';
-        }
-        final wireMessages = <Map<String, dynamic>>[
-          {'role': 'system', 'content': systemContent},
-          ...request.messages.map((m) => {'role': m.wireRole, 'content': m.content}),
-        ];
-        final compatTools = [
-          if (config.compat.replyViaTool) kReplyViaToolTool,
-        ];
+        final hasTools = request.tools.isNotEmpty;
         final baseBody = {
           'model': request.model,
-          'messages': wireMessages,
+          'messages': _wireMessages(request),
           'stream': true,
           'temperature': request.temperature,
-          // 官方 OpenAI 参数风格(v47):推理模型(o 系列等)只认
+          // 官方 OpenAI 参数风格(v47):推理模型(o 系列 / GPT-5 等)只认
           // max_completion_tokens,发 max_tokens 直接 400;兼容网关普遍两认。
           if (request.maxTokens != null)
             config.modernParams ? 'max_completion_tokens' : 'max_tokens': request.maxTokens,
@@ -263,14 +116,11 @@ class OpenAiBackend implements LlmBackend {
               ReasoningLevel.medium => 'medium',
               ReasoningLevel.high => 'high',
             },
-          // 端点兼容选项:replyViaTool = 回复改经 output_reply 通道。普通
-          // 端点不发送 tools —— 部分劣质网关对未知字段回 400。
-          if (compatTools.isNotEmpty) 'tools': compatTools,
-          if (config.compat.replyViaTool) 'tool_choice': {
-            'type': 'function',
-            'function': {'name': 'output_reply'},
-          },
-          if (config.compat.replyViaTool) 'parallel_tool_calls': false,
+          // 原生工具:tools 非空才发送(普通端点不发 tools,避免未知字段 400)。
+          // tool_choice 恒 auto;不发 parallel_tool_calls —— 多调用由消费方按
+          // 收到顺序串行执行,顺序确定且少一个网关可能不认的字段。
+          if (hasTools) 'tools': _toolsWire(request.tools),
+          if (hasTools) 'tool_choice': 'auto',
         };
 
         // 跨轮共享累计器:续写与重试对消费方完全透明 —— 事件序列、
@@ -346,7 +196,6 @@ class OpenAiBackend implements LlmBackend {
           );
           final roundToolCalls = <int, _ToolCallAccum>{};
           var roundDone = false;
-          var replyInvalidReported = false;
           TokenUsage? roundUsage;
           await for (final event in parseSse(lines)) {
             if (event.data == '[DONE]') {
@@ -390,10 +239,8 @@ class OpenAiBackend implements LlmBackend {
               // 推理通道(DeepSeek-R1 式网关):思考文本不算正文,只作空响应归因。
               final reasoning = delta?['reasoning_content'];
               if (reasoning is String && reasoning.isNotEmpty) sawReasoning = true;
-              // 工具调用块(回复通道):按 index 拼接。replyViaTool 下
-              // output_reply 的 arguments 即回复正文,增量解码照常流式透出;
-              // 其余工具只用于空回归因,正文与工具调用并存的轮静默丢弃工具
-              // 部分(本应用没有工具消费方)。
+              // 工具调用块:按 index 拼接 id/name/arguments。当前无工具消费方,
+              // 累计仅用于"纯工具零正文"归因;正文与工具并存时正文照常透出。
               final toolParts = delta?['tool_calls'];
               if (toolParts is List) {
                 for (final part in toolParts) {
@@ -409,21 +256,6 @@ class OpenAiBackend implements LlmBackend {
                       call.name ??= fn['name'] as String;
                     }
                     if (fn['arguments'] is String) call.arguments += fn['arguments'] as String;
-                  }
-                  if (config.compat.replyViaTool && call.name == 'output_reply') {
-                    final replyDelta = _feedReplyDecoder(call);
-                    if (replyDelta.isNotEmpty) {
-                      sawContent = true;
-                      controller.add(TextDelta(replyDelta));
-                    }
-                    if (call.replyInvalid && !replyInvalidReported) {
-                      replyInvalidReported = true;
-                      sawError = true;
-                      controller.add(const ErrorEvent(
-                        kReplyInvalidArgumentsMessage,
-                        kind: UpstreamErrorKind.contractViolation,
-                      ));
-                    }
                   }
                 }
               }
@@ -475,6 +307,13 @@ class OpenAiBackend implements LlmBackend {
               retryableTransient: !sawError,
             );
           }
+          // 原生工具请求:工具调用即响应(无论是否并存正文/思考),成功透出
+          // ToolCallsEvent。这是与无工具请求的关键语义差异 —— 后者把"纯工具
+          // 零正文"判为契约错误(主写没有工具消费方)。已有错误在场时不冒充成功。
+          if (hasTools && !sawError && roundToolCalls.isNotEmpty) {
+            controller.add(ToolCallsEvent(_callsInOrder(roundToolCalls)));
+            return _RoundOutcome(usage: roundUsage);
+          }
           // 流以 [DONE] 正常收尾、零正文、但模型一直在推思考(reasoning_content):
           // 网关把"只思考未作答"包装成正常完成 —— 透出成可重试错误并给出准确归因,
           // 不再让上层报无法区分的"模型未返回任何内容"。已有其他错误(length 截停
@@ -487,60 +326,6 @@ class OpenAiBackend implements LlmBackend {
             ));
             return _RoundOutcome(usage: roundUsage);
           }
-          // replyViaTool 收尾:output_reply 调用优先于空回判定。
-          if (config.compat.replyViaTool && roundToolCalls.values.any((c) => c.name == 'output_reply')) {
-            final replies = roundToolCalls.values.where((c) => c.name == 'output_reply').toList();
-            if (replies.length > 1) {
-              sawError = true;
-              controller.add(const ErrorEvent(kReplyInvalidArgumentsMessage, kind: UpstreamErrorKind.contractViolation));
-              return _RoundOutcome(usage: roundUsage);
-            }
-            final call = replies.single;
-            if (!call.replyInvalid) _feedReplyDecoder(call); // 收尾喂完剩余可解码部分
-            if (call.replyInvalid && !replyInvalidReported) {
-              sawError = true;
-              controller.add(const ErrorEvent(kReplyInvalidArgumentsMessage, kind: UpstreamErrorKind.contractViolation));
-              return _RoundOutcome(usage: roundUsage);
-            }
-            if (call.replyInvalid) return _RoundOutcome(usage: roundUsage); // 流内已报过
-            Object? payload;
-            try {
-              payload = jsonDecode(call.arguments);
-            } on FormatException {
-              payload = null;
-            }
-            if (payload is Map<String, dynamic> && payload['content'] is String && payload.length == 1) {
-              final full = payload['content'] as String;
-              if (!full.startsWith(call.replyDecoded.toString())) {
-                sawError = true;
-                controller.add(const ErrorEvent(kReplyInvalidArgumentsMessage, kind: UpstreamErrorKind.contractViolation));
-              } else {
-                final tail = full.substring(call.replyDecoded.length);
-                if (tail.isNotEmpty) {
-                  sawContent = true;
-                  controller.add(TextDelta(tail));
-                  call.replyDecoded.write(tail);
-                }
-                if (!sawContent) {
-                  // output_reply 在场但 content 为空:模型给出了空回复 ——
-                  // 有调用即有响应,不重试。
-                  sawError = true;
-                  controller.add(const ErrorEvent(kReplyEmptyMessage, kind: UpstreamErrorKind.contentFlag));
-                }
-              }
-              return _RoundOutcome(usage: roundUsage);
-            }
-            // JSON 残缺:容忍"已开始解码且未闭合"(被风控/长度掐断,保留已解码
-            // 前缀);从未开始解码、或闭合后还有残渣 → 结构错误。
-            final closedWithJunk =
-                call.replyClosed && call.arguments.substring(call.replyPosition).trim().isNotEmpty;
-            if (!call.replyStarted || closedWithJunk) {
-              sawError = true;
-              controller.add(const ErrorEvent(kReplyInvalidArgumentsMessage, kind: UpstreamErrorKind.contractViolation));
-              return _RoundOutcome(usage: roundUsage);
-            }
-            return _RoundOutcome(usage: roundUsage);
-          }
           // 纯工具调用、零正文:本应用没有工具消费方,显式报错而不是静默
           // 空回;绝不把工具调用当成正常回复。
           if (roundDone && !sawError && !sawContent && roundToolCalls.isNotEmpty) {
@@ -548,21 +333,15 @@ class OpenAiBackend implements LlmBackend {
             controller.add(const ErrorEvent('模型仅返回工具调用、未返回正文', kind: UpstreamErrorKind.contractViolation));
             return const _RoundOutcome();
           }
-          // 干净收尾但零正文零工具零思考:replyViaTool 下的"空回",由驱动层
-          // 自动重试(模型忽略强制工具选择/网关剥掉 tools 时的典型形态);
-          // 普通模式保持历史行为(静默空回,上层按无回复处理)。
-          return _RoundOutcome(
-            usage: roundUsage,
-            emptyRound: !sawContent && roundToolCalls.isEmpty && !sawReasoning,
-          );
+          return _RoundOutcome(usage: roundUsage);
         }
 
         // 驱动循环:transient 零正文透明重试一次(失败发生在任何内容产出
-        // 之前);replyViaTool 空回最多重试 2 次(共 3 次尝试)。已有正文
-        // 流式透出后绝不重来 —— 消费方不会看到重复文本。
+        // 之前)。已有正文流式透出后绝不重来 —— 消费方不会看到重复文本。
+        // 原生工具请求不在此内部重试:步级重试归 agent runner 独占,错误直接
+        // 透出,避免后端+runner 双层重试叠加。
         final body = baseBody;
         var transientRetried = false;
-        var emptyRetries = 0;
         while (!cancelled) {
           _RoundOutcome outcome;
           try {
@@ -570,7 +349,7 @@ class OpenAiBackend implements LlmBackend {
           } on TimeoutException {
             // 流空闲超时从 await for 直接抛出(非 ErrorEvent 通道):
             // 零正文可透明重试一次,否则原样上抛(流级错误语义不变)。
-            if (!transientRetried && !sawContent) {
+            if (!hasTools && !transientRetried && !sawContent) {
               transientRetried = true;
               continue;
             }
@@ -586,22 +365,12 @@ class OpenAiBackend implements LlmBackend {
             hasUsage = true;
           }
           if (outcome.failure != null) {
-            if (outcome.retryableTransient && !sawContent && !transientRetried) {
+            if (!hasTools && outcome.retryableTransient && !sawContent && !transientRetried) {
               transientRetried = true;
               continue; // 该次失败不透出,透明重试
             }
             controller.add(outcome.failure!);
             sawError = true;
-            break;
-          }
-          if (outcome.emptyRound && config.compat.replyViaTool && emptyRetries < 2) {
-            emptyRetries++;
-            continue;
-          }
-          if (outcome.emptyRound && config.compat.replyViaTool) {
-            // 空回重试穷尽:显式报错,不再静默空回。
-            sawError = true;
-            controller.add(const ErrorEvent(kReplyEmptyMessage, kind: UpstreamErrorKind.contentFlag));
             break;
           }
           break;
@@ -622,5 +391,57 @@ class OpenAiBackend implements LlmBackend {
       }
     }());
     return controller.stream;
+  }
+
+  /// 块感知消息序列化:system 纯文本;assistant 工具调用轮带 `tool_calls`
+  /// (正文空时 content 置 null,符合 OpenAI 工具轮形态);tool 结果消息走
+  /// `tool` 角色 + `tool_call_id`;其余角色纯文本。
+  static List<Map<String, dynamic>> _wireMessages(LlmRequest request) => [
+    {'role': 'system', 'content': request.systemPrompt},
+    for (final m in request.messages)
+      if (m.role == ChatRole.tool)
+        {'role': 'tool', 'tool_call_id': m.toolCallId ?? '', 'content': m.content}
+      else if (m.role == ChatRole.assistant && (m.toolCalls?.isNotEmpty ?? false))
+        {
+          'role': 'assistant',
+          'content': m.content.isEmpty ? null : m.content,
+          'tool_calls': [
+            for (final c in m.toolCalls!)
+              {
+                'id': c.id,
+                'type': 'function',
+                'function': {'name': c.name, 'arguments': c.arguments},
+              },
+          ],
+        }
+      else
+        {'role': m.wireRole, 'content': m.content},
+  ];
+
+  /// 工具定义 → OpenAI `tools` 数组(function 形态)。
+  static List<Map<String, dynamic>> _toolsWire(List<LlmTool> tools) => [
+    for (final t in tools)
+      {
+        'type': 'function',
+        'function': {
+          'name': t.name,
+          'description': t.description,
+          'parameters': t.parameters,
+        },
+      },
+  ];
+
+  /// 流内累计器 → 按 index 序的 [ToolCall] 列表(id/name 缺失给空串,由消费方
+  /// 校验残缺调用)。
+  static List<ToolCall> _callsInOrder(Map<int, _ToolCallAccum> accum) {
+    final indices = accum.keys.toList()..sort();
+    return [
+      for (final i in indices)
+        ToolCall(
+          id: accum[i]!.id ?? '',
+          name: accum[i]!.name ?? '',
+          arguments: accum[i]!.arguments,
+        ),
+    ];
   }
 }

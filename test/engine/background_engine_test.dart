@@ -1,5 +1,5 @@
 // 后台引擎测试:LLM 响应解析与修复兜底、重试/取消语义、提示词分段与缓存前缀、
-// 输出上限档位与截断规则。
+// 模型级输出上限透传与截断规则。
 import 'dart:async';
 import 'dart:convert';
 
@@ -53,6 +53,132 @@ void main() {
     expect(outcome, isA<BackgroundRunSuccess>(), reason: 'expected a successful turn');
     return (outcome as BackgroundRunSuccess).result;
   }
+
+  // 特征化守护(P2):钉死 legacy 提示词的完整字节,守护共享段抽取
+  // (background_prompt.dart)重构 —— 抽取必须逐字节不变。契约文本有意变更时
+  // 才更新金样;片段断言(下方各测试)不足以发现拼接顺序/空行/截断后缀漂移。
+  test('characterization: legacy prompt bytes pinned (stable/variable/combined)', () async {
+    const stableGolden = r'''
+<background_task>Background maintenance contract: the output format and rules for this run.
+You are the background state-maintenance agent for a roleplay session. After each assistant reply you inspect the latest conversation and emit ONE machine-readable JSON object of state changes. You are not a chat participant: never write prose, never reply to the user, never explain.
+
+# Output contract (hard rules)
+- Reply with a single JSON object and NOTHING else.
+- No markdown fences, no preamble, no trailing commentary, no thinking tags.
+- Use exactly the keys listed in the output shape, valid JSON only (double quotes, no trailing commas). A key may be null only where null is explicitly allowed below.
+
+# Output shape for this run
+{"variables": {"<key>": "<value>", ...}, "removeVariables": ["<exact existing key>", ...], "imagePrompts": ["<scene description 1>", ..., "<scene description 2>"]}
+
+# How to read the context sections
+- The recent_conversation section is the ONLY source of truth for the current image scene; it is read-only context, not a source of variable updates.
+- Any memory, character, worldbook_background or image_guide section that appears below is durable, read-only background: never contradict it, never copy it into your output, and never invent facts that fight it. These sections may be absent — work with what is present.
+
+# variables
+- Variables are the session's durable state board: short key-value pairs for facts that persist and can change across the story (location, time, condition, goals, relationships, possessions, ongoing effects). They are not a per-scene summary.
+- Update variables ONLY from the variable_delta section, the unprocessed turns for this run.
+- Never replay old changes from the read-only recent_conversation section.
+- Emit only the keys whose value CHANGED in variable_delta, as {"key": new_value}.
+- YOU MAY AND SHOULD CREATE NEW KEYS: when variable_delta establishes a durable fact of this kind that no existing key covers, add it with a short, stable key and reuse that exact key in later runs. Prefer updating an existing key over creating a near-duplicate or synonym, and do not track transient scene details that will not matter again.
+- Preserve existing keys exactly, including whitespace; keys must not be empty or whitespace-only.
+- Values must be JSON scalars: strings, finite numbers or booleans; never null, objects or arrays.
+- Always include the variables object. Do NOT restate unchanged keys; use {} when nothing changed.
+- To delete a key, list its EXACT existing key in removeVariables. Remove only when variable_delta shows the fact it tracks has ended, been left behind, or been permanently superseded. Never remove a key merely because it is absent from variable_delta or because the context looks cluttered; prefer updating it to a neutral value when the key still describes state.
+- Only existing keys listed under variable_access.deletable may be removed; readonly keys must never be updated or removed. All other existing keys may be updated but never removed. New keys may always be created.
+- A key must never appear in both variables and removeVariables. At most 5 removals per run; use [] when none.
+
+# image
+- Always fill this field — never null, never a generic or stale image. Describe the CURRENT scene read from the recent_conversation section: who is present, where, the action, lighting and mood.
+- Reproduce each character's established appearance EXACTLY as pinned by the image_guide (and the character / memory sections when present); never alter what those fix. Vary only scene-specific pose, expression, action and mood.
+- Write it as the English NovelAI tag format defined in the image_guide: one comma-separated tag string, not a sentence.
+
+- The user wants 2 images: return exactly 2 DIFFERENT tag strings in "imagePrompts", each a distinct framing (shot size / angle / composition / focus / mood) of the SAME current scene, mutually consistent and each independently usable.</background_task>
+
+<image_guide>Authoritative image direction guide (user-maintained). Reproduce the fixed appearance and style it pins down exactly.
+1girl, silver hair</image_guide>
+
+<character>Active character card (read-only reference): name, description, personality, scenario.
+Name: Alice
+
+Description:
+silver-haired knight
+
+Personality:
+calm
+
+Scenario:
+tavern at dusk</character>
+
+<memory>Session long-term memory (read-only; established facts and continuity; never copy into output).
+They met at the river tavern.</memory>
+
+<worldbook_background>User-selected worldbook lore for this session (read-only reference).
+The tavern sits by the river.</worldbook_background>''';
+    const variableGolden = r'''
+<recent_conversation>The most recent conversation turns — read-only context for variables; the source of truth for the current image scene.
+user: I enter the tavern
+assistant: The door creaks open</recent_conversation>
+
+<variable_delta>Unprocessed conversation turns for this run — the ONLY source of variable changes; not an image scene source.
+user: I order ale
+assistant: The barkeep nods</variable_delta>
+
+<variables>Current session variables as JSON. Reuse existing keys with their exact spelling; a key you add that is not listed here creates a new variable.
+{"hp":"10","location":"tavern"}</variables>
+
+<variable_access>Variable permissions for EXISTING keys: "deletable" lists the exact keys you may remove; "readonly" keys must never be updated or removed; all other existing keys may be updated but never removed. New keys are always allowed and are not restricted here.
+{"deletable":["hp"],"readonly":["location"]}</variable_access>
+
+<rerun_instruction>Rerun context for this run (user-triggered; final instruction, applied after the context above).
+This run is a RERUN of the previous background maintenance for the same conversation window, requested by the user. The previous run's choices are not final: re-evaluate the conversation above and emit a fresh, complete state update in the output shape above. The variables shown above are the current state (usually including the previous run's applied changes); emit only what this rerun changes.
+
+The user requested this change in direction:
+make the night stormier
+
+Apply it to the fields you emit: when it implies durable state changes, emit matching variable updates (new keys are allowed; permissions still apply); when it implies a visual change, reflect it in the new scene description while keeping the fixed appearance and style pinned by the image_guide. It never overrides the hard rules above — valid JSON, variable permissions and the image tag format stay mandatory — and it does not turn the recent_conversation section into a variable source.
+
+Image descriptions produced by the previous maintenance (reference only — the previous output, not established facts; this run replaces those images):
+1. wide shot of the street
+2. close-up of her face
+Use them as the baseline to revise rather than text to copy; keep the established scene facts and image_guide constraints.</rerun_instruction>''';
+    final backend = _RecordingBackend('{"variables":{},"imagePrompts":["a","b"]}');
+    await BackgroundEngine(backend).run(
+      model: 'm',
+      variables: const {'hp': '10', 'location': 'tavern'},
+      history: const [
+        Message(sessionId: 1, role: 'user', content: 'I enter the tavern', seq: 4),
+        Message(sessionId: 1, role: 'assistant', content: 'The door creaks open', seq: 5),
+      ],
+      variableHistory: const [
+        Message(sessionId: 1, role: 'user', content: 'I order ale', seq: 6),
+        Message(sessionId: 1, role: 'assistant', content: 'The barkeep nods', seq: 7),
+      ],
+      features: const BackgroundFeatures(variables: true, image: true),
+      imageCount: 2,
+      imageGuide: '1girl, silver hair',
+      memory: 'They met at the river tavern.',
+      character: const CharacterCard(
+        name: 'Alice',
+        description: 'silver-haired knight',
+        personality: 'calm',
+        scenario: 'tavern at dusk',
+      ),
+      worldbook: const [
+        WorldbookEntry(characterId: 1, background: true, content: 'The tavern sits by the river.'),
+        WorldbookEntry(characterId: 1, keys: ['sword'], content: 'Swords are forbidden.'),
+      ],
+      deletableVariables: const {'hp'},
+      readonlyVariables: const {'location'},
+      rerunContext: const RerunContext(
+        direction: 'make the night stormier',
+        previousImagePrompts: ['wide shot of the street', 'close-up of her face'],
+      ),
+    );
+    final req = backend.lastRequest!;
+    expect(req.stableSystemPart, stableGolden);
+    expect(req.variableSystemPart, variableGolden);
+    expect(req.systemPrompt, '$stableGolden\n\n$variableGolden');
+  });
 
   test('parses variables; memory is dropped on fast-state turns; retired keys ignored', () async {
     final engine = BackgroundEngine(
@@ -189,7 +315,8 @@ void main() {
       ));
       expect(result.variableUpdates, {'hp': '7'});
       expect(backend.calls, 3);
-      expect(backend.requests.map((r) => r.maxTokens), [512, null, null]);
+      // 输出上限与主写一致:模型配置的上限在每次尝试中原样透传。
+      expect(backend.requests.map((r) => r.maxTokens), [512, 512, 512]);
     });
 
     test('stops retrying when the second attempt explicitly reports no changes', () async {
@@ -1118,32 +1245,7 @@ void main() {
     expect(active.memoryUpdate, 'Dragon cave');
   });
 
-  test('clamps background temperature and caps maxTokens by default', () async {
-    final backend = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
-    final engine = BackgroundEngine(backend);
-    await engine.run(model: 'm', variables: const {}, history: const []);
-    final request = backend.lastRequest!;
-    expect(request.temperature, BackgroundEngine.maxTemperature);
-    // 快状态轮统一 maxOutputTokens 防跑飞(记忆轮放宽档只属主动轮)。
-    expect(request.maxTokens, BackgroundEngine.maxOutputTokens);
-  });
-
-  test('passes through lower temperature and maxTokens untouched', () async {
-    final backend = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
-    final engine = BackgroundEngine(backend);
-    await engine.run(
-      model: 'm',
-      variables: const {},
-      history: const [],
-      temperature: 0.2,
-      maxTokens: 512,
-    );
-    final request = backend.lastRequest!;
-    expect(request.temperature, 0.2);
-    expect(request.maxTokens, 512);
-  });
-
-  test('clamps excessive temperature and maxTokens down to the caps', () async {
+  test('passes model temperature untouched; unset model maxTokens sends none', () async {
     final backend = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
     final engine = BackgroundEngine(backend);
     await engine.run(
@@ -1151,84 +1253,72 @@ void main() {
       variables: const {},
       history: const [],
       temperature: 0.9,
-      maxTokens: 9999,
+    );
+    final request = backend.lastRequest!;
+    // 后台不再夹取温度:模型配置多少就透传多少。
+    expect(request.temperature, 0.9);
+    // 未配置模型级「最大输出 tokens」时不发送,由服务商兜底(与主写一致)。
+    expect(request.maxTokens, isNull);
+  });
+
+  test('forwards model-level maxTokens untouched (main-write parity)', () async {
+    final backend = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
+    final engine = BackgroundEngine(backend);
+    await engine.run(
+      model: 'm',
+      variables: const {},
+      history: const [],
+      temperature: 0.2,
+      maxTokens: 3000,
+    );
+    final request = backend.lastRequest!;
+    expect(request.temperature, 0.2);
+    expect(request.maxTokens, 3000);
+  });
+
+  test('does not clamp excessive temperature', () async {
+    final backend = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
+    final engine = BackgroundEngine(backend);
+    await engine.run(
+      model: 'm',
+      variables: const {},
+      history: const [],
+      temperature: 1.6,
       features: const BackgroundFeatures(variables: true, image: false),
     );
     final request = backend.lastRequest!;
-    expect(request.temperature, BackgroundEngine.maxTemperature);
-    // 快状态轮统一 maxOutputTokens(用户给的 9999 也被掐到这);
-    // 放宽档 maxOutputTokensMemory 只属于记忆主动轮(init/regenerate)。
-    expect(request.maxTokens, BackgroundEngine.maxOutputTokens);
+    expect(request.temperature, 1.6);
+    expect(request.maxTokens, isNull);
   });
 
-  test('fast-state turns keep the 2048 cap; memory active rounds widen it', () async {
-    // 快状态轮(变量/image)维持 maxOutputTokens 防跑飞;记忆主动轮
-    // (初始化/全量重生成)产出全量记忆文本,上限放宽到 maxOutputTokensMemory。
+  test('fast-state and active rounds forward model maxTokens', () async {
+    // 输出上限只跟随模型配置:快状态轮与记忆主动轮带同一个模型级上限。
     final fastBackend = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null,"imagePrompt":"a cave"}');
     await BackgroundEngine(fastBackend).run(
       model: 'm',
       variables: const {},
       history: const [],
       features: const BackgroundFeatures(variables: false, image: true),
+      maxTokens: 3000,
     );
-    expect(fastBackend.lastRequest!.maxTokens, BackgroundEngine.maxOutputTokens);
+    expect(fastBackend.lastRequest!.maxTokens, 3000);
+
+    final initBackend = _RecordingBackend('{"memory":"m"}');
+    await BackgroundEngine(initBackend).runMemoryInit(
+      model: 'm',
+      character: const CharacterCard(name: 'A'),
+      maxTokens: 3000,
+    );
+    expect(initBackend.lastRequest!.maxTokens, 3000);
 
     final regenBackend = _RecordingBackend('{"memory":"m"}');
     await BackgroundEngine(regenBackend).runMemoryRegenerate(
       model: 'm',
       character: const CharacterCard(name: 'A'),
       history: const [],
+      maxTokens: 3000,
     );
-    expect(regenBackend.lastRequest!.maxTokens, BackgroundEngine.maxOutputTokensMemory);
-  });
-
-  test('output tier scales the first-attempt cap; unlimited sends none (EX 批)', () async {
-    // 档位映射(v54):compact 半量 / standard 基准 / relaxed 倍量 / unlimited
-    // 首试也不发送 max_tokens(与重试同待遇);快状态轮与记忆主动轮各按档位取值。
-    expect(BackgroundEngine.outputCapFor(BackgroundOutputTier.compact, memory: false), 1024);
-    expect(BackgroundEngine.outputCapFor(BackgroundOutputTier.compact, memory: true), 2048);
-    expect(BackgroundEngine.outputCapFor(BackgroundOutputTier.standard, memory: false), BackgroundEngine.maxOutputTokens);
-    expect(BackgroundEngine.outputCapFor(BackgroundOutputTier.standard, memory: true), BackgroundEngine.maxOutputTokensMemory);
-    expect(BackgroundEngine.outputCapFor(BackgroundOutputTier.relaxed, memory: false), 4096);
-    expect(BackgroundEngine.outputCapFor(BackgroundOutputTier.relaxed, memory: true), 8192);
-    expect(BackgroundEngine.outputCapFor(BackgroundOutputTier.unlimited, memory: false), isNull);
-    expect(BackgroundEngine.outputCapFor(BackgroundOutputTier.unlimited, memory: true), isNull);
-
-    // 请求形状:快状态轮 compact → 1024;unlimited → 请求不带 max_tokens。
-    final compactBackend = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
-    await BackgroundEngine(compactBackend).run(
-      model: 'm',
-      variables: const {},
-      history: const [],
-      tier: BackgroundOutputTier.compact,
-    );
-    expect(compactBackend.lastRequest!.maxTokens, 1024);
-
-    final unlimitedBackend = _RecordingBackend('{"activeSkills":[],"variables":{},"memory":null}');
-    await BackgroundEngine(unlimitedBackend).run(
-      model: 'm',
-      variables: const {},
-      history: const [],
-      tier: BackgroundOutputTier.unlimited,
-    );
-    expect(unlimitedBackend.lastRequest!.maxTokens, isNull);
-
-    // 记忆主动轮 relaxed → 8192;unlimited → 不带 max_tokens。
-    final memRelaxedBackend = _RecordingBackend('{"memory":"m"}');
-    await BackgroundEngine(memRelaxedBackend).runMemoryInit(
-      model: 'm',
-      character: const CharacterCard(name: 'A'),
-      tier: BackgroundOutputTier.relaxed,
-    );
-    expect(memRelaxedBackend.lastRequest!.maxTokens, 8192);
-
-    final memUnlimitedBackend = _RecordingBackend('{"memory":"m"}');
-    await BackgroundEngine(memUnlimitedBackend).runMemoryInit(
-      model: 'm',
-      character: const CharacterCard(name: 'A'),
-      tier: BackgroundOutputTier.unlimited,
-    );
-    expect(memUnlimitedBackend.lastRequest!.maxTokens, isNull);
+    expect(regenBackend.lastRequest!.maxTokens, 3000);
   });
 
   test('repairs a JSON value truncated by the output cap, keeping the leading fields', () async {
@@ -1543,25 +1633,25 @@ void main() {
     });
   });
 
-  group('重试放开输出上限与结构化 memory 兜底(BL 批)', () {
-    test('首试带档位上限、重试请求不带 max_tokens(推理模型思考计入预算的根治)', () async {
-      // 首试空响应(预算被推理烧尽,正文为空)→ 重试放开上限后成功。
+  group('重试与模型级输出上限(BL 批)', () {
+    test('首试空响应后重试成功,每次尝试都带模型配置的 maxTokens', () async {
+      // 首试空响应 → 重试成功;输出上限与主写一致,只透传模型配置值。
       final backend = _ScriptedBackend([
         [const DoneEvent()],
         [
-          const TextDelta('{"memory":"recovered after uncapped retry"}'),
+          const TextDelta('{"memory":"recovered after retry"}'),
           const DoneEvent(),
         ],
       ]);
       final result = ok(await BackgroundEngine(backend).runMemoryInit(
         model: 'm',
         character: const CharacterCard(name: 'Alice'),
+        maxTokens: 2048,
       ));
-      expect(result.memoryUpdate, 'recovered after uncapped retry');
+      expect(result.memoryUpdate, 'recovered after retry');
       expect(backend.calls, 2);
-      // 首试:memory 主动轮档位上限;重试:null = 不发送 max_tokens,与主写同待遇。
-      expect(backend.requests[0].maxTokens, BackgroundEngine.maxOutputTokensMemory);
-      expect(backend.requests[1].maxTokens, isNull);
+      expect(backend.requests[0].maxTokens, 2048);
+      expect(backend.requests[1].maxTokens, 2048);
     });
 
     test('memory 字段为结构化对象时序列化为文本,不再判未产出有效记忆', () async {
@@ -1578,7 +1668,7 @@ void main() {
   group('初始化缺 memory 字段纳入重试(BM 批)', () {
     const card = CharacterCard(name: 'Alice');
 
-    test('解析成功但缺 memory → 重试直至产出非空 memory(首试带档位、重试放开)', () async {
+    test('解析成功但缺 memory → 重试直至产出非空 memory(全程带模型级上限)', () async {
       // 前两次解析"成功"但没有有效 memory(推理模型偶发 {} / {"memory":null}),
       // 第三次产出 —— 旧实现直接判"未产出有效记忆"不重试。
       final backend = _ScriptedBackend([
@@ -1592,13 +1682,14 @@ void main() {
       final result = ok(await BackgroundEngine(backend).runMemoryInit(
         model: 'm',
         character: card,
+        maxTokens: 2048,
       ));
       expect(result.memoryUpdate, 'third time produces');
       expect(backend.calls, 3);
-      // 首试带 memory 档上限;重试放开(不发送 max_tokens)。
-      expect(backend.requests[0].maxTokens, BackgroundEngine.maxOutputTokensMemory);
-      expect(backend.requests[1].maxTokens, isNull);
-      expect(backend.requests[2].maxTokens, isNull);
+      // 输出上限只跟随模型配置,每次尝试都带同一个值。
+      expect(backend.requests[0].maxTokens, 2048);
+      expect(backend.requests[1].maxTokens, 2048);
+      expect(backend.requests[2].maxTokens, 2048);
     });
 
     test('三次都缺 memory → parseFailure,detail 注明缺少 memory 字段', () async {
@@ -1616,50 +1707,6 @@ void main() {
       expect(backend.calls, BackgroundEngine.maxAttemptsPerRound);
     });
   });
-
-  group('重试彻底放开输出上限(BN 批)', () {
-    const card = CharacterCard(name: 'Alice');
-
-    test('调用方传模型级 maxTokens 时,重试请求也不带 max_tokens(用户上限不再泄漏)', () async {
-      // 只放开档位上限时:用户给模型配置过「最大输出 tokens」时,该值仍
-      // 原样发进每次重试 —— 三次尝试带同一个 max_tokens,推理模型把预算烧在
-      // 不可见思考上时正文恒空,"模型未返回任何内容"三连败(偶发残留根因)。
-      final backend = _ScriptedBackend([
-        [const DoneEvent()],
-        [
-          const TextDelta('{"memory":"recovered without any cap"}'),
-          const DoneEvent(),
-        ],
-      ]);
-      final result = ok(await BackgroundEngine(backend).runMemoryInit(
-        model: 'm',
-        character: card,
-        maxTokens: 2048, // 用户在模型配置里设置的「最大输出 tokens」
-      ));
-      expect(result.memoryUpdate, 'recovered without any cap');
-      expect(backend.calls, 2);
-      // 首试:用户值与 memory 档位的较小者;重试:完全不发(与用户配置无关)。
-      expect(backend.requests[0].maxTokens, 2048);
-      expect(backend.requests[1].maxTokens, isNull);
-    });
-
-    test('run 路径同理:重试不透传调用方的 maxTokens', () async {
-      final backend = _ScriptedBackend([
-        [const DoneEvent()],
-        [const TextDelta('{"variables":{"hp":"9"}}'), const DoneEvent()],
-      ]);
-      await BackgroundEngine(backend).run(
-        model: 'm',
-        variables: const {},
-        history: const [],
-        features: const BackgroundFeatures(variables: true, image: false),
-        maxTokens: 1500,
-      );
-      expect(backend.requests[0].maxTokens, 1500);
-      expect(backend.requests[1].maxTokens, isNull);
-    });
-  });
-
 
   group('runMemoryInit (主动记忆初始化)', () {
     const card = CharacterCard(
@@ -1702,10 +1749,14 @@ void main() {
       expect(backend.lastRequest!.messages.single.role, ChatRole.user);
     });
 
-    test('uses the memory-tier output cap for the initialization call', () async {
+    test('initialization call forwards the model-level maxTokens', () async {
       final backend = _RecordingBackend('{"memory":"m"}');
-      await BackgroundEngine(backend).runMemoryInit(model: 'm', character: card);
-      expect(backend.lastRequest!.maxTokens, BackgroundEngine.maxOutputTokensMemory);
+      await BackgroundEngine(backend).runMemoryInit(
+        model: 'm',
+        character: card,
+        maxTokens: 3000,
+      );
+      expect(backend.lastRequest!.maxTokens, 3000);
     });
 
     test('fails with parseFailure (after retries) when the LLM emits no valid memory', () async {

@@ -267,6 +267,33 @@ class CharacterCard {
           raw: raw,
         );
 
+  /// 替换原始 JSON 信封(raw),建模字段保持不变。
+  ///
+  /// 草稿文件不落 raw(大卡可达数十 MB);恢复时把当前库的 raw 附回快照卡,
+  /// 保证应用时 `toJson` 合并出的信封与未知 extensions 不丢。
+  CharacterCard withRaw(Map<String, dynamic> raw) => CharacterCard(
+        name: name,
+        description: description,
+        personality: personality,
+        scenario: scenario,
+        firstMessage: firstMessage,
+        mesExample: mesExample,
+        systemPrompt: systemPrompt,
+        postHistoryInstructions: postHistoryInstructions,
+        creatorNotes: creatorNotes,
+        avatarBase64: avatarBase64,
+        backgroundBase64: backgroundBase64,
+        alternateGreetings: alternateGreetings,
+        tags: tags,
+        creator: creator,
+        characterVersion: characterVersion,
+        talkativeness: talkativeness,
+        fav: fav,
+        depthPrompt: depthPrompt,
+        bubbleStyle: bubbleStyle,
+        raw: raw,
+      );
+
   /// **强制**替换头像(导入缩图用):[withAvatar] 只在卡原本无头像时回填,这里
   /// 无条件覆盖 —— 大卡整张 PNG 作头像会撑爆 Android CursorWindow,导入时
   /// 必须把头像换成缩图,不换就会存回整张超大 base64。

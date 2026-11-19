@@ -177,13 +177,17 @@ void main() {
         chat.copyWith(
           backgroundStatus: BackgroundStatus.succeeded,
           backgroundSummary: '变量 mood=calm',
+          backgroundVariableStats: const BackgroundVariableStats(added: 1),
         ),
         onOpenStatus: () => opened = true,
       ),
     );
     await tester.pumpAndSettle();
     expect(rich('后台引擎 · 已完成'), findsOneWidget);
-    expect(rich('变量 mood=calm'), findsOneWidget);
+    // 变量改动保留分组标签,组内只报数量,不再展示具体键值。
+    expect(find.text('变量'), findsOneWidget);
+    expect(find.text('新增 1'), findsOneWidget);
+    expect(rich('mood=calm'), findsNothing);
 
     // 点击闪示进状态面板。
     await tester.tap(find.byKey(const ValueKey('chat-island')));
@@ -195,6 +199,65 @@ void main() {
     await tester.pumpAndSettle();
     expect(rich('后台引擎'), findsNothing);
     expect(rich('in 100'), findsOneWidget);
+  });
+
+  testWidgets('后台收尾闪示:保留分组,组内只报新增/修改/移除/待确认数量', (tester) async {
+    const chat = ChatState(inputTokens: 100, outputTokens: 5);
+    await tester.pumpWidget(
+      host(chat.copyWith(backgroundStatus: BackgroundStatus.running)),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.pumpWidget(
+      host(
+        chat.copyWith(
+          backgroundStatus: BackgroundStatus.succeeded,
+          backgroundSummary:
+              '变量 mood=calm focus=high · 移除变量 old_flag old_banner · '
+              '建议删除变量 temp,待确认 · 图片生成中',
+          backgroundVariableStats: const BackgroundVariableStats(
+            added: 1,
+            updated: 1,
+            removed: 2,
+            proposed: 1,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    for (final label in ['变量', '移除', '待确认', '生图']) {
+      expect(find.text(label), findsOneWidget);
+    }
+    for (final chip in ['新增 1', '修改 1', '2', '1', '图片生成中']) {
+      expect(find.text(chip), findsOneWidget);
+    }
+    // 具体变量键值/名称不再出现在灵动岛。
+    for (final detail in ['mood=calm', 'focus=high', 'old_flag', 'old_banner', 'temp']) {
+      expect(rich(detail), findsNothing);
+    }
+  });
+
+  testWidgets('后台收尾闪示:无计数时变量段回退为更新数量', (tester) async {
+    const chat = ChatState(inputTokens: 100, outputTokens: 5);
+    await tester.pumpWidget(
+      host(chat.copyWith(backgroundStatus: BackgroundStatus.running)),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.pumpWidget(
+      host(
+        chat.copyWith(
+          backgroundStatus: BackgroundStatus.succeeded,
+          backgroundSummary: '变量 mood=calm focus=high',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('变量'), findsOneWidget);
+    expect(find.text('更新 2'), findsOneWidget);
+    expect(rich('mood=calm'), findsNothing);
   });
 
   testWidgets('错误警报:显示错误文本,点关闭触发 onDismissError', (tester) async {

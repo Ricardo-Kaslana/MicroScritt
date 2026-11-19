@@ -78,6 +78,71 @@ void main() {
     expect(tester.getSize(find.byType(TextField)).height, greaterThan(500));
   });
 
+  testWidgets('标题下可展示保存后的副作用说明', (tester) async {
+    var opened = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) {
+              if (!opened) {
+                opened = true;
+                Future.microtask(
+                  () => showTextEditSheet(
+                    context,
+                    title: '编辑指令',
+                    initialText: '旧指令',
+                    description: '将撤回本轮生成并按新内容重新生成。',
+                  ),
+                );
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('编辑指令'), findsOneWidget);
+    expect(find.text('将撤回本轮生成并按新内容重新生成。'), findsOneWidget);
+  });
+
+  testWidgets('允许清空的场景可保存空白文本', (tester) async {
+    String? result = 'sentinel';
+    var opened = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) {
+              if (!opened) {
+                opened = true;
+                Future.microtask(() async {
+                  result = await showTextEditSheet(
+                    context,
+                    title: '编辑字段',
+                    initialText: '原内容',
+                    allowEmpty: true,
+                  );
+                });
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '');
+    await tester.pump();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+
+    expect(result, '', reason: '显式清空字段应能保存');
+  });
+
   testWidgets('复制按钮复制当前编辑内容', (tester) async {
     final copied = <String>[];
     final messenger =

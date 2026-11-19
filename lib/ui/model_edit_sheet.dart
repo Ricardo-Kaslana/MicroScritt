@@ -14,8 +14,8 @@ import 'common/form_field.dart';
 ///
 /// 作为 `ProviderEditScreen` 的 `showModalBottomSheet` 表单,结果经
 /// `Navigator.pop` 交回调用方合并。上下文容量与最大输出支持 `128k`、`1m`
-/// 简写(见 [parseTokenShorthand]);温度须在 0–2 之间,留空 = 主写默认 0.7,
-/// 校验失败只提示、不关闭弹层。
+/// 简写(见 [parseTokenShorthand]);温度须在 0–2 之间,新建时预填默认 1,
+/// 清空也按 1 保存(这是该模型全部请求的唯一温度来源)。
 class ModelEditSheet extends StatefulWidget {
   final LlmModelEntry? existing;
   const ModelEditSheet({super.key, this.existing});
@@ -36,15 +36,17 @@ class _ModelEditSheetState extends State<ModelEditSheet> {
     super.initState();
     final e = widget.existing;
     final mo = e?.maxOutput;
-    final t = e?.temperature;
     _modelId = TextEditingController(text: e?.modelId ?? '');
     _displayName = TextEditingController(text: e?.displayName ?? '');
     _context = TextEditingController(text: e != null ? _displayValue(e.contextCapacity) : '');
     _maxOutput = TextEditingController(text: mo != null ? _displayValue(mo) : '');
-    // 尾零去净(0.70 → 0.7,1.00 → 1),避免用户看到多余的 0。
-    _temperature = TextEditingController(text: t == null ? '' : _displayTemp(t));
+    // 温度必填化(默认 1):新建预填 1,既有模型直接回显配置值。
+    _temperature = TextEditingController(
+      text: _displayTemp(e?.temperature ?? LlmModelEntry.defaultTemperature),
+    );
   }
 
+  /// 尾零去净(0.70 → 0.7,1.00 → 1),避免用户看到多余的 0。
   static String _displayTemp(double v) {
     final s = v.toStringAsFixed(2);
     if (!s.contains('.')) return s;
@@ -104,16 +106,16 @@ class _ModelEditSheetState extends State<ModelEditSheet> {
             const SizedBox(height: 12),
             FormTextField(
               controller: _maxOutput,
-              label: '最大输出 tokens(留空用后端默认)',
-              hint: '例如 256k、16k、4096',
+              label: '最大输出 tokens',
+              hint: '例如 256k;Anthropic 协议必填,OpenAI 可留空',
               keyboardType: TextInputType.text,
               lines: 1,
             ),
             const SizedBox(height: 12),
             FormTextField(
               controller: _temperature,
-              label: 'Temperature(留空 = 0.7 默认)',
-              hint: '0.0 – 2.0,越低越确定、越高越发散',
+              label: 'Temperature(默认 1)',
+              hint: '0.0 – 2.0,越低越确定、越高越发散;清空按默认 1 保存',
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
               lines: 1,
             ),
@@ -134,7 +136,8 @@ class _ModelEditSheetState extends State<ModelEditSheet> {
                 }
                 final maxOut = parseTokenShorthand(_maxOutput.text);
                 final tempRaw = _temperature.text.trim();
-                double? temp;
+                // 清空即采用模型默认温度(唯一默认值 1);填了就必须合法。
+                var temp = LlmModelEntry.defaultTemperature;
                 if (tempRaw.isNotEmpty) {
                   final parsed = double.tryParse(tempRaw);
                   if (parsed == null || parsed < 0 || parsed > 2) {

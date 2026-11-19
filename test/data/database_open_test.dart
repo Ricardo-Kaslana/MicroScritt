@@ -1,4 +1,4 @@
-// 基线数据库(v68):全新建库的表结构与种子;旧版本库的归档重建。
+// 基线数据库(v71):全新建库的表结构与种子;旧版本库的归档重建。
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -42,6 +42,7 @@ void main() {
       'user_profile',
       'regex_scripts',
       'image_styles',
+      'usage_records',
     ]) {
       expect(tables, contains(expected), reason: '基线表 $expected 应存在');
     }
@@ -97,6 +98,11 @@ void main() {
       contains('auto_compact_threshold'),
       reason: 'v68 起自动压缩触发线可配置',
     );
+    expect(
+      appSettingsColumns,
+      contains('background_mode'),
+      reason: 'v71 起后台运行模式可配置(legacy/agentic/hybrid)',
+    );
 
     final providerColumns = (await db.db.rawQuery(
       "SELECT name FROM pragma_table_info('llm_providers')",
@@ -104,10 +110,14 @@ void main() {
     expect(
       providerColumns,
       isNot(contains('gateway_flags')),
-      reason: '旧列名已废弃,兼容选项落 compat_flags',
+      reason: '旧列名已废弃',
     );
     expect(providerColumns, contains('modern_params'));
-    expect(providerColumns, contains('compat_flags'), reason: '端点兼容选项列在基线中');
+    expect(
+      providerColumns,
+      isNot(contains('compat_flags')),
+      reason: 'v70 起移除历史遗留端点兼容选项列',
+    );
 
     final imageProviderColumns = (await db.db.rawQuery(
       "SELECT name FROM pragma_table_info('image_providers')",
@@ -121,6 +131,35 @@ void main() {
       (imageKindRows.single['sql'] as String),
       contains("DEFAULT 'chat_completions'"),
       reason: '生图 kind 列默认值为中性协议名',
+    );
+
+    final usageColumns = (await db.db.rawQuery(
+      "SELECT name FROM pragma_table_info('usage_records')",
+    )).map((r) => r['name'] as String).toSet();
+    expect(
+      usageColumns,
+      containsAll([
+        'session_id',
+        'kind',
+        'provider_id',
+        'provider_name',
+        'model',
+        'model_name',
+        'input_tokens',
+        'output_tokens',
+        'cached_input_tokens',
+        'reported',
+        'created_at',
+      ]),
+      reason: 'v69 起逐请求用量明细支撑全量统计',
+    );
+    final usageIndexes = (await db.db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='usage_records'",
+    )).map((r) => r['name'] as String).toSet();
+    expect(
+      usageIndexes,
+      containsAll(['idx_usage_records_created', 'idx_usage_records_model']),
+      reason: '按时间与模型聚合都需要索引',
     );
 
     expect(db.db.path, isNotNull);
@@ -164,11 +203,12 @@ void main() {
         '时间戳胶囊',
       ]);
 
-      // 内置生图协议插件种子:对话式网关 + Nai2API(v64 起取代旧 Dart 后端)。
+      // 内置生图协议插件种子:对话式网关 + Nai2API + NovelAI 官方 API。
       final imagePlugins = await db.db.query('image_plugins', orderBy: 'id');
       expect(imagePlugins.map((r) => r['id'] as String).toSet(), {
         'microscritt.chat-completions',
         'microscritt.nai2',
+        'microscritt.novelai',
       });
       expect(imagePlugins.every((r) => (r['enabled'] as int) == 1), isTrue);
 

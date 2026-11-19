@@ -22,24 +22,45 @@ import 'common/app_search_field.dart';
 import 'common/confirm_dialog.dart';
 import 'common/empty_state.dart';
 import 'common/form_field.dart';
+import 'common/info_button.dart';
 import 'common/section_header.dart';
 import 'common/sheet_header.dart';
 import 'common/text_edit_sheet.dart';
 import 'common/variable_edit_sheet.dart';
+import 'status/status_desktop_screen.dart';
+import 'status/status_layout.dart';
+import 'status/status_widgets.dart';
 import '../models/memory.dart';
 
 /// 状态面板里变量区的预览条数:超出部分进「查看全部」的虚拟化列表。
 const int _kVariablePreviewLimit = 8;
 
-/// 状态面板(入口:聊天页 AppBar 菜单与后台 agent 状态条)。
-///
-/// 后台引擎自动维护变量与生图;记忆与生图指导则由**用户主动维护**(手动
-/// 编辑或主动生成),后台只读携带。关键状态:后台启停与最近一轮摘要、
-/// 启用中的维护功能、各区块的空态与记忆「待应用」标记。
-class StatusScreen extends ConsumerWidget {
+/// 状态面板统一入口:窄窗走移动单列页,宽窗走桌面分区工作台。
+class StatusScreen extends StatelessWidget {
   /// 要展示的会话 id(变量 / 记忆 / 生图指导都按它取数)。
   final int sessionId;
   const StatusScreen({super.key, required this.sessionId});
+
+  @override
+  Widget build(BuildContext context) {
+    return MediaQuery.sizeOf(context).width >= kStatusDesktopBreakpoint
+        ? StatusDesktopScreen(sessionId: sessionId)
+        : StatusMobileScreen(sessionId: sessionId);
+  }
+}
+
+/// 移动端状态面板(窄窗):后台 agent 的启停与参数,以及变量 / 记忆 / 生图
+/// 指导的人工维护入口。
+///
+/// 变量只供后台请求使用,不进主写上下文,所以这里的变量写操作只失效变量
+/// 相关 provider;记忆以冻结副本占据上下文第 0 条,手工编辑/清空后只更新
+/// 库与列表,需点「应用到上下文」才整体换新(因此也不重算上下文快照)。
+/// 变量删除一律先进回收站;严格模式(`background_deletion_confirm`)下后台
+/// 的删除提议只写待确认建议,由本页确认后才移入回收站。
+class StatusMobileScreen extends ConsumerWidget {
+  /// 要展示的会话 id(变量 / 记忆 / 生图指导都按它取数)。
+  final int sessionId;
+  const StatusMobileScreen({super.key, required this.sessionId});
 
   /// 清空会话记忆:确认后删库并失效列表缓存。
   ///
@@ -185,16 +206,29 @@ class StatusScreen extends ConsumerWidget {
     await ref.read(chatControllerProvider.notifier).applyMemoryToContext();
   }
 
-  /// 后台 agent 总开关:同步派生 provider 与 `app_settings`(单一真相)后落库。
-  Future<void> _toggleBackground(WidgetRef ref, bool enabled) async {
-    await persistBackgroundEnabled(
-      stateSetter: (v) =>
+  /// 后台引擎合并按钮的四态循环:关闭 → Legacy → Agentic → Hybrid → 关闭。
+  /// 从关闭态启用时回到 Legacy;关闭时保留当前模式。启停与模式一次落库,
+  /// 避免两次写整行互相覆盖。
+  Future<void> _cycleBackground(WidgetRef ref) async {
+    final current = ref.read(appSettingsProvider);
+    final (enabled, mode) = switch ((
+      current.backgroundEnabled,
+      current.backgroundMode,
+    )) {
+      (false, _) => (true, BackgroundMode.legacy),
+      (true, BackgroundMode.legacy) => (true, BackgroundMode.agentic),
+      (true, BackgroundMode.agentic) => (true, BackgroundMode.hybrid),
+      (true, BackgroundMode.hybrid) => (false, BackgroundMode.hybrid),
+    };
+    await persistBackgroundEngineState(
+      enabled: enabled,
+      mode: mode,
+      enabledSetter: (v) =>
           ref.read(backgroundEnabledProvider.notifier).state = v,
       appSettingsSetter: (s) =>
           ref.read(appSettingsProvider.notifier).state = s,
       repo: ref.read(appSettingsRepositoryProvider),
-      current: ref.read(appSettingsProvider),
-      enabled: enabled,
+      current: current,
     );
   }
 
@@ -231,20 +265,6 @@ class StatusScreen extends ConsumerWidget {
   ) async {
     await persistBackgroundDeletionConfirm(
       enabled: enabled,
-      appSettingsSetter: (s) =>
-          ref.read(appSettingsProvider.notifier).state = s,
-      repo: ref.read(appSettingsRepositoryProvider),
-      current: ref.read(appSettingsProvider),
-    );
-  }
-
-  /// 设置后台 agent 输出上限档位并落库(仅约束首试请求,重试恒放开)。
-  Future<void> _setBackgroundOutputTier(
-    WidgetRef ref,
-    BackgroundOutputTier tier,
-  ) async {
-    await persistBackgroundOutputTier(
-      tier: tier,
       appSettingsSetter: (s) =>
           ref.read(appSettingsProvider.notifier).state = s,
       repo: ref.read(appSettingsRepositoryProvider),
@@ -326,15 +346,13 @@ class StatusScreen extends ConsumerWidget {
   /// active 变量视图与其它派生面板的刷新。变量不进主写上下文,无需
   /// `refreshContext()`。
   void _refreshVariables(WidgetRef ref) {
-    ref.invalidate(variablesProvider(sessionId));
-    ref.invalidate(variableRowsProvider(sessionId));
+    refreshVariableViews(ref, sessionId);
   }
 
   /// 回收站与待确认建议的刷新:人工增删改会顺带清掉同键的建议,
   /// 所以每次写变量后都要连这两份视图一起失效。
   void _refreshVariableAux(WidgetRef ref) {
-    ref.invalidate(variableTrashProvider(sessionId));
-    ref.invalidate(pendingVariableDeletionsProvider(sessionId));
+    refreshVariableAuxViews(ref, sessionId);
   }
 
   /// 新增一条变量(空表按钮与标题行菜单共用)。人工新增默认 protected:
@@ -500,450 +518,435 @@ class StatusScreen extends ConsumerWidget {
     final backgroundStatus = chatState.backgroundStatus;
     final backgroundSummary = chatState.backgroundSummary;
     // 记忆已修改但尚未应用到上下文:库中最新记忆与上下文冻结副本不一致。
-    // 只在控制器已装载本会话时判定,避免拿别的会话的冻结副本误报。
-    final memoryPendingApply =
-        chatState.sessionId == sessionId &&
-        memories.hasValue &&
-        (memories.value?.firstOrNull?.content.trim() ?? '') !=
-            (chatState.frozenMemory?.trim() ?? '');
+    final memoryPendingApply = isMemoryPendingApply(
+      chatState,
+      sessionId,
+      memories,
+    );
     // 当前会话角色(后台世界书条目选择按角色取数)。
     final characterId =
         ref.watch(chatControllerProvider.select((s) => s.characterId)) ?? -1;
     final scheme = Theme.of(context).colorScheme;
     final running = backgroundStatus == BackgroundStatus.running;
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('状态面板')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+    // 控制区(后台引擎 + 设置)与数据区(变量/记忆/生图指导)分开组织,
+    // 移动单列按原顺序拼接。
+    final engineCards = <Widget>[
+      _BackgroundAgentCard(
+        enabled: backgroundEnabled,
+        status: backgroundStatus,
+        summary: backgroundSummary,
+        mode: ref.watch(appSettingsProvider).backgroundMode,
+        onCycle: () => _cycleBackground(ref),
+      ),
+      // 与页面各节统一的 16 间距,避免状态卡与设置卡贴成一块。
+      const SizedBox(height: 16),
+      // 后台 agent 启用时:维护功能 / 请求参数 / 上下文锚定 归入一张设置卡,
+      // 世界书条目选择也收进同卡的上下文节,避免多张卡堆叠。
+      if (backgroundEnabled)
+        _BackgroundFeatureSelector(
+          features: backgroundFeatures,
+          onToggle: (name) => _toggleFeature(ref, name),
+          // 当前后台专用模型(llm_models.id;null = 跟随主写)。
+          backgroundModelId: ref.watch(appSettingsProvider).backgroundModelId,
+          onModelSelected: (id) => _setBackgroundModel(ref, id),
+          // 后台请求的推理强度(独立于主对话的设置)。
+          backgroundReasoningLevel: ref
+              .watch(appSettingsProvider)
+              .backgroundReasoningLevel,
+          onReasoningSelected: (level) => _setBackgroundReasoning(ref, level),
+          // 上下文锚定段开关:角色卡/记忆是否进后台上下文。
+          characterAnchor: ref
+              .watch(appSettingsProvider)
+              .backgroundCharacterAnchor,
+          memoryAnchor: ref.watch(appSettingsProvider).backgroundMemoryAnchor,
+          onAnchorToggle: (key) => _toggleAnchor(ref, key),
+          // 变量删除前确认严格模式。
+          deletionConfirm: deletionConfirm,
+          onDeletionConfirmChanged: (v) =>
+              _setBackgroundDeletionConfirm(ref, v),
+          characterId: characterId,
+        ),
+    ];
+    final dataSections = <Widget>[
+      // ===== 变量(后台自动维护 + 用户手动增删改) =====
+      Row(
         children: [
-          _BackgroundAgentCard(
-            enabled: backgroundEnabled,
-            status: backgroundStatus,
-            summary: backgroundSummary,
-            onToggle: (v) => _toggleBackground(ref, v),
-          ),
-          // 与页面各节统一的 16 间距,避免状态卡与设置卡贴成一块。
-          const SizedBox(height: 16),
-          // 后台 agent 启用时:维护功能 / 请求参数 / 上下文锚定 归入一张设置卡,
-          // 世界书条目选择也收进同卡的上下文节,避免多张卡堆叠。
-          if (backgroundEnabled)
-            _BackgroundFeatureSelector(
-              features: backgroundFeatures,
-              onToggle: (name) => _toggleFeature(ref, name),
-              // 当前后台专用模型(llm_models.id;null = 跟随主写)。
-              backgroundModelId: ref
-                  .watch(appSettingsProvider)
-                  .backgroundModelId,
-              onModelSelected: (id) => _setBackgroundModel(ref, id),
-              // 后台请求的推理强度(独立于主对话的设置)。
-              backgroundReasoningLevel: ref
-                  .watch(appSettingsProvider)
-                  .backgroundReasoningLevel,
-              onReasoningSelected: (level) =>
-                  _setBackgroundReasoning(ref, level),
-              // 输出上限档位(独立于推理强度,仅约束首试请求)。
-              backgroundOutputTier: ref
-                  .watch(appSettingsProvider)
-                  .backgroundOutputTier,
-              onOutputTierSelected: (tier) =>
-                  _setBackgroundOutputTier(ref, tier),
-              // 上下文锚定段开关:角色卡/记忆是否进后台上下文。
-              characterAnchor: ref
-                  .watch(appSettingsProvider)
-                  .backgroundCharacterAnchor,
-              memoryAnchor: ref
-                  .watch(appSettingsProvider)
-                  .backgroundMemoryAnchor,
-              onAnchorToggle: (key) => _toggleAnchor(ref, key),
-              // 变量删除前确认严格模式。
-              deletionConfirm: deletionConfirm,
-              onDeletionConfirmChanged: (v) =>
-                  _setBackgroundDeletionConfirm(ref, v),
-              characterId: characterId,
-            ),
-          const SizedBox(height: 16),
-          // ===== 变量(后台自动维护 + 用户手动增删改) =====
-          Row(
-            children: [
-              const Expanded(
-                child: SectionHeader('变量', icon: Icons.data_object),
-              ),
-              variableRows.maybeWhen(
-                data: (rows) => rows.isEmpty && trashCount == 0
-                    ? const SizedBox.shrink()
-                    : Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          // 回收站改为常驻入口(带数量角标):此前埋在三点菜单
-                          // 里,删除后想恢复的用户很难再找到。
-                          if (trashCount > 0)
-                            IconButton(
-                              tooltip: '已删除的变量($trashCount)',
-                              icon: Badge(
-                                label: Text('$trashCount'),
-                                child: const Icon(
-                                  Icons.restore_from_trash_outlined,
-                                ),
-                              ),
-                              onPressed: () => _showTrash(context),
-                            ),
-                          _sectionMenu(
-                            scheme: scheme,
-                            tooltip: '变量操作',
-                            actions: [
-                              const MenuAction(
-                                value: 'add',
-                                label: '新增变量',
-                                icon: Icons.add,
-                              ),
-                              if (rows.isNotEmpty)
-                                const MenuAction(
-                                  value: 'clear',
-                                  label: '清空',
-                                  icon: Icons.delete_sweep_outlined,
-                                  destructive: true,
-                                ),
-                            ],
-                            onSelected: (action) {
-                              if (action == 'add') {
-                                _addVariable(context, ref, rows);
-                              } else if (action == 'clear') {
-                                _clearVariables(context, ref);
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                orElse: () => const SizedBox.shrink(),
-              ),
-            ],
-          ),
-          variableRows.when(
-            data: (rows) => rows.isEmpty
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+          const Expanded(child: SectionHeader('变量', icon: Icons.data_object)),
+          variableRows.maybeWhen(
+            data: (rows) => rows.isEmpty && trashCount == 0
+                ? const SizedBox.shrink()
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const EmptyState(
-                        compact: true,
-                        icon: Icons.data_object,
-                        title: '暂无变量',
-                        message: '后台引擎尚未写入变量。也可以手动新增,作为后台维护的起始状态。',
-                      ),
-                      const SizedBox(height: 4),
-                      // 与记忆/生图指导空态同一语言:动作作为卡内操作行,
-                      // 不再用独立按钮与卡片混排。
-                      GroupCard(
-                        children: [
-                          ListTile(
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
+                      // 回收站改为常驻入口(带数量角标):此前埋在三点菜单
+                      // 里,删除后想恢复的用户很难再找到。
+                      if (trashCount > 0)
+                        IconButton(
+                          tooltip: '已删除的变量($trashCount)',
+                          icon: Badge(
+                            label: Text('$trashCount'),
+                            child: const Icon(
+                              Icons.restore_from_trash_outlined,
                             ),
-                            leading: Icon(
-                              Icons.add,
-                              size: 20,
-                              color: scheme.primary,
-                            ),
-                            title: const Text('新增变量'),
-                            onTap: () => _addVariable(context, ref, rows),
                           ),
-                        ],
-                      ),
-                    ],
-                  )
-                : GroupCard(
-                    // 点一行 = 编辑该条;行尾垃圾桶 = 移入回收站。
-                    // 只预览前几条:变量由后台长期维护,数量可能很多 ——
-                    // 全量塞进一个 Card(Column)会让状态面板一次性布局所有行。
-                    // 更长的文本也一律限行,避免单个大变量把整行撑高。
-                    children: [
-                      for (final variable in rows.take(_kVariablePreviewLimit))
-                        ListTile(
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                          ),
-                          title: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  variable.key,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                              _VariableAccessBadge(
-                                access: variable.agentAccess,
-                              ),
-                            ],
-                          ),
-                          subtitle: Text(
-                            variable.value,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: IconButton(
-                            tooltip: '删除变量',
-                            icon: Icon(
-                              Icons.delete_outline,
-                              size: 20,
-                              color: scheme.error,
-                            ),
-                            onPressed: () =>
-                                _deleteVariable(context, ref, variable.key),
-                          ),
-                          onTap: () =>
-                              _editVariable(context, ref, rows, variable),
+                          onPressed: () => _showTrash(context),
                         ),
-                      if (rows.length > _kVariablePreviewLimit)
-                        ListTile(
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                          ),
-                          leading: const Icon(Icons.list_alt_outlined),
-                          title: Text('查看全部 ${rows.length} 个变量'),
-                          trailing: const Icon(Icons.chevron_right),
-                          onTap: () => _showAllVariables(context),
-                        ),
-                    ],
-                  ),
-            error: (e, _) => _EmptyHint('$e', isError: true),
-            loading: () => const _SectionSkeleton(),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: _PendingVariableDeletions(sessionId: sessionId),
-          ),
-          const SizedBox(height: 16),
-          // ===== 记忆(用户主动维护) =====
-          Row(
-            children: [
-              const Expanded(
-                child: SectionHeader('记忆', icon: Icons.psychology_outlined),
-              ),
-              // 记忆每会话仅一条(schema UNIQUE(session_id)):点内容行直接编辑,
-              // 重生成与清空都收进标题行菜单;非空时卡内只留「应用到上下文」。
-              memories.maybeWhen(
-                data: (list) => list.isEmpty
-                    ? const SizedBox.shrink()
-                    : _sectionMenu(
+                      _sectionMenu(
                         scheme: scheme,
-                        tooltip: '记忆操作',
+                        tooltip: '变量操作',
                         actions: [
-                          MenuAction(
-                            value: 'regenerate',
-                            label: '重新生成',
-                            icon: Icons.auto_awesome,
-                            enabled: !running,
-                          ),
                           const MenuAction(
-                            value: 'clear',
-                            label: '清空',
-                            icon: Icons.delete_sweep_outlined,
-                            destructive: true,
+                            value: 'add',
+                            label: '新增变量',
+                            icon: Icons.add,
                           ),
+                          if (rows.isNotEmpty)
+                            const MenuAction(
+                              value: 'clear',
+                              label: '清空',
+                              icon: Icons.delete_sweep_outlined,
+                              destructive: true,
+                            ),
                         ],
                         onSelected: (action) {
-                          if (action == 'regenerate') {
-                            ref
-                                .read(chatControllerProvider.notifier)
-                                .regenerateMemory();
+                          if (action == 'add') {
+                            _addVariable(context, ref, rows);
                           } else if (action == 'clear') {
-                            _clearMemory(context, ref);
+                            _clearVariables(context, ref);
                           }
                         },
                       ),
-                orElse: () => const SizedBox.shrink(),
-              ),
-            ],
-          ),
-          memories.when(
-            data: (list) => list.isEmpty
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const EmptyState(
-                        compact: true,
-                        icon: Icons.psychology_outlined,
-                        title: '暂无记忆',
-                        message: '尚无记忆。记忆是给主写模型的长期事实底本,可由 AI 依据角色卡生成,也可手动填写。',
-                      ),
-                      const SizedBox(height: 4),
-                      // 空态动作与卡内操作行同一种语言:生成/手动填写/待应用
-                      // 最多三行排在同一张卡里,不再按钮与独立卡片混排。
-                      GroupCard(
-                        children: [
-                          ListTile(
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                            ),
-                            leading: Icon(
-                              Icons.psychology_outlined,
-                              size: 20,
-                              color: scheme.primary,
-                            ),
-                            title: const Text('生成初始记忆'),
-                            enabled: !running,
-                            onTap: running
-                                ? null
-                                : () => ref
-                                      .read(chatControllerProvider.notifier)
-                                      .initializeMemory(),
-                          ),
-                          ListTile(
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                            ),
-                            leading: Icon(
-                              Icons.edit_outlined,
-                              size: 20,
-                              color: scheme.primary,
-                            ),
-                            title: const Text('手动填写记忆'),
-                            onTap: () => _createMemory(context, ref),
-                          ),
-                          // 记忆被清空但上下文仍冻结着旧版本:保留高亮的应用
-                          // 入口,否则旧记忆只能等压缩时才移出上下文。
-                          if (memoryPendingApply)
-                            _applyMemoryTile(
-                              context,
-                              ref,
-                              pending: true,
-                              enabled: !running,
-                              pendingHint: '记忆已清空,上下文仍保留旧版本',
-                            ),
-                        ],
-                      ),
-                    ],
-                  )
-                : GroupCard(
-                    children: [
-                      // 点内容行直接编辑(与变量行同一交互);清空在标题行菜单。
-                      for (final m in list)
-                        ListTile(
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                          ),
-                          // 记忆是状态面板里用户最常回看的长文本:给到 10 行,
-                          // 与生图指导同高,仍不足以撑爆面板。
-                          title: Text(
-                            m.content,
-                            maxLines: 10,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          onTap: () => _editMemoryEntry(context, ref, m),
-                        ),
-                      // 未应用的记忆修改在这里持续高亮,直到应用或压缩换新。
-                      _applyMemoryTile(
-                        context,
-                        ref,
-                        pending: memoryPendingApply,
-                        enabled: !running,
-                      ),
                     ],
                   ),
-            error: (e, _) => _EmptyHint('$e', isError: true),
-            loading: () => const _SectionSkeleton(),
+            orElse: () => const SizedBox.shrink(),
           ),
-          const SizedBox(height: 16),
-          // ===== 生图指导(后台生图每轮携带) =====
-          Row(
-            children: [
-              const Expanded(
-                child: SectionHeader('生图指导', icon: Icons.palette_outlined),
-              ),
-              imageGuide.maybeWhen(
-                data: (list) => list.isEmpty
-                    ? const SizedBox.shrink()
-                    : _sectionMenu(
-                        scheme: scheme,
-                        tooltip: '生图指导操作',
-                        onSelected: (action) {
-                          if (action == 'clear') _clearImageGuide(context, ref);
-                        },
-                      ),
-                orElse: () => const SizedBox.shrink(),
-              ),
-            ],
-          ),
-          imageGuide.when(
-            data: (list) => list.isEmpty
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const EmptyState(
-                        compact: true,
-                        icon: Icons.palette_outlined,
-                        title: '暂无生图指导',
-                        message:
-                            '尚无生图指导。指导固定角色外貌与画风,由后台生图每轮携带;可由 AI 生成,也可手动填写。',
-                      ),
-                      const SizedBox(height: 4),
-                      // 与记忆空态同一语言:两条动作排成卡内操作行。
-                      GroupCard(
-                        children: [
-                          ListTile(
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                            ),
-                            leading: Icon(
-                              Icons.palette_outlined,
-                              size: 20,
-                              color: scheme.primary,
-                            ),
-                            title: const Text('生成初始指导'),
-                            enabled: !running,
-                            onTap: running
-                                ? null
-                                : () => ref
-                                      .read(chatControllerProvider.notifier)
-                                      .initializeImageGuide(),
-                          ),
-                          ListTile(
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                            ),
-                            leading: Icon(
-                              Icons.edit_outlined,
-                              size: 20,
-                              color: scheme.primary,
-                            ),
-                            title: const Text('手动填写指导'),
-                            onTap: () => _editImageGuide(context, ref, null),
-                          ),
-                        ],
-                      ),
-                    ],
-                  )
-                : GroupCard(
-                    // 点内容行直接编辑(与记忆行同一交互);清空在标题行菜单。
+        ],
+      ),
+      variableRows.when(
+        data: (rows) => rows.isEmpty
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const EmptyState(
+                    compact: true,
+                    icon: Icons.data_object,
+                    title: '暂无变量',
+                    message: '后台引擎尚未写入变量。也可以手动新增,作为后台维护的起始状态。',
+                  ),
+                  const SizedBox(height: 4),
+                  // 与记忆/生图指导空态同一语言:动作作为卡内操作行,
+                  // 不再用独立按钮与卡片混排。
+                  GroupCard(
                     children: [
                       ListTile(
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 12,
                         ),
-                        title: Text(
-                          list.first.content,
-                          maxLines: 10,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 13,
-                          ),
+                        leading: Icon(
+                          Icons.add,
+                          size: 20,
+                          color: scheme.primary,
                         ),
-                        onTap: () =>
-                            _editImageGuide(context, ref, list.first.content),
+                        title: const Text('新增变量'),
+                        onTap: () => _addVariable(context, ref, rows),
                       ),
                     ],
                   ),
-            error: (e, _) => _EmptyHint('$e', isError: true),
-            loading: () => const _SectionSkeleton(),
+                ],
+              )
+            : GroupCard(
+                // 点一行 = 编辑该条;行尾垃圾桶 = 移入回收站。
+                // 只预览前几条:变量由后台长期维护,数量可能很多 ——
+                // 全量塞进一个 Card(Column)会让状态面板一次性布局所有行。
+                // 更长的文本也一律限行,避免单个大变量把整行撑高。
+                children: [
+                  for (final variable in rows.take(_kVariablePreviewLimit))
+                    ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                      ),
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              variable.key,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          VariableAccessBadge(access: variable.agentAccess),
+                        ],
+                      ),
+                      subtitle: Text(
+                        variable.value,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: IconButton(
+                        tooltip: '删除变量',
+                        icon: Icon(
+                          Icons.delete_outline,
+                          size: 20,
+                          color: scheme.error,
+                        ),
+                        onPressed: () =>
+                            _deleteVariable(context, ref, variable.key),
+                      ),
+                      onTap: () => _editVariable(context, ref, rows, variable),
+                    ),
+                  if (rows.length > _kVariablePreviewLimit)
+                    ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                      ),
+                      leading: const Icon(Icons.list_alt_outlined),
+                      title: Text('查看全部 ${rows.length} 个变量'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => _showAllVariables(context),
+                    ),
+                ],
+              ),
+        error: (e, _) => _EmptyHint('$e', isError: true),
+        loading: () => const _SectionSkeleton(),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: PendingVariableDeletions(sessionId: sessionId),
+      ),
+      const SizedBox(height: 16),
+      // ===== 记忆(用户主动维护) =====
+      Row(
+        children: [
+          const Expanded(
+            child: SectionHeader('记忆', icon: Icons.psychology_outlined),
           ),
-          // 生图指导是页面末区块:额外留出底部间隙,不贴屏幕底边。
-          const SizedBox(height: 24),
+          // 记忆每会话仅一条(schema UNIQUE(session_id)):点内容行直接编辑,
+          // 重生成与清空都收进标题行菜单;非空时卡内只留「应用到上下文」。
+          memories.maybeWhen(
+            data: (list) => list.isEmpty
+                ? const SizedBox.shrink()
+                : _sectionMenu(
+                    scheme: scheme,
+                    tooltip: '记忆操作',
+                    actions: [
+                      MenuAction(
+                        value: 'regenerate',
+                        label: '重新生成',
+                        icon: Icons.auto_awesome,
+                        enabled: !running,
+                      ),
+                      const MenuAction(
+                        value: 'clear',
+                        label: '清空',
+                        icon: Icons.delete_sweep_outlined,
+                        destructive: true,
+                      ),
+                    ],
+                    onSelected: (action) {
+                      if (action == 'regenerate') {
+                        ref
+                            .read(chatControllerProvider.notifier)
+                            .regenerateMemory();
+                      } else if (action == 'clear') {
+                        _clearMemory(context, ref);
+                      }
+                    },
+                  ),
+            orElse: () => const SizedBox.shrink(),
+          ),
         ],
+      ),
+      memories.when(
+        data: (list) => list.isEmpty
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const EmptyState(
+                    compact: true,
+                    icon: Icons.psychology_outlined,
+                    title: '暂无记忆',
+                    message: '尚无记忆。记忆是给主写模型的长期事实底本,可由 AI 依据角色卡生成,也可手动填写。',
+                  ),
+                  const SizedBox(height: 4),
+                  // 空态动作与卡内操作行同一种语言:生成/手动填写/待应用
+                  // 最多三行排在同一张卡里,不再按钮与独立卡片混排。
+                  GroupCard(
+                    children: [
+                      ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                        ),
+                        leading: Icon(
+                          Icons.psychology_outlined,
+                          size: 20,
+                          color: scheme.primary,
+                        ),
+                        title: const Text('生成初始记忆'),
+                        enabled: !running,
+                        onTap: running
+                            ? null
+                            : () => ref
+                                  .read(chatControllerProvider.notifier)
+                                  .initializeMemory(),
+                      ),
+                      ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                        ),
+                        leading: Icon(
+                          Icons.edit_outlined,
+                          size: 20,
+                          color: scheme.primary,
+                        ),
+                        title: const Text('手动填写记忆'),
+                        onTap: () => _createMemory(context, ref),
+                      ),
+                      // 记忆被清空但上下文仍冻结着旧版本:保留高亮的应用
+                      // 入口,否则旧记忆只能等压缩时才移出上下文。
+                      if (memoryPendingApply)
+                        _applyMemoryTile(
+                          context,
+                          ref,
+                          pending: true,
+                          enabled: !running,
+                          pendingHint: '记忆已清空,上下文仍保留旧版本',
+                        ),
+                    ],
+                  ),
+                ],
+              )
+            : GroupCard(
+                children: [
+                  // 点内容行直接编辑(与变量行同一交互);清空在标题行菜单。
+                  for (final m in list)
+                    ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                      ),
+                      // 记忆是状态面板里用户最常回看的长文本:给到 10 行,
+                      // 与生图指导同高,仍不足以撑爆面板。
+                      title: Text(
+                        m.content,
+                        maxLines: 10,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () => _editMemoryEntry(context, ref, m),
+                    ),
+                  // 未应用的记忆修改在这里持续高亮,直到应用或压缩换新。
+                  _applyMemoryTile(
+                    context,
+                    ref,
+                    pending: memoryPendingApply,
+                    enabled: !running,
+                  ),
+                ],
+              ),
+        error: (e, _) => _EmptyHint('$e', isError: true),
+        loading: () => const _SectionSkeleton(),
+      ),
+      const SizedBox(height: 16),
+      // ===== 生图指导(后台生图每轮携带) =====
+      Row(
+        children: [
+          const Expanded(
+            child: SectionHeader('生图指导', icon: Icons.palette_outlined),
+          ),
+          imageGuide.maybeWhen(
+            data: (list) => list.isEmpty
+                ? const SizedBox.shrink()
+                : _sectionMenu(
+                    scheme: scheme,
+                    tooltip: '生图指导操作',
+                    onSelected: (action) {
+                      if (action == 'clear') _clearImageGuide(context, ref);
+                    },
+                  ),
+            orElse: () => const SizedBox.shrink(),
+          ),
+        ],
+      ),
+      imageGuide.when(
+        data: (list) => list.isEmpty
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const EmptyState(
+                    compact: true,
+                    icon: Icons.palette_outlined,
+                    title: '暂无生图指导',
+                    message: '尚无生图指导。指导固定角色外貌与画风,由后台生图每轮携带;可由 AI 生成,也可手动填写。',
+                  ),
+                  const SizedBox(height: 4),
+                  // 与记忆空态同一语言:两条动作排成卡内操作行。
+                  GroupCard(
+                    children: [
+                      ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                        ),
+                        leading: Icon(
+                          Icons.palette_outlined,
+                          size: 20,
+                          color: scheme.primary,
+                        ),
+                        title: const Text('生成初始指导'),
+                        enabled: !running,
+                        onTap: running
+                            ? null
+                            : () => ref
+                                  .read(chatControllerProvider.notifier)
+                                  .initializeImageGuide(),
+                      ),
+                      ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                        ),
+                        leading: Icon(
+                          Icons.edit_outlined,
+                          size: 20,
+                          color: scheme.primary,
+                        ),
+                        title: const Text('手动填写指导'),
+                        onTap: () => _editImageGuide(context, ref, null),
+                      ),
+                    ],
+                  ),
+                ],
+              )
+            : GroupCard(
+                // 点内容行直接编辑(与记忆行同一交互);清空在标题行菜单。
+                children: [
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                    title: Text(
+                      list.first.content,
+                      maxLines: 10,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 13,
+                      ),
+                    ),
+                    onTap: () =>
+                        _editImageGuide(context, ref, list.first.content),
+                  ),
+                ],
+              ),
+        error: (e, _) => _EmptyHint('$e', isError: true),
+        loading: () => const _SectionSkeleton(),
+      ),
+      // 生图指导是页面末区块:额外留出底部间隙,不贴屏幕底边。
+      const SizedBox(height: 24),
+    ];
+    return Scaffold(
+      appBar: AppBar(title: const Text('状态面板')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [...engineCards, const SizedBox(height: 16), ...dataSections],
       ),
     );
   }
@@ -1003,206 +1006,6 @@ class _EmptyHint extends StatelessWidget {
         text,
         style: TextStyle(color: isError ? scheme.error : scheme.outline),
       ),
-    );
-  }
-}
-
-/// 变量行的后台权限徽标:三档 `full` 可改可删 / `protected` 可改不可删 /
-/// `readonly` 只读,图标 + 长按/悬停提示,不额外占一行文字。权限只是提示,
-/// 真正的约束在仓库事务内复核。
-class _VariableAccessBadge extends StatelessWidget {
-  final VariableAccess access;
-  const _VariableAccessBadge({required this.access});
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final (icon, color) = switch (access) {
-      VariableAccess.full => (Icons.auto_awesome_outlined, scheme.primary),
-      VariableAccess.protected => (
-        Icons.verified_user_outlined,
-        scheme.onSurfaceVariant,
-      ),
-      VariableAccess.readonly => (Icons.lock_outline, scheme.error),
-    };
-    return Tooltip(
-      message: '${access.label}:${access.description}',
-      child: Icon(icon, size: 16, color: color),
-    );
-  }
-}
-
-/// 严格模式下的待确认删除卡片。确认后移入回收站(可恢复)。
-class _PendingVariableDeletions extends ConsumerWidget {
-  final int sessionId;
-  const _PendingVariableDeletions({required this.sessionId});
-
-  /// 建议、变量行与回收站三者会互相影响,处理完一并失效。
-  void _refresh(WidgetRef ref) {
-    ref.invalidate(pendingVariableDeletionsProvider(sessionId));
-    ref.invalidate(variablesProvider(sessionId));
-    ref.invalidate(variableRowsProvider(sessionId));
-    ref.invalidate(variableTrashProvider(sessionId));
-  }
-
-  /// 确认单条建议:仓库在事务内复核变量仍在、权限仍为 `full` 且值未变;
-  /// 否则视为失效建议并清掉,这里按结果分别提示。
-  Future<void> _approveOne(
-    BuildContext context,
-    WidgetRef ref,
-    VariableDeletionProposal proposal,
-  ) async {
-    final result = await ref
-        .read(variableRepositoryProvider)
-        .approveDeletion(sessionId, proposal.id!);
-    if (!context.mounted) return;
-    _refresh(ref);
-    final message = result.removed > 0
-        ? '已移除「${proposal.key}」,可在「已删除」中恢复'
-        : '「${proposal.key}」已变化或不再是可删状态,建议已失效';
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  /// 忽略单条建议:只删建议行,变量本身不动。
-  Future<void> _dismissOne(
-    BuildContext context,
-    WidgetRef ref,
-    VariableDeletionProposal proposal,
-  ) async {
-    await ref
-        .read(variableRepositoryProvider)
-        .dismissDeletion(sessionId, proposal.id!);
-    if (!context.mounted) return;
-    _refresh(ref);
-  }
-
-  /// 确认全部建议(同一事务):失效建议会计入返回结果,提示里一并说明,
-  /// 避免用户以为全部都已删除。
-  Future<void> _approveAll(
-    BuildContext context,
-    WidgetRef ref,
-    int count,
-  ) async {
-    final confirmed = await showConfirmDialog(
-      context,
-      title: '执行全部删除?',
-      message: '将把 $count 个变量移入回收站,可在「已删除」中恢复。',
-      confirmLabel: '执行',
-    );
-    if (!confirmed) return;
-    final result = await ref
-        .read(variableRepositoryProvider)
-        .approveAllDeletions(sessionId);
-    if (!context.mounted) return;
-    _refresh(ref);
-    final stale = result.stale > 0 ? ',${result.stale} 个建议已失效' : '';
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('已移除 ${result.removed} 个变量$stale')));
-  }
-
-  /// 忽略全部建议:只清空待确认列表,变量本身不动。
-  Future<void> _dismissAll(BuildContext context, WidgetRef ref) async {
-    await ref.read(variableRepositoryProvider).dismissAllDeletions(sessionId);
-    if (!context.mounted) return;
-    _refresh(ref);
-  }
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final pending = ref.watch(pendingVariableDeletionsProvider(sessionId));
-    return pending.maybeWhen(
-      data: (list) {
-        if (list.isEmpty) return const SizedBox.shrink();
-        final scheme = Theme.of(context).colorScheme;
-        return Card(
-          color: scheme.errorContainer.withValues(alpha: 0.35),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      Icons.fact_check_outlined,
-                      size: 18,
-                      color: scheme.error,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '后台建议删除的变量 (${list.length})',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '这些删除建议尚未执行:确认后移入回收站,可恢复。',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-                for (final proposal in list)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    title: Text(
-                      proposal.key,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    subtitle: Text(
-                      proposal.value,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          tooltip: '忽略建议',
-                          icon: const Icon(Icons.close, size: 20),
-                          onPressed: () => _dismissOne(context, ref, proposal),
-                        ),
-                        IconButton(
-                          tooltip: '执行删除',
-                          icon: Icon(
-                            Icons.check,
-                            size: 20,
-                            color: scheme.error,
-                          ),
-                          onPressed: () => _approveOne(context, ref, proposal),
-                        ),
-                      ],
-                    ),
-                  ),
-                if (list.length > 1)
-                  Row(
-                    children: [
-                      TextButton(
-                        onPressed: () => _dismissAll(context, ref),
-                        child: const Text('全部忽略'),
-                      ),
-                      const Spacer(),
-                      FilledButton.tonalIcon(
-                        onPressed: () => _approveAll(context, ref, list.length),
-                        icon: const Icon(Icons.delete_sweep_outlined, size: 16),
-                        label: const Text('全部执行'),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-      orElse: () => const SizedBox.shrink(),
     );
   }
 }
@@ -1338,8 +1141,9 @@ class _VariableListSheetState extends ConsumerState<_VariableListSheet> {
                                     ),
                                   ),
                                 ),
-                                _VariableAccessBadge(
+                                VariableAccessBadge(
                                   access: variable.agentAccess,
+                                  showLabel: false,
                                 ),
                               ],
                             ),
@@ -1582,17 +1386,21 @@ class _VariableTrashSheet extends ConsumerWidget {
   }
 }
 
-/// 后台 agent 状态卡:启用开关 + 最近一轮运行状态与一句话摘要。
+/// 后台 agent 状态卡:合并的启停/模式按钮 + 最近一轮运行状态与一句话摘要。
 class _BackgroundAgentCard extends StatelessWidget {
   final bool enabled;
   final BackgroundStatus status;
   final String summary;
-  final ValueChanged<bool> onToggle;
+
+  /// 当前后台运行模式与四态循环回调(关闭 → Legacy → Agentic → Hybrid → 关闭)。
+  final BackgroundMode mode;
+  final VoidCallback onCycle;
   const _BackgroundAgentCard({
     required this.enabled,
     required this.status,
     required this.summary,
-    required this.onToggle,
+    required this.mode,
+    required this.onCycle,
   });
 
   @override
@@ -1608,8 +1416,7 @@ class _BackgroundAgentCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // 图标、标题/状态、开关固定在同一行;摘要另起一行放在下方,
-            // 不再把标题行和开关挤得上下错位。
+            // 图标、标题/状态与合并按钮固定在同一行;摘要另起一行放在下方。
             Row(
               children: [
                 Icon(
@@ -1644,7 +1451,12 @@ class _BackgroundAgentCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                Switch(value: enabled, onChanged: onToggle),
+                const SizedBox(width: 8),
+                _BackgroundEngineButton(
+                  enabled: enabled,
+                  mode: mode,
+                  onPressed: onCycle,
+                ),
               ],
             ),
             if (summary.isNotEmpty)
@@ -1655,9 +1467,9 @@ class _BackgroundAgentCard extends StatelessWidget {
                 // 成功摘要可能列出本轮全部变更(变量增删改、图片生成中…),
                 // 很长时默认折叠到 3 行,需要时再展开;失败等其它状态的
                 // 引擎诊断摘要保持全文,便于直接回看错误。
-                child: _BackgroundSummaryText(
+                child: BackgroundSummaryView(
                   text: summary,
-                  collapsible: status == BackgroundStatus.succeeded,
+                  status: status,
                 ),
               ),
           ],
@@ -1667,110 +1479,63 @@ class _BackgroundAgentCard extends StatelessWidget {
   }
 }
 
-/// 后台摘要文本:成功状态且超过 3 行时默认折叠,提供展开/收起。
-/// 失败/跳过等状态保持全文 —— 那些摘要常含引擎诊断,截断会看不全错误。
-class _BackgroundSummaryText extends StatefulWidget {
-  final String text;
-  final bool collapsible;
-
-  const _BackgroundSummaryText({required this.text, required this.collapsible});
-
-  @override
-  State<_BackgroundSummaryText> createState() => _BackgroundSummaryTextState();
-}
-
-class _BackgroundSummaryTextState extends State<_BackgroundSummaryText> {
-  static const int _collapsedLines = 3;
-
-  /// 用户展开/收起的选择保持到组件销毁:每轮后台完成后摘要文本都会刷新,
-  /// 旧实现在文本变化时强制收起,正在读长摘要的用户每次都被打断。
-  bool _expanded = false;
+/// 后台引擎合并按钮:胶囊同时承载启停与运行模式,点按循环四态
+/// 关闭 → Legacy → Agentic → Hybrid → 关闭。
+///
+/// 胶囊高 32,密度显式取 standard,避免桌面主题默认 compact 再压低;
+/// 关闭态转灰并换电源图标,悬停提示说明下一步动作。
+class _BackgroundEngineButton extends StatelessWidget {
+  final bool enabled;
+  final BackgroundMode mode;
+  final VoidCallback onPressed;
+  const _BackgroundEngineButton({
+    required this.enabled,
+    required this.mode,
+    required this.onPressed,
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final style = theme.textTheme.bodySmall?.copyWith(
-      color: theme.colorScheme.onSurfaceVariant,
-    );
-    // 与「模型与参数」里的输入框同款填充灰:摘要从白色卡片背景中
-    // 独立成一块可读区域,而不是浮在标题下方的一串灰字。
-    final fill =
-        theme.inputDecorationTheme.fillColor ??
-        theme.colorScheme.surfaceContainerHighest;
-    return Container(
-      key: const ValueKey('background-summary-box'),
-      width: double.infinity,
-      margin: const EdgeInsets.only(top: 4),
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-      decoration: BoxDecoration(
-        color: fill,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: _content(context, style),
-    );
-  }
-
-  Widget _content(BuildContext context, TextStyle? style) {
-    if (!widget.collapsible) {
-      return Text(widget.text, style: style);
-    }
-    if (_expanded) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AnimatedSize(
-            duration: const Duration(milliseconds: 180),
-            alignment: Alignment.topLeft,
-            child: Text(widget.text, style: style),
+    final scheme = theme.colorScheme;
+    final foreground = enabled ? scheme.primary : scheme.onSurfaceVariant;
+    final label = enabled ? mode.label : '已关闭';
+    final nextAction = switch (mode) {
+      BackgroundMode.legacy => '切换到 Agentic',
+      BackgroundMode.agentic => '切换到 Hybrid',
+      BackgroundMode.hybrid => '关闭后台引擎',
+    };
+    final tooltip = enabled
+        ? '运行模式:${mode.label},${mode.hint};点击$nextAction'
+        : '后台引擎已关闭;点击启用 Legacy 模式';
+    return Tooltip(
+      message: tooltip,
+      child: TextButton.icon(
+        key: ValueKey('background_engine_${enabled ? mode.name : 'off'}'),
+        onPressed: onPressed,
+        icon: Icon(
+          enabled ? Icons.swap_horiz : Icons.power_settings_new,
+          size: 18,
+        ),
+        label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        style: TextButton.styleFrom(
+          minimumSize: const Size(0, 32),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          visualDensity: VisualDensity.standard,
+          foregroundColor: foreground,
+          iconColor: foreground,
+          backgroundColor: foreground.withValues(alpha: enabled ? 0.12 : 0.06),
+          side: BorderSide(
+            color: foreground.withValues(alpha: enabled ? 0.5 : 0.35),
           ),
-          _toggle(context),
-        ],
-      );
-    }
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        if (!_overflows(context, constraints.maxWidth, style)) {
-          return Text(widget.text, style: style);
-        }
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              widget.text,
-              style: style,
-              maxLines: _collapsedLines,
-              overflow: TextOverflow.ellipsis,
-            ),
-            _toggle(context),
-          ],
-        );
-      },
-    );
-  }
-
-  bool _overflows(BuildContext context, double maxWidth, TextStyle? style) {
-    final painter = TextPainter(
-      text: TextSpan(text: widget.text, style: style),
-      maxLines: _collapsedLines,
-      textDirection: Directionality.of(context),
-      textScaler: MediaQuery.textScalerOf(context),
-    )..layout(maxWidth: maxWidth);
-    final overflows = painter.didExceedMaxLines;
-    painter.dispose();
-    return overflows;
-  }
-
-  Widget _toggle(BuildContext context) {
-    return TextButton.icon(
-      onPressed: () => setState(() => _expanded = !_expanded),
-      icon: Icon(_expanded ? Icons.expand_less : Icons.expand_more, size: 16),
-      label: Text(_expanded ? '收起' : '展开'),
-      style: TextButton.styleFrom(
-        minimumSize: Size.zero,
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        visualDensity: VisualDensity.compact,
-        textStyle: Theme.of(context).textTheme.bodySmall,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          textStyle: theme.textTheme.labelLarge?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
+        ),
       ),
     );
   }
@@ -1797,12 +1562,6 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
   /// 用户选择了推理强度。
   final ValueChanged<ReasoningLevel> onReasoningSelected;
 
-  /// 当前后台输出上限档位(schema v54);仅约束首试请求,重试恒放开。
-  final BackgroundOutputTier backgroundOutputTier;
-
-  /// 用户选择了输出上限档位。
-  final ValueChanged<BackgroundOutputTier> onOutputTierSelected;
-
   /// 角色卡/记忆是否进入后台上下文锚定段(后台 agent 区开关)。
   final bool characterAnchor;
   final bool memoryAnchor;
@@ -1824,8 +1583,6 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
     required this.onModelSelected,
     required this.backgroundReasoningLevel,
     required this.onReasoningSelected,
-    required this.backgroundOutputTier,
-    required this.onOutputTierSelected,
     required this.characterAnchor,
     required this.memoryAnchor,
     required this.onAnchorToggle,
@@ -1834,22 +1591,6 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
     required this.characterId,
   });
 
-  /// 展平的模型目录:每项携带所属 provider 显示名(用于下拉标签区分同名模型)。
-  List<({int id, String label})> _flatten(List<LlmProviderConfig> providers) {
-    final out = <({int id, String label})>[];
-    for (final p in providers) {
-      for (final m in p.models) {
-        out.add((
-          id: m.id,
-          label: providers.length > 1
-              ? '${m.displayName} · ${p.displayName}'
-              : m.displayName,
-        ));
-      }
-    }
-    return out;
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final providersAsync = ref.watch(llmProvidersProvider);
@@ -1857,7 +1598,7 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
       data: (p) => p,
       orElse: () => const <LlmProviderConfig>[],
     );
-    final models = _flatten(providers);
+    final models = flattenLlmModels(providers);
     // 持久化的专用模型可能已被删除(设置页删 provider/模型):此时 value 不在
     // items 里会让 DropdownButton 断言崩溃。落到"跟随主写"并显示兜底;
     // ChatController 侧同样会因 loadConfigForModel 返回 null 而回退主写模型。
@@ -1891,13 +1632,20 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
               contentPadding: EdgeInsets.zero,
               dense: true,
               secondary: const Icon(Icons.fact_check_outlined, size: 20),
-              title: Text(
-                '删除前确认',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              subtitle: Text(
-                '开启后建议先待确认;关闭后直接执行并进入回收站',
-                style: Theme.of(context).textTheme.bodySmall,
+              // 严格模式只作用于后台变量删除:标题点明对象,说明全部收进弹层,
+              // 开关行不再保留副标题。
+              title: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '变量删除前确认',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(width: 2),
+                  InfoButton(
+                    onTap: () => showDeletionConfirmHelpDialog(context),
+                  ),
+                ],
               ),
               value: deletionConfirm,
               onChanged: onDeletionConfirmChanged,
@@ -1925,25 +1673,11 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
               ),
               value: backgroundReasoningLevel,
               label: '推理强度',
-              helperText:
-                  'OpenAI 兼容端点映射 reasoning_effort,Anthropic 映射 thinking 预算;默认关闭。',
+              helperText: '仅影响后台请求,与主对话的推理等级互相独立;默认关闭。',
               items: ReasoningLevel.values,
               labelOf: (level) => level.label,
               onChanged: (level) {
                 if (level != null) onReasoningSelected(level);
-              },
-            ),
-            FormDropdownField<BackgroundOutputTier>(
-              fieldKey: ValueKey(
-                'background_output_tier_${backgroundOutputTier.name}',
-              ),
-              value: backgroundOutputTier,
-              label: '输出上限',
-              helperText: '首试请求的 max_tokens(快状态轮/记忆主动轮);失败重试恒放开,由服务商兜底。',
-              items: BackgroundOutputTier.values,
-              labelOf: _outputTierCaption,
-              onChanged: (tier) {
-                if (tier != null) onOutputTierSelected(tier);
               },
             ),
             _cardDivider(context),
@@ -1971,14 +1705,6 @@ class _BackgroundFeatureSelector extends ConsumerWidget {
       ),
     );
   }
-
-  /// 输出上限档位在 items 里显示「档位 · 快/记 数值」,用户不必去 helper 里查表。
-  String _outputTierCaption(BackgroundOutputTier tier) => switch (tier) {
-    BackgroundOutputTier.compact => '紧凑 · 1024 / 2048',
-    BackgroundOutputTier.standard => '标准 · 2048 / 4096',
-    BackgroundOutputTier.relaxed => '宽松 · 4096 / 8192',
-    BackgroundOutputTier.unlimited => '不限(服务商兜底)',
-  };
 
   Widget _feature(
     BuildContext context, {

@@ -24,7 +24,7 @@ import 'common/pick_file_bytes.dart';
 import 'common/progress_task.dart';
 import 'common/searchable_list.dart';
 import 'common/session_file_helper.dart';
-import 'common/shrink_image.dart';
+import '../data/shrink_image.dart';
 
 /// 角色的会话列表,从角色卡点击进入:点击会话进聊天页,搜索匹配标题与
 /// 最近消息。

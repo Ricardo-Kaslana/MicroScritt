@@ -1,38 +1,6 @@
-// 聊天状态与取消通道:ChatState 值对象、InterruptToken 协作式取消与流式草稿
-// Provider。本 part 不发起 I/O,状态写入一律经 ChatController;草稿独立成
-// Provider,避免流式高频刷新拖垮整页 watch。
+// 聊天状态与流式草稿 Provider。本 part 不发起 I/O,状态写入一律经
+// ChatController;草稿独立成 Provider,避免流式高频刷新拖垮整页 watch。
 part of 'chat_controller.dart';
-
-/// 协作式中断令牌:主写引擎与后台 agent 共用同一驱动取消的通道。
-/// 双通道语义 —— 轮询([cancelled],每消费一个事件/每步状态写入前检查,后台
-/// 引擎的 shouldCancel 用)+ 即时通知([whenCancelled],让"等待首个流事件"
-/// 的消费者在零事件期也能被立即唤醒)。
-///
-/// 令牌**不可复用**:没有 reset。"供下一轮使用"靠控制器每轮入口换发新实例
-/// (主写/后台双槽位,见 ChatController 字段注释)。在飞轮持有自己的实例,
-/// 其 cancelled 永真;若在实例上清标志,会把**另一条还在飞的轮**(后台维护
-/// 常与下一轮主写并发)的取消通道一并吹灭 —— 用户按了停止,后台轮却因标志
-/// 被清而继续跑完并写状态。
-class InterruptToken {
-  bool _cancelled = false;
-  Completer<void>? _completer;
-
-  /// 是否已取消;在飞轮每消费一个事件/每步状态写入前轮询。
-  bool get cancelled => _cancelled;
-
-  /// 下一次 [cancel] 发生时完成的 Future;已取消时立即完成。
-  /// 仅用于"睡眠中等待"的竞速唤醒,轮询检查仍走 [cancelled]。
-  Future<void> get whenCancelled =>
-      _cancelled ? Future.value() : (_completer ??= Completer<void>()).future;
-
-  /// 取消一次:幂等,并唤醒 [whenCancelled] 的等待者;该实例此后永久为取消态。
-  void cancel() {
-    if (_cancelled) return;
-    _cancelled = true;
-    _completer?.complete();
-    _completer = null;
-  }
-}
 
 /// 聊天页的不可变状态快照。
 ///
@@ -109,6 +77,11 @@ class ChatState {
   /// 后台 agent 最近一轮维护的一句话摘要(如"新增技能 战斗 · 变量 hp→9")。
   final String backgroundSummary;
 
+  /// 最近一次含变量改动的后台维护/重跑成功轮的计数(实际落库口径)。
+  /// 灵动岛只在当前 [backgroundSummary] 解析出变量段时读取,用于以数量替代
+  /// 具体的键值明细;状态面板仍按摘要逐键回看。
+  final BackgroundVariableStats? backgroundVariableStats;
+
   /// 最近一次组装出的上下文快照(发送时更新;load 时给出基线预览)。
   /// 供上下文面板实时展示分段组成与消息数。
   final ContextSnapshot? lastContext;
@@ -179,6 +152,7 @@ class ChatState {
     this.compactCachedInputTokens = 0,
     this.backgroundStatus = BackgroundStatus.idle,
     this.backgroundSummary = '',
+    this.backgroundVariableStats,
     this.lastContext,
     this.frozenMemory,
     this.lastSentInputTokens,
@@ -217,6 +191,7 @@ class ChatState {
     int? compactCachedInputTokens,
     BackgroundStatus? backgroundStatus,
     String? backgroundSummary,
+    Object? backgroundVariableStats = _unset,
     ContextSnapshot? lastContext,
     Object? frozenMemory = _unset,
     Object? lastSentInputTokens = _unset,
@@ -254,6 +229,9 @@ class ChatState {
         compactCachedInputTokens ?? this.compactCachedInputTokens,
     backgroundStatus: backgroundStatus ?? this.backgroundStatus,
     backgroundSummary: backgroundSummary ?? this.backgroundSummary,
+    backgroundVariableStats: identical(backgroundVariableStats, _unset)
+        ? this.backgroundVariableStats
+        : backgroundVariableStats as BackgroundVariableStats?,
     lastContext: lastContext ?? this.lastContext,
     frozenMemory: identical(frozenMemory, _unset)
         ? this.frozenMemory
@@ -274,6 +252,24 @@ class ChatState {
         ? this.busyCommand
         : busyCommand as String?,
   );
+}
+
+/// 后台一轮维护的变量改动计数(灵动岛精简摘要用)。
+///
+/// 取**实际落库结果**口径:新增 = 本轮新建的键;修改 = 既有键被改写;
+/// 删除 = 真正移入回收站的键;待确认 = 严格模式下只生成提案、尚未删除的键。
+class BackgroundVariableStats {
+  final int added;
+  final int updated;
+  final int removed;
+  final int proposed;
+
+  const BackgroundVariableStats({
+    this.added = 0,
+    this.updated = 0,
+    this.removed = 0,
+    this.proposed = 0,
+  });
 }
 
 /// 流式草稿/命令反馈文本的独立 provider(自 ChatState 拆出)。

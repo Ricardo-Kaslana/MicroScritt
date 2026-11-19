@@ -11,6 +11,7 @@ import '../models/llm_provider.dart';
 import '../models/llm_units.dart';
 import '../state/app_config_sync.dart';
 import '../state/providers.dart';
+import 'common/sheet_header.dart';
 import 'settings_screen.dart';
 import 'widgets/reasoning_slider.dart';
 
@@ -125,6 +126,8 @@ class ModelSelectorChip extends ConsumerWidget {
         await showModalBottomSheet<(LlmProviderConfig, LlmModelEntry)>(
           context: context,
           isScrollControlled: true,
+          showDragHandle: true,
+          useSafeArea: true,
           builder: (_) =>
               ModelPickerSheet(providers: providers, reasoning: reasoning),
         );
@@ -285,33 +288,14 @@ class _UsageSheet extends StatelessWidget {
     final scheme = theme.colorScheme;
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.query_stats_outlined,
-                  size: 20,
-                  color: scheme.primary,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '上下文使用情况',
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  tooltip: '关闭',
-                  icon: const Icon(Icons.close, size: 20),
-                  onPressed: () => Navigator.pop(context),
-                ),
-              ],
+            const ChatSheetHeader(
+              icon: Icons.query_stats_outlined,
+              title: '上下文使用情况',
             ),
             const SizedBox(height: 4),
             _metricRow(context, label: '上下文容量', value: _capacityText()),
@@ -450,17 +434,16 @@ class _ModelPickerSheetState extends ConsumerState<ModelPickerSheet> {
               MediaQuery.sizeOf(context).height * _kPickerMaxHeightFactor,
         ),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                '选择模型',
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
+              const ChatSheetHeader(
+                icon: Icons.smart_toy_outlined,
+                title: '选择模型',
               ),
+              const SizedBox(height: 4),
               Text(
                 '推理等级',
                 style: theme.textTheme.titleSmall?.copyWith(

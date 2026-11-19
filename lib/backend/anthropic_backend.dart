@@ -8,6 +8,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/app_settings.dart';
+import '../models/chat_message.dart';
+import '../models/llm_tool.dart';
 import '../models/token_usage.dart';
 import '../models/backend_config.dart';
 import 'llm_backend.dart';
@@ -62,11 +64,28 @@ class AnthropicBackend implements LlmBackend {
     );
     unawaited(() async {
       try {
+        // Anthropic Messages API 的 max_tokens 为必填项,不能像 OpenAI
+        // 兼容端点那样省略。请求级值(如 hook 改写)优先,否则用模型配置
+        // 的「最大输出 tokens」;两者皆空即配置不完整 —— 本地直接报错,
+        // 不发请求、不猜测兜底值。
+        final configuredMaxTokens = request.maxTokens ?? config.maxTokens;
+        if (configuredMaxTokens == null) {
+          controller.add(const ErrorEvent(
+            'Anthropic 协议要求填写模型的最大输出 tokens:请在设置 → LLM Provider 的模型编辑中补全「最大输出 tokens」',
+            kind: UpstreamErrorKind.configuration,
+          ));
+          return;
+        }
         final uri = Uri.parse('${config.baseUrl}/v1/messages');
-        final wireMessages = <Map<String, dynamic>>[
-          for (final m in request.messages)
-            {'role': m.wireRole, 'content': m.content},
-        ];
+        final hasTools = request.tools.isNotEmpty;
+        // 无工具请求维持扁平 {role, content:String} 序列化(主写路径字节不变);
+        // 工具请求改块感知(tool_use/tool_result/thinking 回放),见 _wireMessagesWithTools。
+        final wireMessages = hasTools
+            ? _wireMessagesWithTools(request)
+            : <Map<String, dynamic>>[
+                for (final m in request.messages)
+                  {'role': m.wireRole, 'content': m.content},
+              ];
         if (request.cacheContext &&
             request.cacheMessageBreakpoint &&
             wireMessages.isNotEmpty) {
@@ -77,19 +96,29 @@ class AnthropicBackend implements LlmBackend {
           // 跳过此断点。
           // 注意 cache_control 是 **content block 级**字段(message 顶层没有该字段,
           // 放在 message 对象上会被服务端静默忽略,缓存段不会建立)—— 末条消息的
-          // content 改发块数组,把断点放进 {type: text} 块内。content 支持字符串或
-          // 块数组两种形态,此项只影响末条消息的线上格式。
+          // content 改发块数组,把断点放进末块内。content 支持字符串或块数组两种
+          // 形态:字符串包成 {type: text} 块(主写路径,字节不变);已是块数组
+          // (工具路径的 tool_result user 消息)则给末块补 cache_control。
           final last = wireMessages.removeLast();
-          wireMessages.add({
-            ...last,
-            'content': [
-              {
-                'type': 'text',
-                'text': last['content'],
-                'cache_control': {'type': 'ephemeral'},
-              },
-            ],
-          });
+          final content = last['content'];
+          if (content is String) {
+            wireMessages.add({
+              ...last,
+              'content': [
+                {
+                  'type': 'text',
+                  'text': content,
+                  'cache_control': {'type': 'ephemeral'},
+                },
+              ],
+            });
+          } else if (content is List && content.isNotEmpty) {
+            final blocks = [for (final b in content) Map<String, dynamic>.from(b as Map)];
+            blocks.last['cache_control'] = {'type': 'ephemeral'};
+            wireMessages.add({...last, 'content': blocks});
+          } else {
+            wireMessages.add(last);
+          }
         }
 
         // 多断点 system 缓存:当提供了稳定/可变 system 分段时,
@@ -98,7 +127,7 @@ class AnthropicBackend implements LlmBackend {
         // 若未提供分段(hook 改写了 system prompt,分段不可靠),回退到纯字符串格式。
         final system = _buildSystem(request);
 
-        var maxTokens = request.maxTokens ?? 1024;
+        var maxTokens = configuredMaxTokens;
         final budget = _thinkingBudgets[request.reasoningLevel];
         final body = <String, dynamic>{
           'model': request.model,
@@ -106,6 +135,9 @@ class AnthropicBackend implements LlmBackend {
           'messages': wireMessages,
           'stream': true,
           'max_tokens': maxTokens,
+          // 原生工具:tools 非空才发送(普通端点不发,避免未知字段 400)。
+          // tool_choice 默认 auto,无需显式携带。
+          if (hasTools) 'tools': _toolsWire(request.tools),
         };
         if (budget == null) {
           // 推理等级 off:不发送 thinking 参数(避免非 reasoning 请求收到未知
@@ -177,6 +209,13 @@ class AnthropicBackend implements LlmBackend {
         // 最终 output —— 都是请求内累计快照;合并取最大、流结束时只发一次,上层
         // 按增量求和会把快照叠加虚高(OpenAI 兼容网关逐块附带 usage 时尤为失控)。
         TokenUsage? usageSnapshot;
+        // 工具调用按 content block index 累计(input_json_delta 拼接 arguments);
+        // thinking/redacted_thinking 块捕获后随 ToolCallsEvent.replayBlocks 带出,
+        // 供下一轮原样回放(协议要求未改且原序,否则 400)。无工具请求这些 map
+        // 恒空,主写路径行为不变。
+        final toolCalls = <int, _ToolUseAccum>{};
+        final thinkingBlocks = <int, Map<String, dynamic>>{};
+        final replayBlocks = <Map<String, dynamic>>[];
         await for (final event in parseSse(lines)) {
           late final Map<String, dynamic> json;
           try {
@@ -187,11 +226,39 @@ class AnthropicBackend implements LlmBackend {
             continue;
           }
           switch (json['type']) {
-            case 'content_block_delta':
-              final delta = json['delta'] as Map<String, dynamic>?;
-              if (delta?['type'] == 'text_delta') {
-                controller.add(TextDelta(delta!['text'] as String));
+            case 'content_block_start':
+              final index = json['index'] is int ? json['index'] as int : 0;
+              final cb = json['content_block'] as Map<String, dynamic>?;
+              switch (cb?['type']) {
+                case 'tool_use':
+                  toolCalls[index] = _ToolUseAccum(
+                    id: cb?['id'] as String? ?? '',
+                    name: cb?['name'] as String? ?? '',
+                  );
+                case 'thinking':
+                  thinkingBlocks[index] = {'type': 'thinking', 'thinking': '', 'signature': ''};
+                case 'redacted_thinking':
+                  replayBlocks.add({'type': 'redacted_thinking', 'data': cb?['data']});
               }
+            case 'content_block_delta':
+              final index = json['index'] is int ? json['index'] as int : 0;
+              final delta = json['delta'] as Map<String, dynamic>?;
+              switch (delta?['type']) {
+                case 'text_delta':
+                  controller.add(TextDelta(delta!['text'] as String));
+                case 'input_json_delta':
+                  toolCalls[index]?.args.write(delta!['partial_json'] as String? ?? '');
+                case 'thinking_delta':
+                  final b = thinkingBlocks[index];
+                  if (b != null) b['thinking'] = '${b['thinking']}${delta!['thinking'] ?? ''}';
+                case 'signature_delta':
+                  final b = thinkingBlocks[index];
+                  if (b != null) b['signature'] = '${b['signature']}${delta!['signature'] ?? ''}';
+              }
+            case 'content_block_stop':
+              final index = json['index'] is int ? json['index'] as int : 0;
+              final b = thinkingBlocks.remove(index);
+              if (b != null) replayBlocks.add(b);
             case 'message_delta':
               final usage = json['usage'];
               if (usage != null) {
@@ -206,6 +273,22 @@ class AnthropicBackend implements LlmBackend {
               }
             case 'message_stop':
               sawStop = true;
+              // 工具调用即响应:按 index 序透出 ToolCallsEvent,并携带 thinking
+              // 回放块。无工具调用(纯正文轮)不发此事件,主写路径不变。
+              if (toolCalls.isNotEmpty) {
+                final indices = toolCalls.keys.toList()..sort();
+                controller.add(ToolCallsEvent(
+                  [
+                    for (final i in indices)
+                      ToolCall(
+                        id: toolCalls[i]!.id,
+                        name: toolCalls[i]!.name,
+                        arguments: toolCalls[i]!.args.toString(),
+                      ),
+                  ],
+                  replayBlocks: replayBlocks,
+                ));
+              }
               controller.add(const DoneEvent());
             case 'error':
               // 流中途的错误事件(overloaded/rate-limit/invalid_request):显式转成
@@ -264,4 +347,72 @@ class AnthropicBackend implements LlmBackend {
     }
     return request.systemPrompt;
   }
+
+  /// 工具请求的块感知序列化:assistant 轮 = [opaque 回放块(thinking),正文文本?,
+  /// tool_use...];连续的 user/tool 消息合并为单条 user 消息 —— tool_result 块
+  /// 必须紧跟 assistant tool_use,软提醒文本块与 tool_result 共存于同一 user
+  /// 消息(角色交替约束)。无工具请求不走此路径(主写扁平序列化字节不变)。
+  static List<Map<String, dynamic>> _wireMessagesWithTools(LlmRequest request) {
+    final out = <Map<String, dynamic>>[];
+    var userBlocks = <Map<String, dynamic>>[];
+    void flushUser() {
+      if (userBlocks.isNotEmpty) {
+        out.add({'role': 'user', 'content': userBlocks});
+        userBlocks = [];
+      }
+    }
+
+    for (final m in request.messages) {
+      if (m.role == ChatRole.assistant) {
+        flushUser();
+        final blocks = <Map<String, dynamic>>[];
+        if (m.opaqueBlocks != null) blocks.addAll(m.opaqueBlocks!);
+        if (m.content.isNotEmpty) blocks.add({'type': 'text', 'text': m.content});
+        for (final c in m.toolCalls ?? const <ToolCall>[]) {
+          blocks.add({
+            'type': 'tool_use',
+            'id': c.id,
+            'name': c.name,
+            'input': _decodeArgs(c.arguments),
+          });
+        }
+        out.add({'role': 'assistant', 'content': blocks});
+      } else if (m.role == ChatRole.tool) {
+        userBlocks.add({
+          'type': 'tool_result',
+          'tool_use_id': m.toolCallId ?? '',
+          'content': m.content,
+        });
+      } else {
+        userBlocks.add({'type': 'text', 'text': m.content});
+      }
+    }
+    flushUser();
+    return out;
+  }
+
+  /// 工具定义 → Anthropic `tools` 数组(`input_schema` 形态)。
+  static List<Map<String, dynamic>> _toolsWire(List<LlmTool> tools) => [
+    for (final t in tools)
+      {'name': t.name, 'description': t.description, 'input_schema': t.parameters},
+  ];
+
+  /// `tool_use.input` 必须是对象:解码 arguments JSON,残缺/非对象回退空对象。
+  static Map<String, dynamic> _decodeArgs(String arguments) {
+    try {
+      final decoded = jsonDecode(arguments);
+      if (decoded is Map<String, dynamic>) return decoded;
+    } on FormatException {
+      // 残缺参数:回退空对象,交由协议/消费方裁决。
+    }
+    return {};
+  }
+}
+
+/// Anthropic `tool_use` 块的流内累计器:`input_json_delta` 拼接 arguments。
+class _ToolUseAccum {
+  final String id;
+  final String name;
+  final StringBuffer args = StringBuffer();
+  _ToolUseAccum({required this.id, required this.name});
 }

@@ -1,5 +1,5 @@
 // Provider 编辑页回归:modernParams 开关默认关闭并随保存持久化,
-// 以及有模型时「开始探测」入口可点。
+// 以及有模型时「开始测试」入口可点。
 //
 // 真实 DB I/O 一律包 `tester.runAsync`;页面是懒加载 ListView,
 // 开关与保存按钮先 ensureVisible 或 scrollUntilVisible 再操作。
@@ -65,24 +65,24 @@ void main() {
     await tester.pumpWidget(harness(provider()));
     await open(tester);
 
-    // 三枚开关(官方参数风格 + 工具通道回复/随机前缀);兼容选项默认全关。
+    // 一枚开关(官方参数风格),默认关闭。
     final switches = find.byType(Switch);
-    expect(switches, findsNWidgets(3));
+    expect(switches, findsNWidgets(1));
     expect(tester.widget<Switch>(switches.at(0)).value, isFalse);
-    expect(tester.widget<Switch>(switches.at(1)).value, isFalse);
-    expect(tester.widget<Switch>(switches.at(2)).value, isFalse);
 
     await tester.ensureVisible(switches.at(0));
     await tester.pump();
     await tester.tap(switches.at(0));
     await tester.pump();
 
-    // 「保存」在懒加载列表底部,先滚动到可见再点。
-    await tester.scrollUntilVisible(find.text('保存'), 300, scrollable: find.byType(Scrollable).first);
+    // 底部保存键是 FilledButton(AppBar 上另有一枚 TextButton 保存键),
+    // 按类型精确定位避免 find.text('保存') 命中两枚;先滚动到可见再点。
+    final saveButton = find.widgetWithText(FilledButton, '保存');
+    await tester.scrollUntilVisible(saveButton, 300, scrollable: find.byType(Scrollable).first);
     await tester.pump();
 
     await tester.runAsync(() async {
-      await tester.tap(find.text('保存'));
+      await tester.tap(saveButton);
       await Future<void>.delayed(const Duration(milliseconds: 200));
       await tester.pumpAndSettle();
     });
@@ -111,6 +111,29 @@ void main() {
     expect(tester.widget<Switch>(find.byType(Switch).at(0)).value, isTrue);
   });
 
+  testWidgets('base URL hint follows the selected protocol', (tester) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(harness(null));
+    await open(tester);
+
+    // 新建页默认 OpenAI 兼容:示例地址含 /v1。
+    expect(find.text('如 https://api.openai.com/v1'), findsOneWidget);
+
+    final protocolField = find.byKey(const ValueKey('field_协议'));
+    await tester.ensureVisible(protocolField);
+    await tester.pump();
+    await tester.tap(protocolField);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anthropic').last);
+    await tester.pumpAndSettle();
+
+    // Anthropic 后端自行拼 /v1/messages,示例为根地址、不得带 /v1。
+    expect(find.text('如 https://api.anthropic.com(不含 /v1)'), findsOneWidget);
+    expect(find.text('如 https://api.openai.com/v1'), findsNothing);
+  });
+
   testWidgets('probe entry is listed for a provider with models', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -118,11 +141,11 @@ void main() {
     await tester.pumpWidget(harness(provider()));
     await open(tester);
 
-    await tester.scrollUntilVisible(find.text('开始探测'), 300, scrollable: find.byType(Scrollable).first);
+    await tester.scrollUntilVisible(find.text('开始测试'), 300, scrollable: find.byType(Scrollable).first);
     await tester.pump();
     // 有模型时探测入口可点(懒加载列表滚动到位后按钮应在树中)。
     // TextButton.icon 的运行时类型是私有子类,byType 精确匹配会漏,用谓词。
-    final probeButton = find.ancestor(of: find.text('开始探测'), matching: find.byWidgetPredicate((w) => w is TextButton));
+    final probeButton = find.ancestor(of: find.text('开始测试'), matching: find.byWidgetPredicate((w) => w is TextButton));
     expect(probeButton, findsOneWidget);
     expect(tester.widget<TextButton>(probeButton).onPressed, isNotNull);
   });

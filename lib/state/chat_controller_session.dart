@@ -89,7 +89,7 @@ abstract class ChatControllerSession extends ChatControllerContext {
         : await ref.read(worldbookRepositoryProvider).byCharacter(characterId);
     if (!ref.mounted || _backgroundEpoch != epoch) return;
     // 会话级控制器状态复位:记忆冻结副本取库中当前值(会话起点),压缩通知/
-    // diff 记账/后台游标与轮次计数全部归零 —— 上一个会话的挂起通知绝不泄漏到
+    // diff 记账/后台游标全部归零 —— 上一个会话的挂起通知绝不泄漏到
     // 新会话的第一次请求里。
     final memories = await ref
         .read(memoryRepositoryProvider)
@@ -99,7 +99,7 @@ abstract class ChatControllerSession extends ChatControllerContext {
     _compactNoticePending = false;
     _memoryDiffNotifiedHash = null;
     _backgroundCursorSeq = null;
-    _maintenanceRunCount = 0;
+    _auditCounter = 0;
     // 基线上下文预览:打开会话即能看到"当前上下文里有什么",不必先发一条消息。
     // 变量不参与主写组装(只进后台 agent 上下文),故此处不读 variables;
     // 技能同理不进组装(只有 @ 触发附件,随消息历史进数组)。

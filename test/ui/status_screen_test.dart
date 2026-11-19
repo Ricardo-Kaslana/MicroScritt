@@ -2,6 +2,7 @@
 // 记忆与生图指导的人工维护,以及后台摘要的展示形态。
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/data/message_repository.dart';
@@ -588,7 +589,7 @@ void main() {
     },
   );
 
-  testWidgets('shows the background-agent card and its switch state', (
+  testWidgets('shows the background-agent card and its merged engine button', (
     tester,
   ) async {
     await tester.runAsync(() async {
@@ -604,10 +605,19 @@ void main() {
     );
     await tester.pump();
 
-    // 状态卡标题与默认启用的开关(后台卡的第一个 Switch)。
+    // 状态卡标题与默认启用的合并按钮;独立启停开关已并入胶囊。
     expect(find.text('后台引擎'), findsOneWidget);
-    final switchWidget = tester.widget<Switch>(find.byType(Switch).first);
-    expect(switchWidget.value, isTrue);
+    expect(
+      find.byKey(const ValueKey('background_engine_legacy')),
+      findsOneWidget,
+    );
+    final statusCard = find
+        .ancestor(of: find.text('后台引擎'), matching: find.byType(Card))
+        .first;
+    expect(
+      find.descendant(of: statusCard, matching: find.byType(Switch)),
+      findsNothing,
+    );
 
     await tester.runAsync(() => db.db.close());
   });
@@ -639,16 +649,20 @@ void main() {
     expect(find.widgetWithText(SwitchListTile, '变量'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '生图'), findsOneWidget);
 
-    // 2 项维护功能 + 1 项删除前确认 + 2 项上下文锚定:除删除前确认外默认全开
-    // (删除前确认默认关,删除直接执行并进回收站,可恢复)。
+    // 2 项维护功能 + 1 项变量删除前确认 + 2 项上下文锚定:除变量删除前确认外
+    // 默认全开(变量删除前确认默认关,删除直接执行并进回收站,可恢复)。
     final switches = tester.widgetList<SwitchListTile>(
       find.byType(SwitchListTile),
     );
     expect(switches.length, 5);
-    expect(find.widgetWithText(SwitchListTile, '删除前确认'), findsOneWidget);
+    // 严格模式只作用于变量删除:标题点明对象,细节收进「查看说明」弹层。
+    expect(find.widgetWithText(SwitchListTile, '变量删除前确认'), findsOneWidget);
+    expect(find.byTooltip('查看说明'), findsOneWidget);
     expect(
       tester
-          .widget<SwitchListTile>(find.widgetWithText(SwitchListTile, '删除前确认'))
+          .widget<SwitchListTile>(
+            find.widgetWithText(SwitchListTile, '变量删除前确认'),
+          )
           .value,
       isFalse,
     );
@@ -663,9 +677,11 @@ void main() {
     expect(find.text('专用模型'), findsOneWidget);
     expect(find.text('跟随主写引擎'), findsOneWidget);
 
-    // v48:推理强度下拉默认"关闭"(独立于主对话的推理等级设置)。
+    // v48:推理强度下拉默认"关闭"(独立于主对话的推理等级设置);
+    // 说明用一句白话点明作用范围与独立性。
     expect(find.text('推理强度'), findsOneWidget);
     expect(find.text('关闭'), findsOneWidget);
+    expect(find.textContaining('与主对话的推理等级互相独立'), findsOneWidget);
 
     await tester.runAsync(() => db.db.close());
   });
@@ -706,6 +722,123 @@ void main() {
       expect(saved.backgroundCharacterAnchor, isTrue);
       await db.db.close();
     });
+  });
+
+  testWidgets('后台引擎按钮:关闭 → Legacy → Agentic → Hybrid 四态循环并落库', (tester) async {
+    useTallSurface(tester);
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's');
+    });
+    await tester.pumpWidget(harness());
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 150)),
+    );
+    await tester.pump();
+
+    // 入口在「后台引擎」标题行:默认启用 + legacy,胶囊带切换图标;正文用
+    // 官方模式名,白话说明在悬停提示里。
+    expect(find.text('后台引擎'), findsOneWidget);
+    expect(find.text('Legacy'), findsOneWidget);
+    expect(find.byIcon(Icons.swap_horiz), findsOneWidget);
+    expect(
+      find.byTooltip('运行模式:Legacy,每轮一次生成,兼容性最好;点击切换到 Agentic'),
+      findsOneWidget,
+    );
+    // 旧的「模型与参数」运行模式下拉、能力提示文本与独立启停开关已移除。
+    expect(find.text('运行模式'), findsNothing);
+    expect(find.textContaining('需端点与模型支持工具调用'), findsNothing);
+    final statusCard = find
+        .ancestor(of: find.text('后台引擎'), matching: find.byType(Card))
+        .first;
+    expect(
+      find.descendant(of: statusCard, matching: find.byType(Switch)),
+      findsNothing,
+    );
+
+    // 胶囊高度 32,平台默认密度(桌面 compact / 移动端 standard)下保持一致。
+    final engineButton = find.byKey(const ValueKey('background_engine_legacy'));
+    expect(tester.getSize(engineButton).height, 32);
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    await tester.pump();
+    expect(tester.getSize(engineButton).height, 32);
+    debugDefaultTargetPlatformOverride = null;
+    await tester.pump();
+
+    // 不做响应式换行:手机竖屏宽度下按钮仍留在标题行(垂直居中),
+    // 与图标、标题/状态共处一行。
+    tester.view.physicalSize = const Size(360, 2000);
+    await tester.pump();
+    final title = find.text('后台引擎');
+    expect(
+      tester.getCenter(engineButton).dy,
+      closeTo(tester.getCenter(title).dy, 1),
+    );
+    expect(tester.getSize(engineButton).height, 32);
+
+    Future<void> tapAndWait(String key) async {
+      await tester.tap(find.byKey(ValueKey(key)));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 150)),
+      );
+      await tester.pump();
+    }
+
+    // 第一下:legacy → agentic(保持启用)。
+    await tapAndWait('background_engine_legacy');
+    await tester.runAsync(() async {
+      final saved = await AppSettingsRepository(db).load();
+      expect(saved.backgroundEnabled, isTrue);
+      expect(saved.backgroundMode, BackgroundMode.agentic);
+    });
+    expect(find.text('Agentic'), findsOneWidget);
+    expect(
+      find.byTooltip('运行模式:Agentic,多步工具调用,可回查历史;点击切换到 Hybrid'),
+      findsOneWidget,
+    );
+
+    // 第二下:agentic → hybrid。
+    await tapAndWait('background_engine_agentic');
+    await tester.runAsync(() async {
+      final saved = await AppSettingsRepository(db).load();
+      expect(saved.backgroundEnabled, isTrue);
+      expect(saved.backgroundMode, BackgroundMode.hybrid);
+    });
+    expect(find.text('Hybrid'), findsOneWidget);
+    expect(
+      find.byTooltip('运行模式:Hybrid,常规维护 + 定期审计变量板;点击关闭后台引擎'),
+      findsOneWidget,
+    );
+
+    // 第三下:hybrid → 关闭;启停与模式一次落库,模式保留 hybrid。
+    await tapAndWait('background_engine_hybrid');
+    await tester.runAsync(() async {
+      final saved = await AppSettingsRepository(db).load();
+      expect(saved.backgroundEnabled, isFalse);
+      expect(saved.backgroundMode, BackgroundMode.hybrid);
+    });
+    expect(find.byKey(const ValueKey('background_engine_off')), findsOneWidget);
+    expect(find.text('已关闭'), findsOneWidget);
+    expect(
+      find.descendant(of: statusCard, matching: find.text('已禁用')),
+      findsOneWidget,
+    );
+    expect(find.byIcon(Icons.power_settings_new), findsOneWidget);
+    expect(find.byTooltip('后台引擎已关闭;点击启用 Legacy 模式'), findsOneWidget);
+
+    // 第四下:关闭 → 重新启用 legacy(四态循环回到起点)。
+    await tapAndWait('background_engine_off');
+    await tester.runAsync(() async {
+      final saved = await AppSettingsRepository(db).load();
+      expect(saved.backgroundEnabled, isTrue);
+      expect(saved.backgroundMode, BackgroundMode.legacy);
+      await db.db.close();
+    });
+    expect(find.text('Legacy'), findsOneWidget);
   });
 
   testWidgets('a stale background model id falls back without crashing', (
@@ -988,7 +1121,7 @@ void main() {
     );
     await tester.pump();
 
-    // 即使摘要很长,状态卡顶部的图标、标题、开关仍保持同一行(垂直居中)。
+    // 即使摘要很长,状态卡顶部的图标、标题、合并按钮仍保持同一行(垂直居中)。
     final statusCard = find
         .ancestor(of: find.text('后台引擎'), matching: find.byType(Card))
         .first;
@@ -1001,13 +1134,16 @@ void main() {
           ),
         )
         .dy;
-    final switchY = tester
+    final engineButtonY = tester
         .getCenter(
-          find.descendant(of: statusCard, matching: find.byType(Switch)),
+          find.descendant(
+            of: statusCard,
+            matching: find.byKey(const ValueKey('background_engine_legacy')),
+          ),
         )
         .dy;
     expect(iconY, closeTo(titleY, 1));
-    expect(switchY, closeTo(titleY, 1));
+    expect(engineButtonY, closeTo(titleY, 1));
 
     // 灰块左右边缘与「专用模型」下拉框对齐(两张卡的内边距不同,
     // 这里把两组内缩都算进去后比较实际渲染矩形)。
@@ -1339,7 +1475,7 @@ void main() {
     });
   });
 
-  testWidgets('删除前确认开关落库', (tester) async {
+  testWidgets('变量删除前确认开关落库,详细规则收在查看说明弹层', (tester) async {
     useTallSurface(tester);
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -1354,7 +1490,17 @@ void main() {
       () => find.textContaining('尚未写入变量').evaluate().isNotEmpty,
     );
 
-    await tester.tap(find.widgetWithText(SwitchListTile, '删除前确认'));
+    // 开关行只保留点明对象的标题与说明入口,副标题与细节全部收进弹层。
+    final confirmTile = find.widgetWithText(SwitchListTile, '变量删除前确认');
+    expect(tester.widget<SwitchListTile>(confirmTile).subtitle, isNull);
+    await tester.tap(find.byTooltip('查看说明'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('单轮至多 5 个'), findsOneWidget);
+    expect(find.textContaining('可在回收站逐条恢复'), findsOneWidget);
+    await tester.tap(find.text('知道了'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(SwitchListTile, '变量删除前确认'));
     // 开关回调里有真实 DB 写入:留在 runAsync 里让它完成,别用 pumpAndSettle
     // 在假时钟上空转(变量区若仍在 loading,pumpAndSettle 会被 spinner 拖住)。
     await tester.runAsync(
@@ -1363,7 +1509,9 @@ void main() {
     await tester.pump();
     expect(
       tester
-          .widget<SwitchListTile>(find.widgetWithText(SwitchListTile, '删除前确认'))
+          .widget<SwitchListTile>(
+            find.widgetWithText(SwitchListTile, '变量删除前确认'),
+          )
           .value,
       isTrue,
     );
@@ -1657,6 +1805,7 @@ void main() {
 
     await tester.runAsync(() => db.db.close());
   });
+
 }
 
 /// 固定后台失败状态的 ChatController 替身:只供状态面板读取 backgroundStatus

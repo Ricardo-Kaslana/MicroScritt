@@ -17,7 +17,7 @@ import '../state/providers.dart';
 import 'common/form_field.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/section_header.dart';
-import 'common/shrink_image.dart';
+import '../data/shrink_image.dart';
 import 'common/unsaved_changes_guard.dart';
 import 'widgets/message_bubble.dart';
 import 'widgets/rich_message_text.dart';

@@ -353,6 +353,7 @@ void main() {
     expect(backend.requests.last.systemPrompt, isNot(contains('<variables>')));
     expect(backend.requests.last.systemPrompt, contains('# image'));
     expect(turn.result!.variableUpdates, {'hp': '8'});
+    expect(turn.result!.addedVariables, 1);
     expect(turn.imageHandled, isTrue);
     expect(images.prompts, ['retried scene']);
     await turn.imageTask;
@@ -1184,6 +1185,7 @@ void main() {
         jsonEncode({'deletable': ['a'], 'readonly': ['constant']}),
       );
       expect(turn.result!.variableUpdates, {'keep': '3'});
+      expect(turn.result!.addedVariables, 0); // 既有键改写不算新增
       expect(turn.result!.variableRemovals, ['a']);
       expect(await variables.bySession(sessionId), {'keep': '3', 'constant': 'gold'});
       expect((await variables.trash(sessionId)).single.key, 'a');

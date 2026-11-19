@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 
 import '../../engine/background_status.dart';
 import '../../state/chat_controller.dart';
+import '../common/background_summary.dart';
 import '../common/motion.dart';
 import '../theme/brand.dart';
 
@@ -107,7 +108,8 @@ enum _IslandMode {
 }
 
 /// 聊天页灵动岛:必须作为 [Stack] 的直接后代使用(内部返回 [Positioned]),
-/// 悬浮在消息列表顶部,不参与外层 Column 的布局排布。
+/// 悬浮在消息列表顶部(桌面端由宿主升到 AppBar 带内),不参与外层 Column
+/// 的布局排布。
 ///
 /// 优先级(同一时刻只显示一条):命令反馈闪示 > 错误警报 > 压缩/流式/后台
 /// 维护(三者现实互斥) > 后台结果闪示 > 记忆初始化行动项 > 用量粒 > 隐藏。
@@ -129,6 +131,10 @@ class ChatIsland extends StatefulWidget {
 
   /// 整体隐藏(会话入场收敛期):灵岛退场,内部定时器照常清理。
   final bool hidden;
+
+  /// 悬浮位置距所在 [Stack] 顶边的距离。移动端贴着消息区顶边;桌面端宿主
+  /// 把灵岛放进覆盖 AppBar 的外层 Stack,并把它调到工具栏垂直居中的高度。
+  final double topInset;
 
   /// 贴顶翻历史时收起用量粒(常驻态让位给阅读);活动态不受影响。
   final bool idleHushed;
@@ -162,6 +168,7 @@ class ChatIsland extends StatefulWidget {
     required this.compacting,
     required this.hidden,
     required this.idleHushed,
+    this.topInset = 6,
     required this.onOpenStatus,
     required this.onInterrupt,
     required this.onInitMemory,
@@ -334,7 +341,7 @@ class _ChatIslandState extends State<ChatIsland> {
     }
 
     return Positioned(
-      top: 6,
+      top: widget.topInset,
       left: 20,
       right: 20,
       // Align 一层不可省:Positioned(left+right) 传给 AnimatedSize 的是紧宽度
@@ -531,20 +538,51 @@ class _ChatIslandState extends State<ChatIsland> {
         );
       case _IslandMode.flashBg:
         final status = widget.chat.backgroundStatus;
+        final summary = widget.chat.backgroundSummary;
         return Row(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(_statusIcon(status), size: 16, color: _statusColor(status)),
-            const SizedBox(width: 8),
-            Flexible(
-              child: _RichLabel(
-                '后台引擎 · ${backgroundStatusLabel(status)}',
-                append: widget.chat.backgroundSummary.isEmpty ? null : ' · ${widget.chat.backgroundSummary}',
-                maxLines: 2,
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Icon(
+                _statusIcon(status),
+                size: 16,
+                color: _statusColor(status),
               ),
             ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: summary.isEmpty
+                  ? _RichLabel(
+                      '后台引擎 · ${backgroundStatusLabel(status)}',
+                      maxLines: 2,
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _RichLabel(
+                          '后台引擎 · ${backgroundStatusLabel(status)}',
+                        ),
+                        const SizedBox(height: 5),
+                        _FlashSummary(
+                          text: summary,
+                          status: status,
+                          stats: widget.chat.backgroundVariableStats,
+                        ),
+                      ],
+                    ),
+            ),
             const SizedBox(width: 6),
-            Icon(Icons.chevron_right_rounded, size: 16, color: Colors.white.withValues(alpha: 0.35)),
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Icon(
+                Icons.chevron_right_rounded,
+                size: 16,
+                color: Colors.white.withValues(alpha: 0.35),
+              ),
+            ),
           ],
         );
       case _IslandMode.flashNotice:
@@ -785,6 +823,217 @@ class _RichLabel extends StatelessWidget {
       maxLines: maxLines,
       overflow: TextOverflow.ellipsis,
     );
+  }
+}
+
+/// 运行后闪示摘要:成功摘要按「变量 / 移除 / 待确认 / 生图 / 审计」分组,
+/// 组内变量改动只报数量(新增/修改/删除/待确认),具体键值明细留在状态面板
+/// 回看;生图状态与审计统计保持迷你胶囊。认不出的文案保持两行淡文本。
+class _FlashSummary extends StatelessWidget {
+  final String text;
+  final BackgroundStatus status;
+
+  /// 与摘要配套的变量改动计数;null 时变量段回退为「更新 N」。
+  final BackgroundVariableStats? stats;
+
+  const _FlashSummary({required this.text, required this.status, this.stats});
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = status == BackgroundStatus.succeeded
+        ? BackgroundSummaryParts.parse(text)
+        : null;
+    if (parts == null) {
+      return Text(
+        text,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11.5,
+          height: 1.3,
+          color: Colors.white.withValues(alpha: 0.62),
+        ),
+      );
+    }
+    final blocks = <Widget>[];
+    if (parts.headline != null) {
+      blocks.add(
+        _chip(
+          Text(
+            parts.headline!,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 11,
+              height: 1.2,
+              fontWeight: FontWeight.w600,
+              color: _toneGreen,
+            ),
+          ),
+          background: _toneGreen.withValues(alpha: 0.16),
+          maxWidth: 170,
+        ),
+      );
+    }
+    if (parts.updates.isNotEmpty) {
+      blocks.add(_label('变量'));
+      final stats = this.stats;
+      if (stats == null) {
+        blocks.add(_countChip('更新 ${parts.updates.length}'));
+      } else {
+        if (stats.added > 0) {
+          blocks.add(_countChip('新增 ${stats.added}', color: _toneGreen));
+        }
+        if (stats.updated > 0) {
+          blocks.add(_countChip('修改 ${stats.updated}'));
+        }
+      }
+    }
+    if (parts.removed.isNotEmpty) {
+      blocks.add(_label('移除'));
+      blocks.add(_countChip('${parts.removed.length}', dim: true));
+    }
+    if (parts.proposed.isNotEmpty) {
+      blocks.add(_label('待确认', color: _toneOrange));
+      blocks.add(_countChip('${parts.proposed.length}', color: _toneOrange));
+    }
+    for (final stat in parts.auditStats) {
+      blocks.add(
+        _chip(
+          Text(
+            stat,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11,
+              height: 1.2,
+              color: Colors.white.withValues(
+                alpha: stat.contains('待确认') ? 0.72 : 0.62,
+              ),
+            ),
+          ),
+          background: stat.contains('待确认')
+              ? _toneOrange.withValues(alpha: 0.16)
+              : null,
+        ),
+      );
+    }
+    if (parts.imageState != null) {
+      blocks.add(_label('生图', color: _toneGreen));
+      blocks.add(
+        _chip(
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.image_outlined, size: 11, color: _toneGreen),
+              const SizedBox(width: 3),
+              Flexible(
+                child: Text(
+                  parts.imageState!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    height: 1.2,
+                    fontWeight: FontWeight.w600,
+                    color: _toneGreen,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          background: _toneGreen.withValues(alpha: 0.16),
+          maxWidth: 150,
+        ),
+      );
+    }
+    if (parts.noChange != null) {
+      blocks.add(_dimChip(parts.noChange!));
+    }
+    if (parts.note != null) {
+      blocks.add(_dimChip(parts.note!));
+    }
+    if (blocks.isEmpty) {
+      return Text(
+        text,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11.5,
+          height: 1.3,
+          color: Colors.white.withValues(alpha: 0.62),
+        ),
+      );
+    }
+    return Wrap(
+      spacing: 4,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: blocks,
+    );
+  }
+
+  Widget _label(String text, {Color? color}) => Text(
+    text,
+    style: TextStyle(
+      fontSize: 10,
+      height: 1.2,
+      fontWeight: FontWeight.w600,
+      color: color ?? Colors.white.withValues(alpha: 0.42),
+    ),
+  );
+
+  Widget _dimChip(String text) => _chip(
+    Text(
+      text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: 11,
+        height: 1.2,
+        color: Colors.white.withValues(alpha: 0.48),
+      ),
+    ),
+    background: Colors.white.withValues(alpha: 0.06),
+    maxWidth: 210,
+  );
+
+  /// 变量改动的数量胶囊:[color] 非空时用同色底(新增绿 / 待确认橙),
+  /// [dim] 用于已删除的退阶样式,其余保持默认白胶囊。
+  Widget _countChip(String text, {Color? color, bool dim = false}) => _chip(
+    Text(
+      text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: 11,
+        height: 1.2,
+        fontWeight: FontWeight.w600,
+        color: dim
+            ? Colors.white.withValues(alpha: 0.48)
+            : (color ?? Colors.white.withValues(alpha: 0.82)),
+      ),
+    ),
+    background: dim
+        ? Colors.white.withValues(alpha: 0.06)
+        : (color?.withValues(alpha: 0.16)),
+  );
+
+  Widget _chip(Widget child, {Color? background, double? maxWidth}) {
+    final box = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: background ?? Colors.white.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: child,
+    );
+    return maxWidth == null
+        ? box
+        : ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxWidth),
+            child: box,
+          );
   }
 }
 

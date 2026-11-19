@@ -1,6 +1,7 @@
 /// 通用底部文本编辑区:拖拽把手 + 多行编辑 + 字数统计 + 保存。
 ///
-/// 空文本(仅空白)不保存,直接按取消关闭,避免把已有内容清空。
+/// 默认空文本(仅空白)不保存,直接按取消关闭,避免把已有内容清空;
+/// [allowEmpty] 为 true 时允许显式清空(如清空某个角色卡字段)。
 library;
 
 import 'package:flutter/material.dart';
@@ -12,7 +13,7 @@ import 'unsaved_changes_guard.dart';
 /// 通用底部文本编辑区:弹出后返回用户保存的新文本,取消返回 null。
 ///
 /// 随软键盘整体抬升(按 `viewInsets` 垫高),编辑区高度充裕(长文内部滚动),
-/// 空文本(仅空白)不可保存。消息编辑与后台记忆编辑共用此底单。
+/// 空文本(仅空白)默认不可保存。消息编辑与后台记忆编辑共用此底单。
 Future<String?> showTextEditSheet(
   BuildContext context, {
   required String title,
@@ -23,6 +24,10 @@ Future<String?> showTextEditSheet(
   double maxEditorHeight = 420,
   // 保存键文案:消息/记忆编辑用默认「保存」,重写要求等场景可换成动作名。
   String submitLabel = '保存',
+  // 标题下的补充说明:用于交代保存后的副作用(如制卡指令撤回重跑)。
+  String? description,
+  // 允许保存空白文本:显式清空字段(删掉不需要的内容)时传 true。
+  bool allowEmpty = false,
 }) {
   return showModalBottomSheet<String>(
     context: context,
@@ -35,6 +40,8 @@ Future<String?> showTextEditSheet(
       editorHeightFactor: editorHeightFactor,
       maxEditorHeight: maxEditorHeight,
       submitLabel: submitLabel,
+      description: description,
+      allowEmpty: allowEmpty,
     ),
   );
 }
@@ -46,6 +53,8 @@ class _TextEditSheet extends StatefulWidget {
   final double editorHeightFactor;
   final double maxEditorHeight;
   final String submitLabel;
+  final String? description;
+  final bool allowEmpty;
   const _TextEditSheet({
     required this.title,
     required this.initialText,
@@ -53,6 +62,8 @@ class _TextEditSheet extends StatefulWidget {
     required this.editorHeightFactor,
     required this.maxEditorHeight,
     required this.submitLabel,
+    this.description,
+    required this.allowEmpty,
   });
 
   @override
@@ -84,8 +95,8 @@ class _TextEditSheetState extends State<_TextEditSheet> {
   void _onChanged(String v) => setState(() => _text = v);
 
   void _submit() {
-    // 空文本(仅空白)不保存:保存键已置灰,这里只做最终防线。
-    if (_text.trim().isEmpty) return;
+    // 默认空文本(仅空白)不保存:保存键已置灰,这里只做最终防线。
+    if (!widget.allowEmpty && _text.trim().isEmpty) return;
     Navigator.pop(context, _text);
   }
 
@@ -144,6 +155,16 @@ class _TextEditSheetState extends State<_TextEditSheet> {
                       actions: [CopyTextButton(controller: _controller)],
                       closeLabel: '取消',
                     ),
+                    if (widget.description != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        widget.description!,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     // 编辑主体:多行输入,长文内部滚动。空间充裕时占满期望高度
                     // (editorHeight),可用高度不足(小窗/键盘弹起)时收缩让位,
@@ -196,7 +217,10 @@ class _TextEditSheetState extends State<_TextEditSheet> {
                         ),
                         const Expanded(child: SizedBox.shrink()),
                         FilledButton.icon(
-                          onPressed: _text.trim().isEmpty ? null : _submit,
+                          onPressed: !widget.allowEmpty &&
+                                  _text.trim().isEmpty
+                              ? null
+                              : _submit,
                           icon: const Icon(Icons.check, size: 18),
                           label: Text(widget.submitLabel),
                         ),

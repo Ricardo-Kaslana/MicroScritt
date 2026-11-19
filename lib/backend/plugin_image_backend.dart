@@ -42,7 +42,7 @@ class _ResponseTooLarge implements Exception {
 
 /// 生图 JS 插件宿主:用同步 `step(ctx)` 状态机 + Dart 受限 HTTP/sleep 执行,
 /// 统一承载 generate / test / listModels 三种操作。内置协议(对话式网关、
-/// Nai2API)亦以仓库自带插件走这条路径。
+/// Nai2API、NovelAI 官方 API)亦以仓库自带插件走这条路径。
 class PluginImageBackend implements ImageBackend {
   /// 单次操作允许的状态机步数上限。存在的意义是拦住不消耗时间的 JS 死循环
   /// (每步都要一次 JS 求值);带节奏的轮询不在此列 —— 内置 Nai2API 插件按

@@ -1,8 +1,8 @@
-/// 仓库自带的两个生图协议插件种子。
+/// 仓库自带的三个生图协议插件种子。
 ///
-/// 2.3 起取代旧的 Dart 协议实现:内置的对话式网关与 Nai2API 均以 JSON 插件
-/// 形式幂等种入 `image_plugins`。JS 为本项目原创、仓库受控、非用户可编辑;
-/// 不含任何第三方端点或密钥,服务地址由用户在设置页填写。
+/// 2.3 起取代旧的 Dart 协议实现:对话式网关、Nai2API 与 NovelAI 官方 API
+/// 均以 JSON 插件形式幂等种入 `image_plugins`。JS 为本项目原创、仓库受控、
+/// 用户不可编辑;不含任何第三方端点或密钥,服务地址由用户在设置页填写。
 ///
 /// 契约:同步 `step(ctx)` 按 `ctx.operation`(generate/test/listModels)与
 /// `ctx.phase`(start/http/sleep)返回 http/sleep/done/error 动作;网络传输失败
@@ -186,7 +186,186 @@ function step(ctx){
   return pollSoon(ctx,st,job.status==='queued'?1000:500);}
 ''';
 
-/// 全新建库时幂等种入的两条内置插件(均默认启用)。
+/// NovelAI 官方生图 API(非代理)。请求走 `ai/generate-image`,凭据是账号
+/// 设置里创建的 Persistent API Token(`pst-...`),只对 `image.novelai.net` 有效。
+///
+/// 该端点默认回 ZIP(内含 image_0.png);QuickJS 沙箱里没有解压库,而按其
+/// 官方 OpenAPI,请求带 `Accept: application/json` 时同一端点直接返回
+/// `{"images":[{"image":"<base64>"}]}` —— 插件走这条路,避免在 JS 里实现
+/// DEFLATE 解压(zip 条目正是 deflate)。
+const String _novelAiCode = r'''
+function trimText(s){return String(s==null?'':s).trim();}
+// 服务端错误体是 {statusCode,message};兼容 {error:{message}} 与裸正文。
+// 先把令牌从正文里抹掉再截断:坏代理可能把请求头原样回显,拼进横幅等于
+// 把凭据显示出来(与 Nai2API 插件同一红线)。
+function detailOf(r,ctx){var t=typeof r.text==='string'?r.text:'';var detail='';
+  try{var o=JSON.parse(t);var e=o&&o.error;
+    var m=o&&(o.message||(e&&(typeof e==='string'?e:e.message)));
+    if(typeof m==='string')detail=m;}catch(e){}
+  if(!detail&&t)detail=t;
+  // 先在 2KB 内脱敏再做 300 字截断:坏代理回整页 HTML 时不至于在沙箱里
+  // 再复制一份大字符串,令牌(约 50 字)也远小于这个窗口。
+  if(detail.length>2000)detail=detail.slice(0,2000);
+  var key=(ctx.settings||{}).apiKey;
+  if(key)detail=String(detail).split(key).join('***');
+  return detail.length>300?detail.slice(0,300):detail;}
+// 对话式网关时代的配置把采样器拼在模型名后(模型:采样器);官方 API 的
+// model 只认纯模型名,原样下发会 400。
+function modelName(ctx){var m=trimText((ctx.settings||{}).model);
+  var colon=m.indexOf(':');if(colon>0)m=m.slice(0,colon);
+  return m||'nai-diffusion-4-5-full';}
+function isV5(m){return m.indexOf('nai-diffusion-5')===0;}
+function isV4Plus(m){return m.indexOf('nai-diffusion-4')===0||isV5(m);}
+// 标准尺寸只有三档;未配置时按竖图(官方推荐 832x1216)。
+var SIZES={'竖图':[832,1216],'横图':[1216,832],'方图':[1024,1024]};
+function dimensions(size){var d=SIZES[size]||SIZES['竖图'];return [d[0],d[1]];}
+// 官方 API 没有独立画师串字段:按 NovelAI 习惯并入正面提示词。
+function buildPrompt(ctx){var p=trimText(ctx.prompt);var a=trimText((ctx.params||{}).artist);
+  return a?(p?p+', '+a:a):p;}
+// 不传 seed 或传 -1 在某些客户端/网关会被当成非法值;显式给随机正整数。
+function randomSeed(){return Math.floor(Math.random()*2147483647);}
+function generateRequest(ctx,st){
+  var s=ctx.settings||{};var p=ctx.params||{};
+  var m=modelName(ctx);var d=dimensions(p.size);var prompt=buildPrompt(ctx);
+  var negative=ctx.negativePrompt||'';
+  var params={
+    params_version:isV5(m)?4:3,
+    width:d[0],height:d[1],
+    scale:p.scale==null?5:p.scale,
+    sampler:trimText(p.sampler)||'k_euler_ancestral',
+    steps:p.steps==null?28:p.steps,
+    seed:st.seed,
+    n_samples:1,
+    ucPreset:0,
+    qualityToggle:true,
+    sm:false,sm_dyn:false,
+    dynamic_thresholding:false,
+    controlnet_strength:1,
+    legacy:false,
+    add_original_image:true,
+    uncond_scale:1,
+    cfg_rescale:p.cfg==null?0:p.cfg,
+    noise_schedule:trimText(p.noiseSchedule)||'karras',
+    legacy_v3_extend:false,
+    negative_prompt:negative,
+    deliberate_euler_ancestral_bug:false,
+    prefer_brownian:true,
+    image_format:'png'
+  };
+  if(isV4Plus(m)){
+    // V4 起提示词必须再给一份结构化副本(V5 沿用 v4_* 字段名);use_order 让
+    // 单角色描述按顺序读,legacy_uc 关闭旧版负面词编码。
+    var caption={base_caption:prompt,char_captions:[]};
+    params.v4_prompt={caption:caption,use_coords:false,use_order:true};
+    params.v4_negative_prompt={caption:{base_caption:negative,char_captions:[]},legacy_uc:false};
+    if(isV5(m)){params.prompt=prompt;params.extra_noise_seed=st.seed;}
+  }
+  // 每次请求只画一张:n_samples 固定 1,多张由上层逐描述调用(与其它插件一致)。
+  return {method:'POST',url:apiUrl(ctx,'/ai/generate-image'),
+    headers:{Authorization:'Bearer '+(s.apiKey||''),Accept:'application/json'},
+    json:{input:prompt,model:m,action:'generate',parameters:params},
+    timeoutMs:300000};
+}
+// 用配置地址的 origin 拼官方固定路径:用户把文档里的 `.../ai` 直接粘进
+// base URL 时,相对路径会拼成 /ai/ai/...;origin 拼法对根地址与 /ai 都成立。
+function apiUrl(ctx,path){
+  var b=trimText((ctx.settings||{}).baseUrl);
+  var m=/^(https?:\/\/[^\/]+)/i.exec(b);
+  return (m?m[1]:b.replace(/\/+$/,''))+path;}
+
+// 官方持久令牌只对 image.novelai.net 有效;填 api 域名会被 400 拒掉,提前给
+// 可操作的提示,别让用户对着一个状态码猜。
+function wrongImageHost(ctx){
+  var b=String((ctx.settings||{}).baseUrl||'').toLowerCase();
+  return /^https?:\/\/api\.novelai\.net([\/:]|$)/.test(b);}
+function hostGuard(ctx){
+  return wrongImageHost(ctx)?{action:'error',message:'服务地址请填 https://image.novelai.net(官方生图与订阅接口只在 image 域名提供)'}:null;}
+function firstBase64(body){
+  var list=body&&(Array.isArray(body)?body:body.images);
+  if(!Array.isArray(list))return null;
+  for(var i=0;i<list.length;i++){var item=list[i];
+    var b=typeof item==='string'?item:(item&&item.image);
+    if(typeof b!=='string')continue;
+    b=b.trim();
+    // 兼容代理把裸 base64 包成 data URL;宿主只接受裸 base64。
+    if(b.indexOf('data:')===0){var comma=b.indexOf(',');if(comma>0)b=b.slice(comma+1);}
+    if(b)return b;}
+  return null;}
+function finishGenerate(ctx,st){
+  var r=ctx.response||{};
+  if(r.error){
+    // 非流式请求在出图前不会有任何字节,超时后任务可能已受理;而且超时通常
+    // 已耗尽总预算,重提只会立刻再超时 —— 直接报错,绝不重复计费。
+    if(r.error==='timeout')
+      return {action:'error',message:'NovelAI 生图请求超时(任务可能已受理,未自动重试)'};
+    // 连接级失败且一个字节都没收到:请求很可能没送达,允许重试一次;收到过
+    // 任何字节就说明服务端已受理,重发就是重复出图重复计费。重试沿用同一个
+    // 种子,请求体保持一致。
+    if(!r.receivedBytes&&!st.retried)
+      return {action:'http',state:{seed:st.seed,retried:true},request:generateRequest(ctx,st)};
+    return {action:'error',message:'NovelAI 生图失败:'+(r.error==='tooLarge'?'响应过大':'网络中断')};}
+  if(r.status<200||r.status>=300){
+    var d=detailOf(r,ctx);
+    if(r.status===401||r.status===403)
+      return {action:'error',message:'NovelAI 鉴权失败(HTTP '+r.status+'):请检查 Persistent API Token(在 NovelAI 账号设置中创建)'+(d?(': '+d):'')};
+    // 免费试用账号的生图会要求 reCAPTCHA token:官方 OpenAPI 没有生图侧的
+    // reCAPTCHA 参数(只有登录接口有),这是网页端内部的反滥用校验,第三方
+    // API 客户端拿不到也不该伪造;把英文报错翻成可操作的中文提示。
+    if(r.status===400&&/recaptcha/i.test(d))
+      return {action:'error',message:'当前 NovelAI 账号仍是免费试用账号:官方只允许在网页端使用试用额度,API 生图要求 reCAPTCHA 校验(无法由第三方客户端代过);请订阅付费套餐后再用 API 生图'};
+    return {action:'error',message:'NovelAI 生图失败:HTTP '+r.status+(d?(': '+d):'')};}
+  var body=null;try{body=JSON.parse(r.text);}catch(e){}
+  // 2xx 却不是 JSON 是确定性失败(多半是服务地址填成了网页或只回 ZIP 的代理),
+  // 继续重试只会把配置错误伪装成慢。
+  if(!body||typeof body!=='object')
+    return {action:'error',message:'NovelAI 响应不是 JSON 对象(服务地址应指向官方 image.novelai.net)'};
+  var b64=firstBase64(body);
+  if(!b64)return {action:'error',message:'NovelAI 未返回图片数据'};
+  return {action:'done',images:[{base64:b64}]};}
+function subscriptionRequest(ctx){var s=ctx.settings||{};
+  return {method:'GET',url:apiUrl(ctx,'/user/subscription'),
+    headers:{Authorization:'Bearer '+(s.apiKey||''),Accept:'application/json'},
+    timeoutMs:30000};}
+function finishTest(ctx){
+  var r=ctx.response||{};
+  if(r.error)return {action:'error',message:'连接 NovelAI 失败(网络中断或超时)'};
+  if(r.status<200||r.status>=300){
+    var d=detailOf(r,ctx);
+    if(r.status===401||r.status===403)
+      return {action:'error',message:'NovelAI 鉴权失败(HTTP '+r.status+'):请检查 Persistent API Token'+(d?(': '+d):'')};
+    return {action:'error',message:'NovelAI 订阅查询失败:HTTP '+r.status+(d?(': '+d):'')};}
+  var body=null;try{body=JSON.parse(r.text);}catch(e){}
+  if(!body||typeof body!=='object')
+    return {action:'error',message:'NovelAI 订阅接口响应不是 JSON 对象'};
+  // 只回显公共用量信息;端点正文里的邮箱/token 一类字段绝不拼进横幅。
+  var parts=['密钥有效'];
+  // 试用账号的生图会被服务端要求 reCAPTCHA(API 无法代过),连接测试就先
+  // 暴露状态,别等用户生成时才撞 400。
+  if(typeof body.tier==='number'&&body.tier>0)parts.push('订阅等级 '+body.tier);
+  else if(body.active!==true)parts.push('试用账号(未订阅)');
+  var left=body.trainingStepsLeft;
+  if(left&&(typeof left.fixedTrainingStepsLeft==='number'||typeof left.purchasedTrainingSteps==='number')){
+    var anlas=(typeof left.fixedTrainingStepsLeft==='number'?left.fixedTrainingStepsLeft:0)
+      +(typeof left.purchasedTrainingSteps==='number'?left.purchasedTrainingSteps:0);
+    parts.push('Anlas '+anlas);}
+  var usage=body.usage;
+  if(usage&&typeof usage.percent==='number')parts.push('剩余电量 '+usage.percent+'%');
+  return {action:'done',message:parts.join(' · ')};}
+// 该服务没有模型列表端点,候选按官方已公布的模型静态给出。
+var MODELS=['nai-diffusion-5-full','nai-diffusion-5-curated','nai-diffusion-4-5-full','nai-diffusion-4-5-curated','nai-diffusion-4-full','nai-diffusion-4-curated-preview','nai-diffusion-3','nai-diffusion-furry-3'];
+function step(ctx){
+  if(ctx.operation==='test'){
+    if(ctx.phase==='start'){var g=hostGuard(ctx);if(g)return g;
+      return {action:'http',state:null,request:subscriptionRequest(ctx)};}
+    return finishTest(ctx);}
+  if(ctx.operation==='listModels')return {action:'done',models:MODELS};
+  if(ctx.phase==='start'){var h=hostGuard(ctx);if(h)return h;
+    var st0={seed:randomSeed(),retried:false};
+    return {action:'http',state:st0,request:generateRequest(ctx,st0)};}
+  return finishGenerate(ctx,ctx.state||{seed:randomSeed(),retried:false});}
+''';
+
+/// 全新建库时幂等种入的三条内置插件(均默认启用)。
 ///
 /// id 是插件身份的一部分,发布后不得更改或复用;升级插件应递增 version 并
 /// 保留对旧配置的兼容。
@@ -206,6 +385,16 @@ const List<ImagePlugin> kDefaultImagePluginSeeds = [
     name: 'Nai2API(NovelAI 代理)',
     version: '1.0.0',
     code: _nai2Code,
+    usesStandardParams: true,
+    supportsTest: true,
+    supportsListModels: true,
+    permissions: ImagePluginPermissions(endpointSetting: 'baseUrl'),
+  ),
+  ImagePlugin(
+    id: 'microscritt.novelai',
+    name: 'NovelAI 官方 API(image.novelai.net)',
+    version: '1.0.0',
+    code: _novelAiCode,
     usesStandardParams: true,
     supportsTest: true,
     supportsListModels: true,

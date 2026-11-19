@@ -1,9 +1,9 @@
 // 聊天消息列表:操作排、选中语义与上报时序、连续气泡分组、草稿打字指示与
 // 超长草稿降级、头像占位、爬楼动画时长与长历史定位。
-import 'dart:typed_data';
-
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:microscritt/models/bubble_style.dart';
 import 'package:microscritt/models/message.dart';
 import 'package:microscritt/ui/widgets/message_list.dart';
 import 'package:microscritt/ui/widgets/rich_message_text.dart';
@@ -20,6 +20,7 @@ Widget _harness({
   bool loadingOlder = false,
   int? highlightedMessageId,
   ValueChanged<bool>? onActionsVisibleChanged,
+  BubbleStyle? assistantBubbleStyle,
 }) {
   return MaterialApp(
     home: Scaffold(
@@ -39,6 +40,7 @@ Widget _harness({
           assistantAvatarImage: assistantAvatarImage,
           highlightedMessageId: highlightedMessageId,
           onActionsVisibleChanged: onActionsVisibleChanged,
+          assistantBubbleStyle: assistantBubbleStyle,
         ),
       ),
     ),
@@ -667,6 +669,32 @@ void main() {
     await tester.pump();
     expect(find.text('partial reply'), findsOneWidget);
     expect(find.byKey(const ValueKey('typing-dots')), findsNothing);
+  });
+
+  testWidgets('streaming draft inherits character bubble font and size', (
+    tester,
+  ) async {
+    // 草稿气泡与落库后的助手气泡共用角色级样式:字体/字号在流式期间就要
+    // 生效,否则流结束落库的瞬间会从默认字体跳到角色设定的衬线字体。
+    await tester.pumpWidget(
+      _harness(
+        messages: const [],
+        draft: 'partial reply',
+        streaming: true,
+        assistantBubbleStyle: const BubbleStyle(
+          fontFamily: 'serif',
+          fontSize: 21,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final body = tester.widget<RichMessageText>(find.byType(RichMessageText));
+    expect(
+      body.style.fontFamily,
+      defaultTargetPlatform == TargetPlatform.windows ? 'SimSun' : 'serif',
+    );
+    expect(body.style.fontSize, 21);
   });
 
   testWidgets(

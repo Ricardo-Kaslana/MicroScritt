@@ -4,6 +4,7 @@
 /// 避免 Android CursorWindow 的单行 2MB 上限。
 library;
 
+import 'package:sqflite/sqflite.dart';
 import '../models/worldbook_entry.dart';
 import 'database.dart';
 
@@ -28,51 +29,61 @@ class WorldbookRepository {
   /// 于是同一条目在上下文里并存多份,面板上的附件数远超条目数。旧实现每次
   /// 保存(哪怕只切换一个启用开关)都会让全表 id 前移。
   Future<void> replaceForCharacter(int characterId, List<WorldbookEntry> entries) async {
-    await db.db.transaction((txn) async {
-      final existingRows = await txn.query(
-        'worldbook_entries',
-        columns: ['id'],
-        where: 'character_id = ?',
-        whereArgs: [characterId],
-      );
-      final existingIds = {for (final r in existingRows) r['id'] as int};
-      final keepIds = <int>{
-        for (final e in entries)
-          if (e.id != null) e.id!,
+    await db.db.transaction(
+      (txn) => replaceForCharacterInTxn(txn, characterId, entries),
+    );
+  }
+
+  /// 与 [replaceForCharacter] 同语义,但复用调用方事务(制卡应用需要卡片
+  /// 与世界书原子提交)。
+  static Future<void> replaceForCharacterInTxn(
+    Transaction txn,
+    int characterId,
+    List<WorldbookEntry> entries,
+  ) async {
+    final existingRows = await txn.query(
+      'worldbook_entries',
+      columns: ['id'],
+      where: 'character_id = ?',
+      whereArgs: [characterId],
+    );
+    final existingIds = {for (final r in existingRows) r['id'] as int};
+    final keepIds = <int>{
+      for (final e in entries)
+        if (e.id != null) e.id!,
+    };
+    final batch = txn.batch();
+    for (final id in existingIds.difference(keepIds)) {
+      batch.delete('worldbook_entries', where: 'id = ?', whereArgs: [id]);
+    }
+    for (final e in entries) {
+      final values = <String, Object?>{
+        'character_id': characterId,
+        'kind': _legacyKindColumnValue,
+        'name': e.name,
+        'key': e.keysWire,
+        'use_regex': e.useRegex ? 1 : 0,
+        'case_sensitive': e.caseSensitive ? 1 : 0,
+        'match_whole_words': e.matchWholeWords ? 1 : 0,
+        'selective': e.selective ? 1 : 0,
+        'secondary_key': e.secondaryKeysWire,
+        'constant': e.constant ? 1 : 0,
+        'content': e.content,
+        'position': e.position,
+        'enabled': e.enabled ? 1 : 0,
+        'background': e.background ? 1 : 0,
+        'extra': e.extraWire,
       };
-      final batch = txn.batch();
-      for (final id in existingIds.difference(keepIds)) {
-        batch.delete('worldbook_entries', where: 'id = ?', whereArgs: [id]);
+      final id = e.id;
+      // id 存在且确实属于本角色 → 原地更新;否则插入新行(无 id,或 id 指向
+      // 别的角色 —— 跨角色复制条目时走这条路,不能误改他人行)。
+      if (id != null && existingIds.contains(id)) {
+        batch.update('worldbook_entries', values, where: 'id = ?', whereArgs: [id]);
+      } else {
+        batch.insert('worldbook_entries', values);
       }
-      for (final e in entries) {
-        final values = <String, Object?>{
-          'character_id': characterId,
-          'kind': _legacyKindColumnValue,
-          'name': e.name,
-          'key': e.keysWire,
-          'use_regex': e.useRegex ? 1 : 0,
-          'case_sensitive': e.caseSensitive ? 1 : 0,
-          'match_whole_words': e.matchWholeWords ? 1 : 0,
-          'selective': e.selective ? 1 : 0,
-          'secondary_key': e.secondaryKeysWire,
-          'constant': e.constant ? 1 : 0,
-          'content': e.content,
-          'position': e.position,
-          'enabled': e.enabled ? 1 : 0,
-          'background': e.background ? 1 : 0,
-          'extra': e.extraWire,
-        };
-        final id = e.id;
-        // id 存在且确实属于本角色 → 原地更新;否则插入新行(无 id,或 id 指向
-        // 别的角色 —— 跨角色复制条目时走这条路,不能误改他人行)。
-        if (id != null && existingIds.contains(id)) {
-          batch.update('worldbook_entries', values, where: 'id = ?', whereArgs: [id]);
-        } else {
-          batch.insert('worldbook_entries', values);
-        }
-      }
-      await batch.commit(noResult: true);
-    });
+    }
+    await batch.commit(noResult: true);
   }
 
   /// 单次 substr 读取的字符数。TEXT 以 UTF-8 存放,最坏 4 字节/字符 ——

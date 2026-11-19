@@ -83,6 +83,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         final done = await service.compact(
           sessionId: sessionId,
           model: config.model,
+          temperature: config.temperature,
           keep: keepForTarget,
           maxSummarizeAttempts: 4, // 首次 + 3 次失败重试
           onUsage: _accumulateCompactUsage,
@@ -178,7 +179,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     final capacity = await _resolveContextCapacity();
     if (capacity == null) return;
     final backend = ref.read(backendProvider);
-    if (backend == null) return;
+    final config = ref.read(backendConfigProvider);
+    if (backend == null || config == null) return;
 
     final messageRepo = ref.read(messageRepositoryProvider);
     // 组装窗口:占用估算必须用与发送同一份输入(全部未折叠活跃行)。
@@ -217,6 +219,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       final done = await CompactService(backend, messageRepo).compact(
         sessionId: sessionId,
         model: model,
+        temperature: config.temperature,
         keep: keep,
         maxSummarizeAttempts: 4, // 首次 + 3 次失败重试
         onUsage: _accumulateCompactUsage,
@@ -980,6 +983,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
                     throttleTimer = null;
                     failureKind ??= kind;
                     state = state.copyWith(error: message);
+                  case ToolCallsEvent():
+                    break; // 主写无工具消费方(tools 恒空),忽略。
                   case DoneEvent():
                     break;
                 }
@@ -1089,6 +1094,19 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         }
         // 后台状态归后台轮自己收敛(并发在飞时它可能正写 interrupted),
         // 主写收尾只刷新消息列表,不越权覆盖。
+        // 被中断的请求同样消耗了上游计算:按已到达的用量记账(reported 为
+        // false 时只计请求次数),不因中断丢账。
+        await _recordUsage(
+          sessionId: sessionId,
+          kind: UsageKind.main,
+          config: config,
+          usage: TokenUsage(
+            inputTokens: inTok,
+            outputTokens: outTok,
+            cachedInputTokens: cachedTok,
+          ),
+          reported: inTok > 0 || outTok > 0 || cachedTok > 0,
+        );
         state = state.copyWith(messages: messages);
         return;
       }
@@ -1138,6 +1156,18 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       // 上轮几乎一致,清零只会让圆环退回字符估算(÷3.2,比已知实数更不准),还会
       // 把会话行持久化的锚点冲掉、重进会话后再也拿不回来。
       final hasUsage = inTok > 0;
+      // 逐请求统计:记录本轮主写实际消耗(与下方会话级"最近一轮快照"分离)。
+      await _recordUsage(
+        sessionId: sessionId,
+        kind: UsageKind.main,
+        config: config,
+        usage: TokenUsage(
+          inputTokens: inTok,
+          outputTokens: outTok,
+          cachedInputTokens: cachedTok,
+        ),
+        reported: inTok > 0 || outTok > 0 || cachedTok > 0,
+      );
       state = state.copyWith(
         messages: messages,
         inputTokens: hasUsage ? inTok : state.inputTokens,

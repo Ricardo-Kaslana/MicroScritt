@@ -28,26 +28,30 @@ enum ReasoningLevel {
   };
 }
 
-/// 后台agent 输出上限档位(schema v54):首试请求的 `max_tokens` 档位,
-/// 重试恒放开(见 BackgroundEngine._attempt)。快状态轮与记忆主动轮各有
-/// 基准值,档位按倍率缩放;「不限」首试也不发送 max_tokens(与主写同待遇,
-/// 由 provider 自身上限兜底 —— 推理模型把预算烧在不可见思考上时的根治选项)。
-enum BackgroundOutputTier {
-  compact,
-  standard,
-  relaxed,
-  unlimited;
+/// 后台维护运行模式:legacy 单发(默认,升级零行为变化)/ agentic 多步
+/// 工具循环 / hybrid 单发 + 周期审计。坏值 fail-safe 回落 legacy。
+/// 设置列与 UI 选择器在 P3 接入;本期 orchestrator 按参数分流。
+enum BackgroundMode {
+  legacy,
+  agentic,
+  hybrid;
 
-  static BackgroundOutputTier fromWire(String s) =>
-      BackgroundOutputTier.values.where((t) => t.name == s).firstOrNull ??
-      BackgroundOutputTier.standard;
+  static BackgroundMode fromWire(String s) =>
+      BackgroundMode.values.where((m) => m.name == s).firstOrNull ??
+      BackgroundMode.legacy;
 
-  /// 面向 UI 的中文标签。
+  /// 面向 UI 的英文裸名(不带解释)。
   String get label => switch (this) {
-    BackgroundOutputTier.compact => '紧凑',
-    BackgroundOutputTier.standard => '标准',
-    BackgroundOutputTier.relaxed => '宽松',
-    BackgroundOutputTier.unlimited => '不限',
+    BackgroundMode.legacy => 'Legacy',
+    BackgroundMode.agentic => 'Agentic',
+    BackgroundMode.hybrid => 'Hybrid',
+  };
+
+  /// 悬停提示用的白话说明:直接描述维护行为,避免缩写 jargon。
+  String get hint => switch (this) {
+    BackgroundMode.legacy => '每轮一次生成,兼容性最好',
+    BackgroundMode.agentic => '多步工具调用,可回查历史',
+    BackgroundMode.hybrid => '常规维护 + 定期审计变量板',
   };
 }
 
@@ -98,8 +102,8 @@ class BackgroundFeatures {
 
 /// 应用级偏好的不可变快照;写入方通过 [copyWith] 生成新实例。
 ///
-/// `schema v22` 起后台模型、`v48` 起后台推理档位、`v54` 起后台输出上限
-/// 均可独立于主写配置;读取旧行时缺失列按构造默认值处理。
+/// `schema v22` 起后台模型、`v48` 起后台推理档位均可独立于主写配置;
+/// 读取旧行时缺失列按构造默认值处理。
 class AppSettings {
   /// 主题模式;null 行或未知值由仓库回落到 [AppThemeMode.system]。
   final AppThemeMode themeMode;
@@ -122,10 +126,10 @@ class AppSettings {
   /// 与专用模型一样按需单独调。默认 off,与历史行为一致(后台请求从不带推理参数)。
   final ReasoningLevel backgroundReasoningLevel;
 
-  /// 后台agent 输出上限档位(schema v54)。仅约束**首试**请求的 max_tokens
-  /// (快状态轮/记忆主动轮各按档位取值);重试恒完全放开。默认 standard,
-  /// 与历史硬编码行为(2048/4096)一致。
-  final BackgroundOutputTier backgroundOutputTier;
+  /// 后台维护运行模式(schema v71):legacy 单发 / agentic 多步工具循环 /
+  /// hybrid 单发 + 周期审计(审计 P4 接入,本期按 legacy 跑)。默认 legacy,
+  /// 升级零行为变化;脏值读入回落 legacy。
+  final BackgroundMode backgroundMode;
 
   /// 角色卡是否进入后台agent 上下文锚定段(默认开,保持历史行为)。
   /// 关闭后快状态轮不再注入 `<character>` 段。
@@ -196,13 +200,6 @@ class AppSettings {
           .clamp(minAutoCompactThreshold, maxAutoCompactThreshold)
           .toDouble();
 
-  /// 后台生图间隔:每隔多少**轮对话**允许生成一次。默认 1 = 每轮(可生成的
-  /// 轮才生,后台引擎仍可能因无场景变化不产出提示词)。
-  ///
-  /// (随记忆自动维护退役,后台只维护快状态,不再有慢变轮;设置页已无
-  /// 对应的慢变间隔选项。)
-  final int imageInterval;
-
   /// 单轮自动附件注入上限:每次发送最多新注入多少条**占名额**的自动附件
   /// (现为世界书触发条目),超出按命中顺序丢弃尾部。0 = 关闭自动附件注入。
   /// @技能(用户主动调用)与系统通知(压缩/记忆差异)豁免名额。
@@ -219,13 +216,12 @@ class AppSettings {
     this.dialogueHighlightEnabled = true,
     this.backgroundModelId,
     this.backgroundReasoningLevel = ReasoningLevel.off,
-    this.backgroundOutputTier = BackgroundOutputTier.standard,
+    this.backgroundMode = BackgroundMode.legacy,
     this.backgroundCharacterAnchor = true,
     this.backgroundMemoryAnchor = true,
     this.backgroundDeletionConfirm = false,
     this.autoCompactEnabled = true,
     this.autoCompactThreshold = defaultAutoCompactThreshold,
-    this.imageInterval = 1,
     this.maxAutoAttachments = 5,
   });
 
@@ -239,10 +235,9 @@ class AppSettings {
     bool? dialogueHighlightEnabled,
     bool? autoCompactEnabled,
     double? autoCompactThreshold,
-    int? imageInterval,
     int? maxAutoAttachments,
     ReasoningLevel? backgroundReasoningLevel,
-    BackgroundOutputTier? backgroundOutputTier,
+    BackgroundMode? backgroundMode,
     bool? backgroundCharacterAnchor,
     bool? backgroundMemoryAnchor,
     bool? backgroundDeletionConfirm,
@@ -259,11 +254,10 @@ class AppSettings {
         dialogueHighlightEnabled ?? this.dialogueHighlightEnabled,
     autoCompactEnabled: autoCompactEnabled ?? this.autoCompactEnabled,
     autoCompactThreshold: autoCompactThreshold ?? this.autoCompactThreshold,
-    imageInterval: imageInterval ?? this.imageInterval,
     maxAutoAttachments: maxAutoAttachments ?? this.maxAutoAttachments,
     backgroundReasoningLevel:
         backgroundReasoningLevel ?? this.backgroundReasoningLevel,
-    backgroundOutputTier: backgroundOutputTier ?? this.backgroundOutputTier,
+    backgroundMode: backgroundMode ?? this.backgroundMode,
     backgroundCharacterAnchor:
         backgroundCharacterAnchor ?? this.backgroundCharacterAnchor,
     backgroundMemoryAnchor:

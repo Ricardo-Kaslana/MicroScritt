@@ -16,6 +16,7 @@ import '../models/prompt_item.dart';
 import '../context/attachment_budget.dart';
 import '../context/context_assembler.dart';
 import '../data/message_repository.dart';
+import '../engine/background_agent.dart';
 import '../engine/background_engine.dart';
 import '../engine/background_status.dart';
 import '../engine/chat_engine.dart';
@@ -24,17 +25,20 @@ import '../engine/context_budget.dart';
 import '../engine/hook_runtime.dart';
 import '../engine/orchestrator.dart';
 import '../models/character_card.dart';
+import '../models/backend_config.dart';
 import '../models/context_snapshot.dart';
 import '../models/hook.dart';
 import '../models/image_result.dart';
 import '../models/app_settings.dart'
-    show BackgroundFeatures, ReasoningLevel, BackgroundOutputTier;
+    show BackgroundFeatures, BackgroundMode, ReasoningLevel;
 import '../models/llm_units.dart';
 import '../models/message.dart';
 import '../models/skill.dart';
 import '../models/token_usage.dart';
+import '../models/usage_stats.dart';
 import '../models/worldbook_entry.dart';
 import 'providers.dart';
+import 'interrupt_token.dart';
 import 'slash_commands.dart';
 
 // 体量原因按职责拆分在同库 part 文件 —— Dart 的类方法体无法跨库拆分而保持
@@ -118,8 +122,17 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
   @visibleForTesting
   Future<void>? backgroundTask;
 
-  /// 已触发的后台维护轮次计数(生图间隔降频依据)。
-  int _maintenanceRunCount = 0;
+  /// hybrid 周期审计计数器(per-session 内存态,不跨重启):仅成功且变量真应用
+  /// (cursorSeq != null)的旧维护轮 +1,达 [AuditProfile.auditInterval] 触发审计。
+  /// 切会话([load])清零;审计成败/冲突/良性跳过重置,让位/取消不重置(稍后重试);
+  /// rerun 与历史改写不计数也不重置(节奏启发式,非正确性不变量)。
+  int _auditCounter = 0;
+
+  /// 当前在飞轮是否为审计:让位判定用。不变量 —— `_auditRunning == true` 蕴含
+  /// 审计持有当前 [_backgroundToken] 且 [_backgroundInFlight] 为真;其余换发点
+  /// (memory/rerun/维护)都被 inFlight 门控挡在审计之外,[interrupt] 不换发,
+  /// [_invalidateBackground] 是唯一旁路,故它必须同步清此标志(防残留误让位)。
+  bool _auditRunning = false;
 
   /// 后台变量维护的进度游标(已处理到的 seq);null 表示本周期尚未起步。
   int? _backgroundCursorSeq;
@@ -144,7 +157,7 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
   /// 变量维护待处理标志:在飞轮结束后据此续跑(单次最多两轮)。
   bool _backgroundPending = false;
 
-  /// 生图维护待处理标志:受生图间隔降频控制,置位后当前轮必须消费。
+  /// 生图维护待处理标志:置位后当前轮必须消费。
   bool _backgroundPendingImage = false;
 
   /// `/rerun` 重跑用的**上次成功维护**记录(会话内存态,不跨重启):
@@ -173,6 +186,10 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
     _backgroundToken.cancel();
     _backgroundToken = InterruptToken();
     _backgroundInFlight = false;
+    // 审计在飞时历史改写/切会话:旧审计 finally 可能尚未收敛,若不清此标志,
+    // 随后新维护在飞 + 残留 true 会让 fire 误走让位分支 cancel 无辜的新令牌。
+    // 计数器不清(节奏启发式);切会话的清零在 load 链内单独做。
+    _auditRunning = false;
     _backgroundCursorSeq = null;
     _backgroundBaselineSeq = null;
     _backgroundTargetSeq = null;
@@ -248,6 +265,50 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
       compactCachedInputTokens:
           state.compactCachedInputTokens + usage.cachedInputTokens,
     );
+    // 摘要每次尝试都回调一次(含上游未上报全零):计入逐请求统计的请求次数。
+    unawaited(
+      _recordUsage(
+        sessionId: state.sessionId,
+        kind: UsageKind.compact,
+        config: ref.read(backendConfigProvider),
+        usage: usage,
+        reported:
+            usage.inputTokens > 0 ||
+            usage.outputTokens > 0 ||
+            usage.cachedInputTokens > 0,
+      ),
+    );
+  }
+
+  /// 记录一次业务生成的 token 用量(统计面板的 append-only 明细)。
+  ///
+  /// 记账是附加信息:会话/配置缺失或写库失败都静默跳过,不影响主流程。
+  Future<void> _recordUsage({
+    required int? sessionId,
+    required UsageKind kind,
+    required BackendConfig? config,
+    required TokenUsage usage,
+    required bool reported,
+  }) async {
+    if (!ref.mounted || sessionId == null || config == null) return;
+    try {
+      await ref
+          .read(usageRepositoryProvider)
+          .record(
+            sessionId: sessionId,
+            kind: kind,
+            providerId: config.providerId,
+            providerName: config.providerName.isEmpty
+                ? config.providerWire
+                : config.providerName,
+            model: config.model,
+            modelName: config.modelName.isEmpty
+                ? config.model
+                : config.modelName,
+            usage: usage,
+            reported: reported,
+          );
+    } catch (_) {}
   }
 
   /// 活跃对话消息(真实对话行:非 system、未压缩、非空内容、非附件),

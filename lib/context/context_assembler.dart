@@ -511,6 +511,7 @@ class ContextAssembler {
     ChatRole.user => '用户',
     ChatRole.assistant => '助手',
     ChatRole.system => '系统',
+    ChatRole.tool => '工具',
   };
 
   /// 条目命中判定:selective(主键+次键双命中)优先于 useRegex/

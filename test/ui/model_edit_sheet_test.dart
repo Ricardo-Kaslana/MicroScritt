@@ -9,7 +9,7 @@ import 'package:microscritt/models/llm_provider.dart';
 import 'package:microscritt/ui/model_edit_sheet.dart';
 
 void main() {
-  const tempKey = ValueKey('field_Temperature(留空 = 0.7 默认)');
+  const tempKey = ValueKey('field_Temperature(默认 1)');
 
   LlmModelEntry? popped;
 
@@ -48,19 +48,25 @@ void main() {
     maxOutput: 4096,
   );
 
+  testWidgets('新建时 temperature 预填默认 1', (tester) async {
+    await openSheet(tester);
+    final field = tester.widget<TextField>(find.byKey(tempKey));
+    expect(field.controller!.text, '1');
+  });
+
   testWidgets('既有 temperature 回填并去尾零(0.70 → 0.7)', (tester) async {
-    await openSheet(tester, existing: base.copyWith(temperature: () => 0.7));
+    await openSheet(tester, existing: base.copyWith(temperature: 0.7));
     final field = tester.widget<TextField>(find.byKey(tempKey));
     expect(field.controller!.text, '0.7');
   });
 
-  testWidgets('清空 temperature → pop 出 null(主写走默认 0.7)', (tester) async {
-    await openSheet(tester, existing: base.copyWith(temperature: () => 0.8));
+  testWidgets('清空 temperature → pop 出默认 1', (tester) async {
+    await openSheet(tester, existing: base.copyWith(temperature: 0.8));
     await tester.enterText(find.byKey(tempKey), '');
     await tester.tap(find.text('确定'));
     await tester.pumpAndSettle();
     expect(popped, isNotNull);
-    expect(popped!.temperature, isNull);
+    expect(popped!.temperature, 1);
   });
 
   testWidgets('填入合法 0.2 → pop 出该值', (tester) async {

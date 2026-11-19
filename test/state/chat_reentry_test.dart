@@ -182,6 +182,18 @@ void main() {
     await controller.send('hello');
     expect(container.read(chatControllerProvider).lastSentInputTokens, 1234);
 
+    // 逐请求用量:主写轮在收尾时落一条 main 明细(与会话快照口径分离)。
+    final mainUsage = await db.db.query(
+      'usage_records',
+      where: 'session_id = ? AND kind = ?',
+      whereArgs: [sessionA, 'main'],
+    );
+    expect(mainUsage, hasLength(1));
+    expect(mainUsage.single['input_tokens'], 1234);
+    expect(mainUsage.single['output_tokens'], 56);
+    expect(mainUsage.single['cached_input_tokens'], 100);
+    expect(mainUsage.single['reported'], 1);
+
     // 编辑单条消息:局部改写,锚点保留(圆环不退回字符估算)。
     final firstId = (await MessageRepository(db).bySession(sessionA)).first.id!;
     await controller.editMessage(firstId, 'edited');

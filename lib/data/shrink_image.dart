@@ -8,7 +8,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import '../../data/image_codec.dart';
+import 'image_codec.dart';
 
 /// 把一张 base64 图片缩到安全尺寸再 base64 返回。
 ///

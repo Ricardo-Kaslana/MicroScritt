@@ -7,15 +7,15 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
 import '../backend/llm_backend.dart';
 import '../models/app_settings.dart';
 import '../models/character_card.dart';
 import '../models/chat_message.dart';
-import '../models/image_prompt_guide.dart';
+import '../models/llm_provider.dart';
 import '../models/message.dart';
 import '../models/token_usage.dart';
 import '../models/worldbook_entry.dart';
+import 'background_prompt.dart';
 
 /// 后台引擎一轮的结果:成功带出 [BackgroundResult];失败带细分原因,让
 /// 编排器/控制器区分"调用出错"与"解析失败"。
@@ -59,6 +59,10 @@ class BackgroundResult {
   /// 需要写入的变量键值;只含本轮发生变化的键,空表示无变化。
   final Map<String, String> variableUpdates;
 
+  /// [variableUpdates] 中原本不存在、由本轮新建的键数(编排器落库后按基线
+  /// 快照回填)。用于给展示层区分「新增」与「修改」;引擎侧产出恒为 0。
+  final int addedVariables;
+
   /// LLM 显式要求删除的既有键(仅 `removeVariables`;绝不从 updates 的缺省键
   /// 推断删除)。是否真正执行由仓库按权限/上限再次裁决。
   final List<String> variableRemovals;
@@ -88,6 +92,7 @@ class BackgroundResult {
 
   const BackgroundResult({
     this.variableUpdates = const {},
+    this.addedVariables = 0,
     this.variableRemovals = const [],
     this.imagePrompt,
     this.imagePrompts,
@@ -134,41 +139,15 @@ class _BackgroundPrompt {
 /// 记忆由用户主动维护([runMemoryInit]/[runMemoryRegenerate]),生图指导是
 /// 只读输入;二者在快状态轮以**只读锚定段**注入(仅 image 开启时,
 /// 各带截断上限),让生图贴合当前剧情。
+///
+/// 采样温度与主写同源:只透传模型配置解析出的值(后台专用模型取它自己的
+/// 配置),后台不再夹取或另设默认。输出上限同样只跟随模型配置的「最大输出
+/// tokens」(未配置时由协议后端处理:OpenAI 兼容不发送,Anthropic 直接报
+/// 配置错误)。
 class BackgroundEngine {
   /// 后台 LLM 后端;调用方按后台模型设置解析(未指定专用模型时回退主写)。
   final LlmBackend backend;
   BackgroundEngine(this.backend);
-
-  /// 后台维护是结构化 JSON 输出:温度上限压到 0.5 提高确定性(与主写参数
-  /// 解耦);输出上限见 [maxOutputTokens]。
-  static const double maxTemperature = 0.5;
-
-  /// 快状态轮(变量/image)首试输出上限的 standard 档基准:结构化 JSON
-  /// 任务防跑飞。其他档位按 [outputCapFor] 缩放。
-  static const int maxOutputTokens = 2048;
-
-  /// memory 主动轮(初始化/全量重生成)首试输出上限的 standard 档基准:产出的
-  /// 是**全量**记忆文本(输入参考截断上限 [maxMemoryChars] ≈ 4000 字符,中文
-  /// 内容约 1 字符/token),2048 容易在 JSON 未闭合处截断落进"解析失败"。
-  /// 放宽到 4096 给足余量;主动轮由用户显式触发,成本可控。快状态轮维持
-  /// [maxOutputTokens] 防跑飞。其他档位按 [outputCapFor] 缩放。
-  static const int maxOutputTokensMemory = 4096;
-
-  /// 档位 → 首试请求的输出上限。快状态轮与 memory 主动轮各按档位取值:
-  /// compact 半量(省成本)/ standard 基准(历史硬编码行为)/ relaxed 倍量
-  /// (长记忆、重推理场景)/ unlimited 不发送 max_tokens(与重试同待遇,
-  /// 推理模型把预算烧在不可见思考上时空响应的根治选项,由 provider 兜底)。
-  /// 返回值只约束**首试**;重试恒为 null(完全放开)。
-  static int? outputCapFor(BackgroundOutputTier tier, {required bool memory}) =>
-      switch (tier) {
-        BackgroundOutputTier.compact =>
-          memory ? maxOutputTokensMemory ~/ 2 : maxOutputTokens ~/ 2,
-        BackgroundOutputTier.standard =>
-          memory ? maxOutputTokensMemory : maxOutputTokens,
-        BackgroundOutputTier.relaxed =>
-          memory ? maxOutputTokensMemory * 2 : maxOutputTokens * 2,
-        BackgroundOutputTier.unlimited => null,
-      };
 
   /// 全量重生成记忆时送入提示的既有记忆文本的最长字符数:超长时截断保留
   /// 开头,避免把几百 KB 文本塞进一次性请求;提示词已要求维持精炼,截断
@@ -184,7 +163,7 @@ class BackgroundEngine {
   static const int maxDetailChars = 120;
 
   /// 解析兜底的逐候选回退上限(} 切片与 { 修复各计):每次尝试是 O(n) 的
-  /// substring/扫描 + jsonDecode,跑在主 isolate;重试放开 max_tokens 后的
+  /// substring/扫描 + jsonDecode,跑在主 isolate;模型未配置输出上限时的
   /// 超长响应(数百 KB、数千个括号)不设上限可卡顿数秒。合法候选几乎总在
   /// 最后几个括号里,64 绰绰有余。
   static const int _maxParseCandidates = 64;
@@ -245,13 +224,9 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     BackgroundFeatures features = const BackgroundFeatures(),
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-
-    /// 输出上限档位:按档位决定首试请求的 max_tokens(standard 时与
-    /// 历史硬编码 [maxOutputTokens] 一致);unlimited 首试也不带上限。
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
     int imageCount = 1,
     String? imageGuide,
     String? memory,
@@ -282,7 +257,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     // 同一会话内逐轮字节一致;变量-only 轮的稳定段只有任务契约,达不到
     // Anthropic 的最小缓存段长,继续整串发送。
     final cacheStablePrompt = features.image;
-    // 结构化 JSON 任务:显式压低温度、限制输出上限(与主写引擎的参数解耦)。
+    // 结构化 JSON 任务:显式压低温度;输出上限跟随模型配置(与主写一致)。
     final outcome = await _runJson(
       model: model,
       prompt: prompt.combined,
@@ -292,7 +267,6 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
-      outputCap: outputCapFor(tier, memory: false),
       requireVariables: features.variables,
       shouldCancel: shouldCancel,
       cancelSignal: cancelSignal,
@@ -325,18 +299,17 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
   ///
   /// 初始化的唯一交付物是**非空 memory**,因此这里用与 [_runJson] 相同的尝试
   /// 循环但换成功判据:解析成功却缺字段/空串/字面 null(推理模型偶发返回 `{}`
-  /// 或 `{"memory":null}`)与空响应一样值得再试。首试带档位上限(与用户模型级
-  /// 上限取较小者)、重试完全放开(见 [_runJson] 注释);取消不重试。
+  /// 或 `{"memory":null}`)与空响应一样值得再试。请求的 max_tokens 跟随模型
+  /// 配置的「最大输出 tokens」(与主写一致);取消不重试。
   Future<BackgroundRunResult> runMemoryInit({
     required String model,
     required CharacterCard character,
     List<WorldbookEntry> worldbook = const [],
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
   }) async {
     final prompt = _buildMemoryInitPrompt(character, worldbook);
     return _runMemoryPrompt(
@@ -347,7 +320,6 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
-      tier: tier,
     );
   }
 
@@ -362,10 +334,9 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     String? currentMemory,
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
   }) async {
     final prompt = _buildMemoryRegeneratePrompt(
       character,
@@ -381,7 +352,6 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
-      tier: tier,
     );
   }
 
@@ -397,10 +367,9 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     List<WorldbookEntry> worldbook = const [],
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
   }) async {
     final characterText = _characterCardText(character);
     final constantEntries =
@@ -454,7 +423,6 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
         temperature: temperature,
         maxTokens: maxTokens,
         reasoningLevel: reasoningLevel,
-        outputCap: attempt == 1 ? outputCapFor(tier, memory: true) : null,
         shouldCancel: shouldCancel,
         cancelSignal: cancelSignal,
       );
@@ -485,10 +453,9 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     required String prompt,
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
   }) async {
     BackgroundRunFailure? last;
     for (var attempt = 1; attempt <= maxAttemptsPerRound; attempt++) {
@@ -498,8 +465,6 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
         temperature: temperature,
         maxTokens: maxTokens,
         reasoningLevel: reasoningLevel,
-        // 首试用 memory 档上限给足复述余量;重试放开(null = 不发送 max_tokens)。
-        outputCap: attempt == 1 ? outputCapFor(tier, memory: true) : null,
         shouldCancel: shouldCancel,
         cancelSignal: cancelSignal,
       );
@@ -535,23 +500,18 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
   /// 状态更新报废 —— 单次失败率 p 在三次尝试后降到 p³。取消(cancelled)不
   /// 重试,立即返回。
   ///
-  /// **重试时完全放开输出上限**:首试按功能档设 `max_tokens`(防跑飞,与用户
-  /// 配置的模型级上限取较小者);重试**不发送任何 max_tokens** —— 包括调用方
-  /// 透传的模型级 maxTokens。不少 OpenAI 兼容推理模型把**不可见的推理 token
-  /// 也计入 max_tokens**,首试预算被思考烧尽时正文为空(用户实测"模型返回为
-  /// 空")或刚吐出 `{"memory":` 就被掐断(修复器补 null → "未产出有效记忆")。
-  /// 主写不带上限所以从不触发,后台每轮必带故高发;放开后与主写同待遇,由
-  /// provider 自身上限兜底。
+  /// **输出上限与主写一致**:只透传模型配置的「最大输出 tokens」,后台自身
+  /// 不设档位;未配置时由协议后端处理(OpenAI 兼容不发送,Anthropic 要求
+  /// 必填)。每次尝试都带同一个模型级上限(与主写每轮请求一致)。
   Future<BackgroundRunResult> _runJson({
     required String model,
     required String prompt,
     String? stableSystemPart,
     String? variableSystemPart,
     bool cacheStableSystem = false,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    required int? outputCap,
     bool requireVariables = false,
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
@@ -567,8 +527,6 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
         temperature: temperature,
         maxTokens: maxTokens,
         reasoningLevel: reasoningLevel,
-        // 首试用档位上限,重试放开(null = 不发送 max_tokens)。
-        outputCap: attempt == 1 ? outputCap : null,
         requireVariables: requireVariables,
         shouldCancel: shouldCancel,
         cancelSignal: cancelSignal,
@@ -588,10 +546,9 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     String? stableSystemPart,
     String? variableSystemPart,
     bool cacheStableSystem = false,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    required int? outputCap,
     bool requireVariables = false,
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
@@ -600,20 +557,14 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       model: model,
       systemPrompt: prompt,
       messages: [ChatMessage(ChatRole.user, _userMessage)],
-      temperature: (temperature ?? 0.7).clamp(0.0, maxTemperature).toDouble(),
+      temperature: temperature,
       // 后台推理强度:默认 off 不发送;开启后 openai 兼容端点映射
       // reasoning_effort、anthropic 映射 thinking 预算(其内部会连带省略
       // temperature 并抬高 max_tokens,见 anthropic_backend)。
       reasoningLevel: reasoningLevel,
-      // outputCap 为 null(重试)= **完全**不设输出上限 —— 连调用方透传的
-      // 模型级 maxTokens(用户在模型配置里的「最大输出 tokens」)也不带:
-      // 只放开档位上限时,用户配置过的 max_output 仍会原样发进每次重试,
-      // 三次尝试带同一个 max_tokens;推理模型把预算烧在不可见思考上时
-      // 正文恒为空 → "模型未返回任何内容"三连败。首试取用户值与档位的
-      // 较小者。
-      maxTokens: outputCap == null
-          ? null
-          : (maxTokens == null ? outputCap : math.min(maxTokens, outputCap)),
+      // 输出上限与主写一致:只带模型配置的「最大输出 tokens」;未配置时的
+      // 行为由协议后端决定(OpenAI 兼容不发送,Anthropic 报配置错误)。
+      maxTokens: maxTokens,
       // image 轮只缓存稳定的 system 前缀(任务契约 + 生图锚定);末条消息上
       // 不再打全前缀断点 —— 后台只有一条固定 user 指令,把每轮变化的转录/
       // 变量尾部写入缓存只会白付写入溢价。变量-only 轮不请求缓存。
@@ -644,6 +595,8 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
                 inTok += usage.inputTokens;
                 outTok += usage.outputTokens;
                 cachedTok += usage.cachedInputTokens;
+              case ToolCallsEvent():
+                break; // 单发后台无工具消费方(tools 恒空),忽略。
               case DoneEvent():
                 break;
               case ErrorEvent(:final message):
@@ -911,7 +864,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       instruction.writeln();
     }
     stableSections.add(
-      _tag(
+      backgroundTag(
         'background_task',
         'Background maintenance contract: the output format and rules for this run.',
         instruction.toString().trimRight(),
@@ -920,85 +873,27 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
 
     // 锚定三段:仅 image 需要剧情语境时注入;纯 variables 轮保持便宜。
     if (features.image) {
-      final guide = imageGuide != null && imageGuide.trim().isNotEmpty
-          ? imageGuide.trim()
-          : kImageTagGuideEn;
-      stableSections.add(
-        _tag(
-          'image_guide',
-          'Authoritative image direction guide (user-maintained). Reproduce the fixed appearance and style it pins down exactly.',
-          guide,
+      stableSections.addAll(
+        imageAnchorSections(
+          imageGuide: imageGuide,
+          character: character,
+          memory: memory,
+          worldbook: worldbook,
+          memoryChars: maxBackgroundMemoryChars,
+          characterChars: maxBackgroundCharacterChars,
+          worldbookChars: maxBackgroundWorldbookChars,
+          worldbookEntryChars: maxBackgroundWorldbookEntryChars,
         ),
       );
-      final charText = _compactCharacterText(character);
-      if (charText.isNotEmpty) {
-        stableSections.add(
-          _tag(
-            'character',
-            'Active character card (read-only reference): name, description, personality, scenario.',
-            charText,
-          ),
-        );
-      }
-      final mem = memory?.trim() ?? '';
-      if (mem.isNotEmpty) {
-        stableSections.add(
-          _tag(
-            'memory',
-            'Session long-term memory (read-only; established facts and continuity; never copy into output).',
-            _truncate(mem, maxBackgroundMemoryChars),
-          ),
-        );
-      }
-      final wbText = _backgroundWorldbookText(
-        worldbook,
-        maxBackgroundWorldbookChars,
-      );
-      if (wbText.isNotEmpty) {
-        stableSections.add(
-          _tag(
-            'worldbook_background',
-            'User-selected worldbook lore for this session (read-only reference).',
-            wbText,
-          ),
-        );
-      }
     }
 
-    final transcript = history.map((m) => '${m.role}: ${m.content}').join('\n');
-    variableSections.add(
-      _tag(
-        'recent_conversation',
-        'The most recent conversation turns — read-only context for variables; the source of truth for the current image scene.',
-        transcript,
-      ),
-    );
+    variableSections.add(transcriptSection(history));
 
     if (features.variables) {
+      variableSections.add(variableDeltaSection(variableHistory));
+      variableSections.add(variablesSection(variables));
       variableSections.add(
-        _tag(
-          'variable_delta',
-          'Unprocessed conversation turns for this run — the ONLY source of variable changes; not an image scene source.',
-          variableHistory.map((m) => '${m.role}: ${m.content}').join('\n'),
-        ),
-      );
-      variableSections.add(
-        _tag(
-          'variables',
-          'Current session variables as JSON. Reuse existing keys with their exact spelling; a key you add that is not listed here creates a new variable.',
-          jsonEncode(variables),
-        ),
-      );
-      final deletable = deletableVariables.toList()..sort();
-      final readonly = readonlyVariables.toList()..sort();
-      variableSections.add(
-        _tag(
-          'variable_access',
-          'Variable permissions for EXISTING keys: "deletable" lists the exact keys you may remove; '
-              '"readonly" keys must never be updated or removed; all other existing keys may be updated '
-              'but never removed. New keys are always allowed and are not restricted here.',
-          jsonEncode({'deletable': deletable, 'readonly': readonly}),
-        ),
+        variableAccessSection(deletableVariables, readonlyVariables),
       );
     }
 
@@ -1007,7 +902,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     final rerun = rerunContext;
     if (rerun != null) {
       variableSections.add(
-        _tag(
+        backgroundTag(
           'rerun_instruction',
           'Rerun context for this run (user-triggered; final instruction, applied after the context above).',
           _rerunInstruction(rerun, features),
@@ -1038,7 +933,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       lines
         ..add('')
         ..add('The user requested this change in direction:')
-        ..add(_truncate(direction, maxRerunDirectionChars))
+        ..add(backgroundTruncate(direction, maxRerunDirectionChars))
         ..add('')
         ..add(
           'Apply it to the fields you emit: when it implies durable state changes, emit matching '
@@ -1052,7 +947,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     final previous = <String>[
       for (final prompt in context.previousImagePrompts)
         if (prompt.trim().isNotEmpty)
-          _truncate(prompt, maxRerunPreviousImageChars),
+          backgroundTruncate(prompt, maxRerunPreviousImageChars),
     ].take(maxRerunPreviousImages).toList();
     if (features.image && previous.isNotEmpty) {
       lines
@@ -1070,51 +965,6 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       );
     }
     return lines.join('\n');
-  }
-
-  /// 段落标签包裹:与主写引擎 ContextAssembler._wrap 同构 ——
-  /// `<标签>说明行\n正文</标签>`,让模型明确分辨设定锚定与对话内容的边界。
-  static String _tag(String tag, String description, String content) =>
-      '<$tag>$description\n$content</$tag>';
-
-  /// 快状态轮的角色卡紧凑形态(只取 Name/Description/Personality/Scenario;
-  /// systemPrompt/示例对话/剧情后注不进锚定段)。
-  static String _compactCharacterText(CharacterCard? character) {
-    final c = character;
-    if (c == null) return '';
-    final text = [
-      if (c.name.isNotEmpty) 'Name: ${c.name}',
-      if (c.description.isNotEmpty) 'Description:\n${c.description}',
-      if (c.personality.isNotEmpty) 'Personality:\n${c.personality}',
-      if (c.scenario.isNotEmpty) 'Scenario:\n${c.scenario}',
-    ].join('\n\n');
-    return _truncate(text, maxBackgroundCharacterChars);
-  }
-
-  /// 后台锚定世界书内容:取用户选定(`background`,状态面板后台agent 区
-  /// 多选)且启用的条目,按 position 排序,**逐条截断**后拼合再套总量兜底。
-  /// 逐条截断是显式语义:用户勾了几条,每条都要真进锚定段(哪怕被夹到
-  /// [maxBackgroundWorldbookEntryChars]),不能让 position 靠后的外貌条目
-  /// 被前面吃光预算整段清零。后台锚定按用户选定,不再按常驻判断;初始化
-  /// 路径(记忆/生图指导)仍按常驻取数,不走此函数。
-  static String _backgroundWorldbookText(
-    List<WorldbookEntry> worldbook,
-    int maxChars,
-  ) {
-    final entries = worldbook.where((e) => e.background && e.enabled).toList()
-      ..sort((a, b) => a.position.compareTo(b.position));
-    if (entries.isEmpty) return '';
-    final joined = entries
-        .map((e) => _truncate(e.content, maxBackgroundWorldbookEntryChars))
-        .join('\n\n');
-    return _truncate(joined, maxChars);
-  }
-
-  /// 截断保开头并加省略标记(锚定段兜底,防超长文本塞满每轮请求)。
-  static String _truncate(String text, int maxChars) {
-    final t = text.trim();
-    if (t.length <= maxChars) return t;
-    return '${t.substring(0, maxChars)}…(超长已截断)';
   }
 
   /// 记忆初始化提示词:只送**角色卡 + 常驻(恒定)世界书**,不含会话转录与其它
@@ -1338,7 +1188,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     if (json == null) {
       final start = t.indexOf('{');
       if (start < 0) return null;
-      // 逐 } 回退候选设上限:重试路径放开 max_tokens 后响应可达数百 KB、数千个 },
+      // 逐 } 回退候选设上限:模型未配置输出上限时响应可达数百 KB、数千个 },
       // 每次尝试是 O(n) 的 substring+jsonDecode 且跑在主 isolate —— 不设上限可
       // 卡顿数秒。合法候选(对象后又追加文本)几乎总在最后几个 } 里。
       var end = t.lastIndexOf('}');

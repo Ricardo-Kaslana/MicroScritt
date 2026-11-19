@@ -5,7 +5,6 @@
 library;
 
 import '../models/backend_config.dart';
-import '../models/endpoint_compat.dart';
 import '../models/llm_provider.dart';
 import 'database.dart';
 
@@ -57,7 +56,6 @@ class LlmProviderRepository {
         'position': c.position,
         'extra_headers': LlmProviderConfig.extraHeadersWire(c.extraHeaders),
         'modern_params': c.modernParams ? 1 : 0,
-        'compat_flags': c.compat.toWire(),
       };
       if (c.id == 0) {
         id = await txn.insert('llm_providers', data);
@@ -151,16 +149,21 @@ class LlmProviderRepository {
 
   BackendConfig _configFromProvider(Map<String, Object?> p, Map<String, Object?> m) {
     final protocol = LlmProtocol.fromWire(p['protocol'] as String);
+    final modelId = m['model_id'] as String;
+    final displayName = (m['display_name'] as String?) ?? '';
     return BackendConfig(
       provider: protocol == LlmProtocol.anthropic ? BackendProvider.anthropic : BackendProvider.openai,
       baseUrl: p['base_url'] as String,
       apiKey: p['api_key'] as String,
-      model: m['model_id'] as String,
+      model: modelId,
+      providerId: (p['provider_id'] as String?) ?? '',
+      providerName: (p['display_name'] as String?) ?? '',
+      modelName: displayName.isEmpty ? modelId : displayName,
       maxTokens: (m['max_output'] as int?),
-      temperature: (m['temperature'] as num?)?.toDouble() ?? 0.7,
+      // 模型配置是温度的唯一定义处;历史行/外部导入缺省时回落模型默认 1.0。
+      temperature: (m['temperature'] as num?)?.toDouble() ?? LlmModelEntry.defaultTemperature,
       extraHeaders: LlmProviderConfig.extraHeadersFromWire(p['extra_headers'] as String?),
       modernParams: (p['modern_params'] as int? ?? 0) != 0,
-      compat: EndpointCompat.fromWire(p['compat_flags'] as String?),
     );
   }
 
@@ -176,7 +179,6 @@ class LlmProviderRepository {
     models: models,
     extraHeaders: LlmProviderConfig.extraHeadersFromWire(r['extra_headers'] as String?),
     modernParams: (r['modern_params'] as int? ?? 0) != 0,
-    compat: EndpointCompat.fromWire(r['compat_flags'] as String?),
   );
 
   LlmModelEntry _modelFromRow(Map<String, Object?> r) => LlmModelEntry(
@@ -186,8 +188,9 @@ class LlmProviderRepository {
     displayName: r['display_name'] as String,
     contextCapacity: (r['context_capacity'] as int?) ?? 0,
     maxOutput: r['max_output'] as int?,
-    // sqflite 对 REAL 列在整值时可能回传 int,统一按 num 兜底再转 double。
-    temperature: (r['temperature'] as num?)?.toDouble(),
+    // sqflite 对 REAL 列在整值时可能回传 int,统一按 num 兜底再转 double;
+    // 历史行/文件导入缺省温度时回落模型默认 1.0(唯一默认值)。
+    temperature: (r['temperature'] as num?)?.toDouble() ?? LlmModelEntry.defaultTemperature,
     isActive: (r['is_active'] as int) != 0,
     position: (r['position'] as int?) ?? 0,
   );

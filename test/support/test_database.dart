@@ -21,7 +21,7 @@ Future<AppDatabase> openTestDb() async {
   for (final s in await scriptRepo.all()) {
     await scriptRepo.delete(s.id!);
   }
-  // v64 起种入的两个内置生图协议插件同样清空,让插件仓储/管理页测试从
+  // 内置生图协议插件同样清空,让插件仓储/管理页测试从
   // "无插件"契约起步;种入本身由 database_open_test 覆盖。
   await db.db.delete('image_plugins');
   return db;

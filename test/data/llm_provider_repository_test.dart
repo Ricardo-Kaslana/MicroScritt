@@ -1,10 +1,9 @@
-// LLM provider/模型仓储:目录往返、活跃切换、兼容选项与模型 id 稳定。
+// LLM provider/模型仓储:目录往返、活跃切换与模型 id 稳定。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/backend_config.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/llm_provider_repository.dart';
 import 'package:microscritt/models/llm_provider.dart';
-import 'package:microscritt/models/endpoint_compat.dart';
 import '../support/test_database.dart';
 
 void main() {
@@ -133,68 +132,6 @@ void main() {
     expect(await repo.loadBackendConfig(), isNull);
   });
 
-  test('compat options round-trip and reach the runtime BackendConfig', () async {
-    await repo.saveProvider(
-      LlmProviderConfig(
-        id: 0,
-        providerId: 'a',
-        displayName: 'A',
-        baseUrl: 'http://a',
-        protocol: LlmProtocol.openaiCompat,
-        apiKey: 'k',
-        isActive: true,
-        compat: const EndpointCompat(replyViaTool: true),
-        models: [model(0, 'm', active: true)],
-      ),
-    );
-
-    final reloaded = (await repo.all()).single;
-    expect(reloaded.compat.replyViaTool, isTrue);
-    expect((await repo.loadBackendConfig())!.compat.replyViaTool, isTrue);
-
-    // 关掉后写回:全关落空串(与列默认值一致)。
-    await repo.saveProvider(reloaded.copyWith(compat: EndpointCompat.standard));
-    expect((await repo.all()).single.compat.isStandard, isTrue);
-  });
-
-  test('corrupt compat_flags wire falls back to standard instead of crashing load', () async {
-    // 启动即水合 provider 行,坏值抛错会炸掉整个 App —— 与 extra_headers
-    // 同一条 fail-safe 家规。
-    await repo.saveProvider(
-      LlmProviderConfig(
-        id: 0,
-        providerId: 'a',
-        displayName: 'A',
-        baseUrl: 'http://a',
-        protocol: LlmProtocol.openaiCompat,
-        apiKey: 'k',
-        models: [model(0, 'm1')],
-      ),
-    );
-    final id = (await repo.all()).single.id;
-    await db.db.update('llm_providers', {'compat_flags': '{not json'}, where: 'id = ?', whereArgs: [id]);
-
-    final loaded = (await repo.all()).single;
-    expect(loaded.compat.isStandard, isTrue);
-  });
-
-  test('compat flags wire codec tolerates garbage', () {
-    expect(EndpointCompat.fromWire(null).isStandard, isTrue);
-    expect(EndpointCompat.fromWire('').isStandard, isTrue);
-    expect(EndpointCompat.fromWire('{broken').isStandard, isTrue);
-    expect(EndpointCompat.fromWire('[]').isStandard, isTrue);
-    // 旧版本写入的 requiredTools 键按未知字段忽略。
-    expect(EndpointCompat.fromWire('{"requiredTools":true}').isStandard, isTrue);
-    expect(EndpointCompat.fromWire('{"requiredTools":false}').isStandard, isTrue);
-    expect(EndpointCompat.standard.toWire(), '');
-    expect(const EndpointCompat(replyViaTool: true).toWire(), '{"replyViaTool":true}');
-    expect(const EndpointCompat(noncePrefix: true).toWire(), '{"noncePrefix":true}');
-    expect(
-      EndpointCompat.fromWire('{"requiredTools":true,"replyViaTool":true,"noncePrefix":true}'),
-      const EndpointCompat(replyViaTool: true, noncePrefix: true),
-    );
-  });
-
   test('deleting a provider removes it and its models', () async {
     var id = 0;
     await repo.saveProvider(
@@ -257,7 +194,7 @@ void main() {
   });
 
   test('per-model temperature round-trips through BackendConfig (EZ v56)', () async {
-    // 每模型 temperature:显式设置 → BackendConfig 拿到该值;留空 → 主写默认 0.7。
+    // 每模型 temperature:显式设置 → BackendConfig 拿到该值;未设置 → 模型默认 1。
     await repo.saveProvider(
       LlmProviderConfig(
         id: 0,
@@ -281,15 +218,15 @@ void main() {
     );
     final p = (await repo.all()).single;
     expect(p.models.firstWhere((m) => m.modelId == 'creative').temperature, 1.2);
-    expect(p.models.firstWhere((m) => m.modelId == 'defaulted').temperature, isNull);
+    expect(p.models.firstWhere((m) => m.modelId == 'defaulted').temperature, 1.0);
 
     // 主写走 loadBackendConfig(取 active provider + active model) → 用当次选中模型的 temperature。
     final main = await repo.loadBackendConfig();
     expect(main!.temperature, 1.2);
-    // 后台经 loadConfigForModel 解析到"未设"模型 → BackendConfig 兜底 0.7。
+    // 后台经 loadConfigForModel 解析到"未设"模型 → 模型默认 1。
     final defModel = p.models.firstWhere((m) => m.modelId == 'defaulted');
     final def = await repo.loadConfigForModel(defModel.id);
-    expect(def!.temperature, 0.7);
+    expect(def!.temperature, 1.0);
     // 显式设过温度的模型走 loadConfigForModel 时透传原值(与主写口径一致)。
     final creModel = p.models.firstWhere((m) => m.modelId == 'creative');
     final cre = await repo.loadConfigForModel(creModel.id);

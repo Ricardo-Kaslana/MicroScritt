@@ -19,11 +19,17 @@ import '../data/message_repository.dart';
 import '../data/variable_repository.dart';
 import '../models/app_settings.dart';
 import '../models/character_card.dart';
+import '../models/image_guide.dart';
 import '../models/image_result.dart';
+import '../models/llm_provider.dart';
+import '../models/memory.dart';
 import '../models/message.dart';
 import '../models/token_usage.dart';
 import '../models/variable.dart';
 import '../models/worldbook_entry.dart';
+import 'agent/agent_events.dart';
+import 'agent/agent_runner.dart';
+import 'background_agent.dart';
 import 'background_engine.dart';
 
 /// 编排器一轮后台维护的结果。
@@ -140,6 +146,23 @@ typedef BackgroundImagePlacement = ({
 /// 后台重跑时"原地替换"的目标:消息 id + 该行当前的生图描述(条件更新的并发保护)。
 typedef ImageReplaceTarget = ({int messageId, String expectedPrompt});
 
+/// 一轮维护的候选窗口(legacy 与 agentic 共用同一份构建):增量批/功能裁剪/
+/// 快照/锚定输入/参考消息/技能剥离/权限集。maxSeq 供 agentic 的 readHistory
+/// 在调用方未给 throughSeq 时兜底 clamp。
+typedef _PreparedWindow = ({
+  List<Message> batch,
+  bool hasMore,
+  BackgroundFeatures runFeatures,
+  ({Map<String, String> values, Map<String, VariableAccess> access, int revision}) snapshot,
+  List<ImageGuide> guideList,
+  List<Memory> memoryRows,
+  List<Message> reference,
+  List<Message> Function(List<Message>) strip,
+  Set<String> deletableVariables,
+  Set<String> readonlyVariables,
+  int maxSeq,
+});
+
 /// 编排器:主写引擎产出后驱动后台引擎做一次**快状态**维护(变量/生图)。
 ///
 /// 读取候选(当前变量 / 最近对话增量 + 会话生图指导)→ 后台引擎 → 落库。
@@ -207,8 +230,9 @@ class Orchestrator {
   ///   不静默删除用户可见的消息行。
   ///
   /// [afterSeq]/[throughSeq] 限定本轮重放窗口(变量增量游标);
-  /// [temperature]/[maxTokens]/[reasoningLevel]/[tier] 只影响后台请求,
-  /// 与主写设置解耦。
+  /// [temperature] 为本次后台所用模型配置的采样温度(与主写同源:后台专用
+  /// 模型取它自己的配置),编排器与引擎都不另设默认或夹取;[maxTokens] 即
+  /// 模型配置的「最大输出 tokens」,后台不另设档位。
   Future<BackgroundTurnResult> runAfterTurn({
     required int sessionId,
     required String model,
@@ -216,15 +240,12 @@ class Orchestrator {
     bool confirmVariableDeletions = false,
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
 
     /// 后台请求的推理强度(独立于主对话的设置):openai 兼容端点映射
     /// reasoning_effort,anthropic 映射 thinking 预算;默认 off 不发送。
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-
-    /// 输出上限档位:透传给后台引擎,决定首试请求的 max_tokens。
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
     int? afterSeq,
     int? throughSeq,
     int imageCount = 1,
@@ -241,6 +262,14 @@ class Orchestrator {
     /// 非 null 表示这次是 `/rerun`:后台提示词据此告知模型并携带用户方向/
     /// 上一轮图片描述。普通维护不传。
     RerunContext? rerunContext,
+
+    /// 运行模式:legacy 单发(默认,零行为变化)/ agentic 多步工具循环。
+    /// hybrid 的每轮维护仍按 legacy 跑;周期审计是控制器另行发起的独立
+    /// [runAudit] 入口(不经此 mode 分流)。设置项与控制器接线 P3,审计 P4。
+    BackgroundMode mode = BackgroundMode.legacy,
+
+    /// agentic 每逻辑步回调(用量明细 + 进度文案的数据源);legacy 不触发。
+    void Function(AgentStepEvent)? onAgentStep,
   }) async {
     if (shouldCancel?.call() ?? false) {
       return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
@@ -315,6 +344,39 @@ class Orchestrator {
       for (final entry in snapshot.access.entries)
         if (entry.value == VariableAccess.readonly) entry.key,
     };
+    if (mode == BackgroundMode.agentic) {
+      return _runAgenticTurn(
+        sessionId: sessionId,
+        model: model,
+        window: (
+          batch: batch,
+          hasMore: hasMore,
+          runFeatures: runFeatures,
+          snapshot: snapshot,
+          guideList: guideList,
+          memoryRows: memoryRows,
+          reference: reference,
+          strip: strip,
+          deletableVariables: deletableVariables,
+          readonlyVariables: readonlyVariables,
+          maxSeq: conversation.last.seq,
+        ),
+        throughSeq: throughSeq,
+        confirmVariableDeletions: confirmVariableDeletions,
+        shouldCancel: shouldCancel,
+        cancelSignal: cancelSignal,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        reasoningLevel: reasoningLevel,
+        imageCount: imageCount,
+        stripSkillNames: stripSkillNames,
+        character: characterAnchor ? character : null,
+        worldbook: worldbook,
+        imageReplaceTargets: imageReplaceTargets,
+        rerunContext: rerunContext,
+        onAgentStep: onAgentStep,
+      );
+    }
     final outcome = await engine.run(
       model: model,
       variables: snapshot.values,
@@ -328,7 +390,6 @@ class Orchestrator {
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
-      tier: tier,
       imageCount: imageCount,
       imageGuide: guideList.isEmpty ? null : guideList.first.content,
       memory: memoryRows.isEmpty
@@ -363,6 +424,7 @@ class Orchestrator {
       // 下只生成提案的删除,都不能在摘要里冒充"已应用"。
       result = BackgroundResult(
         variableUpdates: applied.updates,
+        addedVariables: _countAdditions(snapshot.values, applied.updates),
         variableRemovals: applied.removals,
         variableRemovalProposals: applied.proposedRemovals,
         imagePrompt: result.imagePrompt,
@@ -392,7 +454,6 @@ class Orchestrator {
         temperature: temperature,
         maxTokens: maxTokens,
         reasoningLevel: reasoningLevel,
-        tier: tier,
         imageCount: imageCount,
         imageGuide: guideList.isEmpty ? null : guideList.first.content,
         memory: memoryRows.isEmpty
@@ -409,6 +470,7 @@ class Orchestrator {
           prompts = retriedPrompts;
           result = BackgroundResult(
             variableUpdates: result.variableUpdates,
+            addedVariables: result.addedVariables,
             variableRemovals: result.variableRemovals,
             variableRemovalProposals: result.variableRemovalProposals,
             imagePrompt: retried.imagePrompt,
@@ -445,6 +507,260 @@ class Orchestrator {
     );
   }
 
+  /// agentic 路径:与 legacy 同一份候选窗口 → 维护 profile 多步循环 →
+  /// 原 compareAndApply 一次原子提交 → 复用生图拆分任务。暂存只在内存,
+  /// 失败/取消/护栏全丢弃;返回形状与 legacy 同构,控制器游标/待处理合并/
+  /// `/rerun` 窗口逻辑零改。不做 image-only 补调:agent 拥有 setImagePrompts
+  /// 工具,finish 未给描述即本轮不生图(机会保留后续轮),也避免混模式的
+  /// 轮级用量行与逐步入账冲突。
+  Future<BackgroundTurnResult> _runAgenticTurn({
+    required int sessionId,
+    required String model,
+    required _PreparedWindow window,
+    required bool confirmVariableDeletions,
+    int? throughSeq,
+    bool Function()? shouldCancel,
+    Future<void>? cancelSignal,
+    double temperature = LlmModelEntry.defaultTemperature,
+    int? maxTokens,
+    ReasoningLevel reasoningLevel = ReasoningLevel.off,
+    int imageCount = 1,
+    Set<String> stripSkillNames = const {},
+    CharacterCard? character,
+    List<WorldbookEntry> worldbook = const [],
+    List<ImageReplaceTarget> imageReplaceTargets = const [],
+    RerunContext? rerunContext,
+    void Function(AgentStepEvent)? onAgentStep,
+  }) async {
+    final batch = window.batch;
+    final hasMore = window.hasMore;
+    final runFeatures = window.runFeatures;
+    final snapshot = window.snapshot;
+    final guideList = window.guideList;
+    final memoryRows = window.memoryRows;
+    final reference = window.reference;
+    final strip = window.strip;
+    final maxSeq = window.maxSeq;
+
+    // 读历史只读回调:绑定本会话 + clamp 到本轮窗口上界(throughSeq 缺省
+    // 用全会话最大 seq),技能 token 与主上下文同样剥离。内核不 import data
+    // 层 —— 读库经此注入闭包。
+    Future<List<Message>> readHistory({int? beforeSeq, required int limit}) {
+      final cap = (throughSeq ?? maxSeq) + 1;
+      final before = beforeSeq == null || beforeSeq > cap ? cap : beforeSeq;
+      return messages
+          .bySessionPageBefore(sessionId, beforeSeq: before, limit: limit)
+          .then(strip);
+    }
+
+    final built = MaintenanceProfile.build(
+      backend: engine.backend,
+      model: model,
+      variables: snapshot.values,
+      access: snapshot.access,
+      history: strip(reference),
+      variableHistory: strip(batch),
+      features: runFeatures,
+      imageCount: imageCount,
+      imageGuide: guideList.isEmpty ? null : guideList.first.content,
+      memory: memoryRows.isEmpty
+          ? null
+          : memoryRows.map((m) => m.content).join('\n'),
+      character: character,
+      worldbook: worldbook,
+      rerunContext: rerunContext,
+      readHistory: readHistory,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      reasoningLevel: reasoningLevel,
+      shouldCancel: shouldCancel,
+      cancelSignal: cancelSignal,
+      onStep: onAgentStep,
+    );
+    final outcome = await AgentRunner.run(built.spec);
+    if (outcome is AgentRunFailure) {
+      final reason = switch (outcome.reason) {
+        AgentFailureReason.cancelled => BackgroundFailureReason.cancelled,
+        AgentFailureReason.backendError => BackgroundFailureReason.backendError,
+        AgentFailureReason.guardrail => BackgroundFailureReason.parseFailure,
+      };
+      return BackgroundTurnResult.failed(reason, outcome.detail);
+    }
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+    }
+    final staging = built.staging;
+    var result = BackgroundResult(
+      variableUpdates: staging.updates,
+      variableRemovals: staging.removals,
+      imagePrompts: staging.imagePrompts,
+      usage: (outcome as AgentRunSuccess).totalUsage,
+    );
+    if (runFeatures.variables) {
+      final applied = await variables.compareAndApply(
+        sessionId,
+        expectedRevision: snapshot.revision,
+        updates: staging.updates,
+        removals: staging.removals,
+        confirmRemovals: confirmVariableDeletions,
+        shouldCancel: shouldCancel,
+      );
+      if (!applied.applied) {
+        return (shouldCancel?.call() ?? false)
+            ? BackgroundTurnResult.failed(BackgroundFailureReason.cancelled)
+            : BackgroundTurnResult.conflict();
+      }
+      // 摘要与落库结果一致:权限拒绝/超限/严格提案不得冒充"已应用"。
+      result = BackgroundResult(
+        variableUpdates: applied.updates,
+        addedVariables: _countAdditions(snapshot.values, applied.updates),
+        variableRemovals: applied.removals,
+        variableRemovalProposals: applied.proposedRemovals,
+        imagePrompts: staging.imagePrompts,
+        usage: result.usage,
+      );
+    }
+    final prompts = staging.imagePrompts ?? const <String>[];
+    final backend = imageBackend;
+    final imageTask = backend != null && runFeatures.image && prompts.isNotEmpty
+        ? _generateImage(
+            sessionId,
+            prompts,
+            backend,
+            replaceTargets: imageReplaceTargets,
+          )
+        : null;
+    return BackgroundTurnResult.applied(
+      result,
+      cursorSeq: runFeatures.variables ? batch.last.seq : null,
+      hasMoreVariables: hasMore,
+      processedAfterSeq: runFeatures.variables ? batch.first.seq - 1 : null,
+      processedThroughSeq: runFeatures.variables ? batch.last.seq : null,
+      imageHandled: imageTask != null,
+      imageTask: imageTask,
+    );
+  }
+
+  /// 变量板审计(hybrid 周期):独立于 delta 维护的一次 agent 轮。读全量变量板
+  /// + 权限 + 最近 [AuditProfile.maxAuditHistoryMessages] 条宽历史窗取证,经审计
+  /// profile 多步合并近义键/修剪陈旧事实/修正矛盾,finish 后走原 compareAndApply
+  /// 一次原子提交。**不推进 delta 游标、不生图、不消费增量** —— 返回的 cursorSeq
+  /// 恒 null,调用方据此与正常维护轮区分。空板/空对话良性跳过(省一次 LLM 调用);
+  /// 失败/冲突 best-effort,只进状态面板。宽窗含压缩行(陈旧事实证据常在已压缩段)。
+  Future<BackgroundTurnResult> runAudit({
+    required int sessionId,
+    required String model,
+    bool confirmVariableDeletions = false,
+    bool Function()? shouldCancel,
+    Future<void>? cancelSignal,
+    double temperature = LlmModelEntry.defaultTemperature,
+    int? maxTokens,
+    ReasoningLevel reasoningLevel = ReasoningLevel.off,
+    int? throughSeq,
+    Set<String> stripSkillNames = const {},
+    void Function(AgentStepEvent)? onAgentStep,
+  }) async {
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+    }
+    final allMessages = await messages.bySession(sessionId);
+    final conversation = allMessages
+        .where(
+          (m) =>
+              m.isChat &&
+              m.role != 'system' &&
+              m.content.isNotEmpty &&
+              (throughSeq == null || m.seq <= throughSeq),
+        )
+        .toList();
+    if (conversation.isEmpty) {
+      return BackgroundTurnResult.skipped('无对话可审计,审计已跳过');
+    }
+    final snapshot = await variables.snapshot(sessionId);
+    if (snapshot.values.isEmpty) {
+      return BackgroundTurnResult.skipped('变量板为空,审计已跳过');
+    }
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+    }
+    final history = _trim(conversation, AuditProfile.maxAuditHistoryMessages);
+    List<Message> strip(List<Message> rows) => [
+      for (final m in rows)
+        m.copyWith(
+          content: ContextAssembler.withoutSkillTokens(
+            m.content,
+            stripSkillNames,
+          ),
+        ),
+    ];
+    final maxSeq = conversation.last.seq;
+    // 读历史只读回调:绑定本会话 + clamp 到审计窗上界(同 _runAgenticTurn)。
+    Future<List<Message>> readHistory({int? beforeSeq, required int limit}) {
+      final cap = (throughSeq ?? maxSeq) + 1;
+      final before = beforeSeq == null || beforeSeq > cap ? cap : beforeSeq;
+      return messages
+          .bySessionPageBefore(sessionId, beforeSeq: before, limit: limit)
+          .then(strip);
+    }
+
+    final built = AuditProfile.build(
+      backend: engine.backend,
+      model: model,
+      variables: snapshot.values,
+      access: snapshot.access,
+      history: strip(history),
+      readHistory: readHistory,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      reasoningLevel: reasoningLevel,
+      shouldCancel: shouldCancel,
+      cancelSignal: cancelSignal,
+      onStep: onAgentStep,
+    );
+    final outcome = await AgentRunner.run(built.spec);
+    if (outcome is AgentRunFailure) {
+      final reason = switch (outcome.reason) {
+        AgentFailureReason.cancelled => BackgroundFailureReason.cancelled,
+        AgentFailureReason.backendError => BackgroundFailureReason.backendError,
+        AgentFailureReason.guardrail => BackgroundFailureReason.parseFailure,
+      };
+      return BackgroundTurnResult.failed(reason, outcome.detail);
+    }
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+    }
+    final staging = built.staging;
+    final applied = await variables.compareAndApply(
+      sessionId,
+      expectedRevision: snapshot.revision,
+      updates: staging.updates,
+      removals: staging.removals,
+      confirmRemovals: confirmVariableDeletions,
+      shouldCancel: shouldCancel,
+    );
+    if (!applied.applied) {
+      return (shouldCancel?.call() ?? false)
+          ? BackgroundTurnResult.failed(BackgroundFailureReason.cancelled)
+          : BackgroundTurnResult.conflict();
+    }
+    // 摘要与落库结果一致:权限拒绝/超限/严格提案不得冒充"已应用"。
+    final result = BackgroundResult(
+      variableUpdates: applied.updates,
+      addedVariables: _countAdditions(snapshot.values, applied.updates),
+      variableRemovals: applied.removals,
+      variableRemovalProposals: applied.proposedRemovals,
+      usage: (outcome as AgentRunSuccess).totalUsage,
+    );
+    return BackgroundTurnResult.applied(result);
+  }
+
+  /// 落库更新中相对 CAS 基线新出现的键数:compareAndApply 成功即证明基线
+  /// 未被并发改写,基线里没有的键就是本轮新建。供灵动岛区分「新增/修改」。
+  static int _countAdditions(
+    Map<String, String> baseline,
+    Map<String, String> updates,
+  ) => updates.keys.where((key) => !baseline.containsKey(key)).length;
+
   /// 结果里的图像描述:优先多描述数组,回退单描述;都没有时为空列表。
   static List<String> _imagePrompts(BackgroundResult result) =>
       result.imagePrompts ??
@@ -464,10 +780,9 @@ class Orchestrator {
     List<WorldbookEntry> worldbook = const [],
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
   }) async {
     final outcome = await engine.runMemoryInit(
       model: model,
@@ -478,7 +793,6 @@ class Orchestrator {
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
-      tier: tier,
     );
     if (outcome is BackgroundRunFailure) {
       return BackgroundTurnResult.failed(outcome.reason, outcome.detail);
@@ -507,10 +821,9 @@ class Orchestrator {
     List<WorldbookEntry> worldbook = const [],
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
     Set<String> stripSkillNames = const {},
   }) async {
     final (allMessages, currentMemories) = await (
@@ -540,7 +853,6 @@ class Orchestrator {
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
-      tier: tier,
     );
     if (outcome is BackgroundRunFailure) {
       return BackgroundTurnResult.failed(outcome.reason, outcome.detail);
@@ -566,10 +878,9 @@ class Orchestrator {
     List<WorldbookEntry> worldbook = const [],
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
-    double? temperature,
+    double temperature = LlmModelEntry.defaultTemperature,
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
-    BackgroundOutputTier tier = BackgroundOutputTier.standard,
   }) async {
     final outcome = await engine.runImageGuideInit(
       model: model,
@@ -580,7 +891,6 @@ class Orchestrator {
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
-      tier: tier,
     );
     if (outcome is BackgroundRunFailure) {
       return BackgroundTurnResult.failed(outcome.reason, outcome.detail);

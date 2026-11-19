@@ -88,8 +88,15 @@ class Win32Window {
   // Retrieves a class instance pointer for |window|
   static Win32Window* GetThisFromHandle(HWND const window) noexcept;
 
-  // Update the window frame's theme to match the system theme.
-  static void UpdateTheme(HWND const window);
+  // Update the window frame's theme and title-bar icon to match the system
+  // theme.
+  void UpdateTheme(HWND const window);
+
+  // Swap the title-bar (ICON_SMALL) icon to the capsule variant matching the
+  // system theme, and pin ICON_BIG back to the app icon. Windows 11 lets the
+  // taskbar fall back to ICON_SMALL when ICON_BIG is unset, so both must be
+  // set to keep the taskbar and Alt+Tab on the app icon.
+  void UpdateWindowIcons(HWND const window, bool dark);
 
   bool quit_on_close_ = false;
 
@@ -98,6 +105,13 @@ class Win32Window {
 
   // window handle for hosted content.
   HWND child_content_ = nullptr;
+
+  // Title-bar icon we loaded ourselves; must be destroyed with the window.
+  HICON title_icon_ = nullptr;
+
+  // Taskbar/Alt+Tab icon. Windows 11 lets the taskbar prefer ICON_SMALL when
+  // ICON_BIG is unset, so it is pinned back to the app icon explicitly.
+  HICON app_icon_ = nullptr;
 };
 
 #endif  // RUNNER_WIN32_WINDOW_H_

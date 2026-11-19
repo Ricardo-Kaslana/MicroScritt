@@ -4,7 +4,7 @@
 /// 设置页选择风格时回填 artist/sampler/噪声调度/scale/cfg/negative 并随
 /// 配置落库,不再单独展开这些输入框。
 ///
-/// 采样器与噪声调度取对话式网关/Nai2API 支持的常用值:采样器 k_euler /
+/// 采样器与噪声调度取内置协议插件支持的常用值:采样器 k_euler /
 /// k_euler_ancestral / k_dpmpp_2m / k_dpmpp_2m_sde 等;噪声调度 native /
 /// karras / exponential。scale 取 5–7,cfg 取 0–2(可带小数,如 0.5)。
 ///

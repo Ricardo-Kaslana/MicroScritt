@@ -9,8 +9,6 @@ library;
 
 import 'dart:convert';
 
-import 'endpoint_compat.dart';
-
 /// API 协议。决定用哪套 wire(factory 据此路由到具体后端实现)。
 ///
 /// - `openaiCompat`:OpenAI 兼容(`{base}/chat/completions` + `Authorization: Bearer`)。
@@ -47,13 +45,19 @@ extension LlmProtocolX on LlmProtocol {
 
 /// 一个 provider 下的模型条目(模型目录中的一项)。
 class LlmModelEntry {
+  /// 模型未单独配置时的默认采样温度。
+  ///
+  /// 这是运行链路温度的**唯一默认值**:主写、压缩、后台维护、agent 与
+  /// 测试连接都只透传模型配置解析出的温度,不允许各请求路径另设默认或夹取。
+  static const double defaultTemperature = 1.0;
+
   /// 库内自增 id;0 表示尚未落库。
   final int id;
 
   /// 所属 provider 的库内 id。
   final int providerId;
 
-  /// 发送给 API 的模型标识(如 `deepseek-chat`)。
+  /// 发送给 API 的模型标识(如 `deepseek-flash`)。
   final String modelId;
 
   /// 设置页展示名;空时回退 [modelId]。
@@ -65,8 +69,11 @@ class LlmModelEntry {
   /// 最大输出 tokens;空表示用后端/协议默认值。
   final int? maxOutput;
 
-  /// 采样温度(0–2);空表示用主写引擎默认值(0.7)。
-  final double? temperature;
+  /// 采样温度(0–2),默认 [defaultTemperature]。
+  ///
+  /// 该模型全部请求的温度都只来自这里(含主写、压缩、后台与测试连接),
+  /// 任何请求路径都不得另设默认值、夹取或改写。
+  final double temperature;
 
   /// 是否为该 provider 当前选中的模型。
   final bool isActive;
@@ -81,7 +88,7 @@ class LlmModelEntry {
     required this.displayName,
     required this.contextCapacity,
     this.maxOutput,
-    this.temperature,
+    this.temperature = defaultTemperature,
     this.isActive = false,
     this.position = 0,
   });
@@ -93,7 +100,7 @@ class LlmModelEntry {
     String? displayName,
     int? contextCapacity,
     int? Function()? maxOutput,
-    double? Function()? temperature,
+    double? temperature,
     bool? isActive,
     int? position,
   }) => LlmModelEntry(
@@ -103,7 +110,7 @@ class LlmModelEntry {
     displayName: displayName ?? this.displayName,
     contextCapacity: contextCapacity ?? this.contextCapacity,
     maxOutput: maxOutput != null ? maxOutput() : this.maxOutput,
-    temperature: temperature != null ? temperature() : this.temperature,
+    temperature: temperature ?? this.temperature,
     isActive: isActive ?? this.isActive,
     position: position ?? this.position,
   );
@@ -143,16 +150,12 @@ class LlmProviderConfig {
   final Map<String, String> extraHeaders;
 
   /// 官方 OpenAI 参数风格(v47):开启后 OpenAI 兼容后端改发
-  /// `max_completion_tokens`(o 系列等推理模型只认它,`max_tokens` 直接 400)
-  /// 并携带 `stream_options: {include_usage: true}`(官方端点流式默认不带
-  /// usage,不开则用量统计恒为零)。部分劣质网关会对未知字段回 400,故默认
-  /// 关闭、由用户按端点显式开启。
+  /// `max_completion_tokens`(o 系列与 GPT-5 等推理模型只认它,`max_tokens`
+  /// 会被拒绝;旧模型仍接受 `max_tokens`)并携带
+  /// `stream_options: {include_usage: true}`(官方端点流式默认不带 usage,
+  /// 不开则用量统计恒为零)。部分劣质网关会对未知字段回 400,故默认关闭、
+  /// 由用户按端点显式开启。
   final bool modernParams;
-
-  /// 端点兼容选项:replyViaTool(回复经工具参数通道输出)/ noncePrefix
-  /// (提示词随机前缀,使每轮请求字节不同)。按 provider 声明式配置,怪癖
-  /// 只进配置不焊代码路径 —— 上游契约变更时在设置页开关,不改源码发版。
-  final EndpointCompat compat;
 
   const LlmProviderConfig({
     required this.id,
@@ -166,7 +169,6 @@ class LlmProviderConfig {
     this.models = const [],
     this.extraHeaders = const {},
     this.modernParams = false,
-    this.compat = EndpointCompat.standard,
   });
 
   /// 当前选中的模型;目录空或没有选中项时取第一个。
@@ -189,7 +191,6 @@ class LlmProviderConfig {
     List<LlmModelEntry>? models,
     Map<String, String>? extraHeaders,
     bool? modernParams,
-    EndpointCompat? compat,
   }) => LlmProviderConfig(
     id: id ?? this.id,
     providerId: providerId ?? this.providerId,
@@ -202,7 +203,6 @@ class LlmProviderConfig {
     models: models ?? this.models,
     extraHeaders: extraHeaders ?? this.extraHeaders,
     modernParams: modernParams ?? this.modernParams,
-    compat: compat ?? this.compat,
   );
 
   /// 自定义请求头归一化:键 trim + 小写(dart:io 发送时本就不区分大小写,

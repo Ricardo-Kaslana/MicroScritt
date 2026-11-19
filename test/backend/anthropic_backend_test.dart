@@ -8,8 +8,12 @@ import 'package:http/testing.dart';
 import 'package:microscritt/models/backend_config.dart';
 import 'package:microscritt/backend/backend_factory.dart';
 import 'package:microscritt/backend/llm_backend.dart';
+import 'package:microscritt/backend/upstream_error.dart';
 import 'package:microscritt/models/app_settings.dart';
 import 'package:microscritt/models/chat_message.dart';
+
+/// 测试统一的模型级「最大输出 tokens」:Anthropic 协议必填,由模型配置提供。
+const int testMaxTokens = 4096;
 
 void main() {
   test('streams text deltas from Anthropic SSE with system field', () async {
@@ -36,6 +40,7 @@ void main() {
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
+        maxTokens: testMaxTokens,
       ),
       client: client,
     );
@@ -72,6 +77,7 @@ void main() {
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
+        maxTokens: testMaxTokens,
         extraHeaders: {'origin': 'https://example.com'},
       ),
       client: client,
@@ -119,6 +125,7 @@ void main() {
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
+        maxTokens: testMaxTokens,
       ),
       client: client,
     );
@@ -159,6 +166,7 @@ void main() {
           baseUrl: 'https://x',
           apiKey: 'k',
           model: 'm',
+          maxTokens: testMaxTokens,
         ),
         client: client,
       );
@@ -169,6 +177,7 @@ void main() {
               model: 'm',
               systemPrompt: 'sys',
               messages: [ChatMessage(ChatRole.user, 'hi')],
+              temperature: 1,
             ),
           )
           .toList();
@@ -184,6 +193,7 @@ void main() {
           baseUrl: 'https://x',
           apiKey: 'k',
           model: 'm',
+          maxTokens: testMaxTokens,
         ),
         client: cacheClient,
       );
@@ -197,6 +207,7 @@ void main() {
                 ChatMessage(ChatRole.assistant, 'world'),
               ],
               cacheContext: true,
+              temperature: 1,
             ),
           )
           .toList();
@@ -234,6 +245,7 @@ void main() {
           baseUrl: 'https://x',
           apiKey: 'k',
           model: 'm',
+          maxTokens: testMaxTokens,
         ),
         client: cacheClient,
       );
@@ -246,6 +258,7 @@ void main() {
               cacheContext: true,
               stableSystemPart: 'stable part',
               variableSystemPart: 'variable part',
+              temperature: 1,
             ),
           )
           .toList();
@@ -280,6 +293,7 @@ void main() {
           baseUrl: 'https://x',
           apiKey: 'k',
           model: 'm',
+          maxTokens: testMaxTokens,
         ),
         client: client,
       );
@@ -293,6 +307,7 @@ void main() {
               cacheMessageBreakpoint: false,
               stableSystemPart: 'stable part',
               variableSystemPart: 'variable part',
+              temperature: 1,
             ),
           )
           .toList();
@@ -328,6 +343,7 @@ void main() {
           baseUrl: 'https://x',
           apiKey: 'k',
           model: 'm',
+          maxTokens: testMaxTokens,
         ),
         client: cacheClient,
       );
@@ -343,6 +359,7 @@ void main() {
               ],
               cacheContext: true,
               stableSystemPart: 'stable part',
+              temperature: 1,
             ),
           )
           .toList();
@@ -377,6 +394,7 @@ void main() {
           baseUrl: 'https://x',
           apiKey: 'k',
           model: 'm',
+          maxTokens: testMaxTokens,
         ),
         client: cacheClient,
       );
@@ -388,6 +406,7 @@ void main() {
               systemPrompt: 'sys',
               messages: [ChatMessage(ChatRole.user, 'hi')],
               cacheContext: true,
+              temperature: 1,
             ),
           )
           .toList();
@@ -409,6 +428,7 @@ void main() {
           baseUrl: 'https://x',
           apiKey: 'k',
           model: 'm',
+          maxTokens: testMaxTokens,
         ),
         client: cacheClient,
       );
@@ -421,6 +441,7 @@ void main() {
               cacheContext: true,
               stableSystemPart: 'stable part',
               variableSystemPart: '',
+              temperature: 1,
             ),
           )
           .toList();
@@ -441,6 +462,7 @@ void main() {
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
+        maxTokens: testMaxTokens,
       ),
       client: client,
     );
@@ -450,6 +472,7 @@ void main() {
             model: 'm',
             systemPrompt: 'sys',
             messages: [ChatMessage(ChatRole.user, 'hi')],
+            temperature: 1,
           ),
         )
         .toList();
@@ -468,6 +491,7 @@ void main() {
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
+        maxTokens: testMaxTokens,
       ),
       client: client,
     );
@@ -480,6 +504,7 @@ void main() {
             reasoningLevel: ReasoningLevel.high,
             // 显式给出能容纳 high 档(30000)预算的输出上限。
             maxTokens: 40000,
+            temperature: 1,
           ),
         )
         .toList();
@@ -487,10 +512,39 @@ void main() {
     expect(body['max_tokens'], 40000);
   });
 
+  test('missing max output tokens fails fast with a configuration error', () async {
+    // Anthropic 的 max_tokens 必填;模型配置与请求都未给时不猜测兜底值,
+    // 本地直接返回配置错误,且不发网络请求。
+    var requests = 0;
+    final backend = createBackend(
+      const BackendConfig(
+        provider: BackendProvider.anthropic,
+        baseUrl: 'https://x',
+        apiKey: 'k',
+        model: 'm',
+      ),
+      client: MockClient((req) async {
+        requests++;
+        return http.Response.bytes(utf8.encode(''), 200);
+      }),
+    );
+    final events = await backend
+        .generate(const LlmRequest(
+          model: 'm',
+          systemPrompt: 'sys',
+          messages: [ChatMessage(ChatRole.user, 'hi')],
+          temperature: 1,
+        ))
+        .toList();
+    final error = events.single as ErrorEvent;
+    expect(error.kind, UpstreamErrorKind.configuration);
+    expect(error.message, contains('最大输出 tokens'));
+    expect(requests, 0, reason: '配置缺失属本地错误,不应发网络请求');
+  });
+
   test('thinking clamps budget to max_tokens and omits temperature (API hard constraints)', () async {
     // API 硬性约束:max_tokens 必须 > budget_tokens(≥1024),且开启 thinking
-    // 时不得携带 temperature —— 修复前默认 max_tokens=1024 携带 medium 档
-    // (10000)预算 + temperature,组合几乎必被 400 拒绝。
+    // 时不得携带 temperature;上限不足时把 budget 收缩到 max_tokens − 1024。
     late Map<String, dynamic> body;
     final client = MockClient((req) async {
       body = jsonDecode(req.body) as Map<String, dynamic>;
@@ -502,11 +556,12 @@ void main() {
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
+        maxTokens: testMaxTokens,
       ),
       client: client,
     );
 
-    // ① 默认/小 max_tokens:预算收缩到最低档,max_tokens 抬高到能容纳它。
+    // ① 请求未带上限时使用模型配置的 4096:medium 档(10000)预算收缩到 3072。
     await backend.generate(const LlmRequest(
       model: 'm',
       systemPrompt: 'sys',
@@ -514,23 +569,36 @@ void main() {
       reasoningLevel: ReasoningLevel.medium,
       temperature: 0.7,
     )).toList();
-    expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 1024});
-    expect(body['max_tokens'], 2048);
+    expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 3072});
+    expect(body['max_tokens'], testMaxTokens);
     expect(body.containsKey('temperature'), isFalse);
 
-    // ② 中等 max_tokens:预算收缩到 max_tokens − 1024,上限不动。
+    // ② 极小 max_tokens(2048):预算收缩到最低档 1024,上限不动。
+    await backend.generate(const LlmRequest(
+      model: 'm',
+      systemPrompt: 'sys',
+      messages: [ChatMessage(ChatRole.user, 'hi')],
+      reasoningLevel: ReasoningLevel.high,
+      maxTokens: 2048,
+      temperature: 1,
+    )).toList();
+    expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 1024});
+    expect(body['max_tokens'], 2048);
+
+    // ③ 中等 max_tokens:预算收缩到 max_tokens − 1024,上限不动。
     await backend.generate(const LlmRequest(
       model: 'm',
       systemPrompt: 'sys',
       messages: [ChatMessage(ChatRole.user, 'hi')],
       reasoningLevel: ReasoningLevel.high,
       maxTokens: 8192,
+      temperature: 1,
     )).toList();
     expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 7168});
     expect(body['max_tokens'], 8192);
     expect(body.containsKey('temperature'), isFalse);
 
-    // ③ off:temperature 正常携带。
+    // ④ off:temperature 正常携带;请求未带上限仍用模型配置值。
     await backend.generate(const LlmRequest(
       model: 'm',
       systemPrompt: 'sys',
@@ -539,6 +607,7 @@ void main() {
     )).toList();
     expect(body.containsKey('thinking'), isFalse);
     expect(body['temperature'], 0.7);
+    expect(body['max_tokens'], testMaxTokens);
   });
 
   test('mid-stream type:error event yields ErrorEvent with the provider message (not swallowed)', () async {
@@ -561,6 +630,7 @@ void main() {
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
+        maxTokens: testMaxTokens,
       ),
       client: client,
     );
@@ -599,6 +669,7 @@ void main() {
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
+        maxTokens: testMaxTokens,
       ),
       client: client,
     );
@@ -631,7 +702,7 @@ void main() {
       ),
     );
     final backend = createBackend(
-      const BackendConfig(provider: BackendProvider.anthropic, baseUrl: 'https://x', apiKey: 'k', model: 'm'),
+      const BackendConfig(provider: BackendProvider.anthropic, baseUrl: 'https://x', apiKey: 'k', model: 'm', maxTokens: testMaxTokens),
       client: client,
     );
 

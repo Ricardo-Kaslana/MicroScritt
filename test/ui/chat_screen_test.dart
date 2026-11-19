@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1096,6 +1097,78 @@ void main() {
     expect(rows.map((m) => m.role).toList(), ['user', 'assistant']);
     expect(rows.last.content, 'reply 1');
     expect(rows.any((m) => m.content.contains('更短一些')), isFalse);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('桌面端灵动岛升入 AppBar 带并与角色名同高,移动端仍贴消息区顶边', (
+    tester,
+  ) async {
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    late final AppDatabase db;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      final charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      final sid = await SessionRepository(db).create(charId, 's');
+      // 记忆非空:避免「初始化记忆」行动项顶掉用量粒,岛面保持在收拢态。
+      await MemoryRepository(db).set(sid, 'Alice remembers the room.');
+    });
+
+    Future<void> pumpScreen() => tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: const MaterialApp(
+          home: ChatScreen(
+            sessionId: 1,
+            characterId: 1,
+            character: CharacterCard(name: 'Alice'),
+          ),
+        ),
+      ),
+    );
+
+    await pumpScreen();
+    await _settleChat(tester);
+    // 造出用量:灵岛以常驻用量粒形态出现(与「新回合 token 到达」同路径)。
+    Future<void> setUsage() async {
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ChatScreen)),
+      );
+      container.read(chatControllerProvider.notifier).state = container
+          .read(chatControllerProvider)
+          .copyWith(inputTokens: 120, outputTokens: 15);
+      await tester.pumpAndSettle();
+    }
+
+    await setUsage();
+
+    // 移动端(测试默认 android):岛仍悬浮在消息区顶边下方 6px 处。
+    final messagesTop = tester
+        .getTopLeft(find.byKey(const ValueKey('messages-area')))
+        .dy;
+    var islandRect = tester.getRect(
+      find.byKey(const ValueKey('chat-island')),
+    );
+    expect(islandRect.top, moreOrLessEquals(messagesTop + 6, epsilon: 0.5));
+
+    // 桌面端:岛升进 AppBar 带,中心与工具栏中线(角色名所在行)对齐。
+    // 平台常量变化不会让 const MaterialApp 子树重建,先卸载再按新平台挂载。
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    await tester.pumpWidget(const SizedBox.shrink());
+    await pumpScreen();
+    await _settleChat(tester);
+    await setUsage();
+    final appBarRect = tester.getRect(find.byType(AppBar));
+    islandRect = tester.getRect(find.byKey(const ValueKey('chat-island')));
+    expect(islandRect.top, lessThan(appBarRect.bottom));
+    expect(
+      islandRect.center.dy,
+      moreOrLessEquals(appBarRect.center.dy, epsilon: 2),
+    );
+    debugDefaultTargetPlatformOverride = null;
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.runAsync(() => db.db.close());

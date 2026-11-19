@@ -159,6 +159,7 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
       done = await CompactService(backend, messageRepo).compact(
         sessionId: sessionId,
         model: config.model,
+        temperature: config.temperature,
         keep: 6,
         onUsage: _accumulateCompactUsage,
         stripSkillNames: await enabledSkillNames(),

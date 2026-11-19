@@ -1,7 +1,7 @@
 /// LLM provider 编辑屏:身份、地址、协议、密钥、模型目录与自定义请求头。
 ///
-/// 端点兼容选项与「官方 OpenAI 参数风格」只对 OpenAI 兼容协议显示;保存后
-/// 同步文本配置文件,若编辑的是当前 provider 还会重解析运行时配置。
+/// 「官方 OpenAI 参数风格」只对 OpenAI 兼容协议显示;保存后同步文本配置
+/// 文件,若编辑的是当前 provider 还会重解析运行时配置。
 library;
 
 import 'package:flutter/material.dart';
@@ -9,7 +9,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/backend_config.dart';
 import '../backend/llm_probe.dart';
 import '../data/llm_provider_repository.dart';
-import '../models/endpoint_compat.dart';
 import '../models/llm_provider.dart';
 import '../state/app_config_sync.dart';
 import '../state/providers.dart';
@@ -27,13 +26,8 @@ import 'common/section_header.dart';
 ///   (内置与自定义都可编辑)。
 /// - 保存时把整份 provider(含模型目录)经 [LlmProviderRepository] 持久化。
 ///   当前在用 provider/模型的选择在对话输入框的模型选择器里,不在这里设置。
-/// - 协议切到 Anthropic 时隐藏兼容选项与官方参数风格;这些开关本来也只被
-///   OpenAI 兼容后端消费。
-///
-/// 端点兼容选项是通用请求整形,按端点怪癖声明式开启、默认全关:
-/// `replyViaTool` 让回复经工具参数输出(正文流会被截断的端点),`noncePrefix`
-/// 在 system 头部加随机前缀使每轮请求字节不同;普通端点请保持全关 ——
-/// `replyViaTool` 会让部分端点因未知 `tools` 字段回 400。
+/// - 协议切到 Anthropic 时隐藏官方参数风格;该开关本来也只被 OpenAI 兼容
+///   后端消费。
 class ProviderEditScreen extends ConsumerStatefulWidget {
   final LlmProviderConfig? existing;
   const ProviderEditScreen({super.key, this.existing});
@@ -53,9 +47,6 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
 
   /// 官方 OpenAI 参数风格:max_completion_tokens + stream_options 用量。
   late bool _modernParams;
-
-  /// 端点兼容选项:replyViaTool / noncePrefix 两个开关。
-  late EndpointCompat _compat;
 
   /// 「测试连接」探测中/结果/异常三态。
   bool _probing = false;
@@ -79,7 +70,6 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
     final e = widget.existing;
     _providerId = TextEditingController(text: e?.providerId ?? '');
     _modernParams = e?.modernParams ?? false;
-    _compat = e?.compat ?? EndpointCompat.standard;
     _displayName = TextEditingController(text: e?.displayName ?? '');
     _baseUrl = TextEditingController(text: e?.baseUrl ?? '');
     _apiKey = TextEditingController(text: e?.apiKey ?? '');
@@ -92,7 +82,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
     _initialSignature = _signature();
   }
 
-  /// 当前表单的扁平快照:文本、协议、兼容开关、模型目录与请求头。
+  /// 当前表单的扁平快照:文本、协议、官方参数风格、模型目录与请求头。
   String _signature() => [
     _providerId.text,
     _displayName.text,
@@ -100,7 +90,6 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
     _apiKey.text,
     _protocol.name,
     '$_modernParams',
-    '${_compat.replyViaTool}/${_compat.noncePrefix}',
     for (final m in _models)
       '${m.id}:${m.modelId}:${m.displayName}:${m.contextCapacity}:${m.maxOutput}:${m.temperature}',
     for (final row in _headerRows) '${row.name.text}|${row.value.text}',
@@ -153,7 +142,6 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
       models: _models,
       extraHeaders: _collectHeaders(),
       modernParams: _modernParams,
-      compat: _compat,
     );
 
     setState(() => _saving = true);
@@ -259,7 +247,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '• 开启后改发 max_completion_tokens(o 系列推理模型必需),并请求流式 usage(否则用量统计为 0)',
+              '• 开启后改发 max_completion_tokens(o 系列与 GPT-5 等推理模型必需;继续发 max_tokens 会被拒绝),并请求流式 usage(否则用量统计为 0)',
             ),
             SizedBox(height: 6),
             Text('• 适用:直连 api.openai.com 或严格兼容官方协议的网关'),
@@ -287,52 +275,12 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('• 部分网关校验 Origin / Referer / User-Agent 或特定客户端标识请求头,不匹配会被拒绝'),
+            Text('• 部分网关会对 Origin、Referer、User-Agent 或客户端标识等请求头进行校验,不匹配的请求将被拒绝。'),
             SizedBox(height: 6),
-            Text('• 此处配置的头随每次对话请求一并发送;与内置头同名的覆盖内置值'),
+            Text('• 此处配置的请求头将随每次对话请求一并发送;与内置请求头同名时覆盖内置值。'),
             SizedBox(height: 10),
-            Text('host / content-length 由 HTTP 栈托管,配置了也会被忽略。'),
+            Text('host 与 content-length 由 HTTP 栈托管,即使配置也会被忽略。'),
           ],
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('知道了'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 「端点兼容选项」的详细说明弹层(全部为通用请求整形选项,按端点怪癖
-  /// 声明式开启,不针对任何特定服务)。
-  void _showCompatHelp(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('端点兼容选项 · 说明'),
-        content: const SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('【工具通道回复】', style: TextStyle(fontWeight: FontWeight.bold)),
-              SizedBox(height: 4),
-              Text('• 适用:对普通正文流式截断/丢块,但工具调用参数能完整送达的端点'),
-              SizedBox(height: 4),
-              Text('• 整条回复改经 output_reply 工具参数输出;空回自动重试(至多 3 次尝试)'),
-              SizedBox(height: 10),
-              Text('【提示词随机前缀】', style: TextStyle(fontWeight: FontWeight.bold)),
-              SizedBox(height: 4),
-              Text('• 每次请求在 system 头部前置 6–8 位随机字符,使每轮请求字节不同'),
-              SizedBox(height: 4),
-              Text('• 只在端点明确需要时开启;请确认符合所配置服务的条款'),
-              SizedBox(height: 10),
-              Text(
-                '• 各端点要求的请求头仍需在「自定义请求头」中配置;普通端点请保持全部关闭 —— 部分端点对未知的 tools 字段回 400。',
-              ),
-            ],
-          ),
         ),
         actions: [
           FilledButton(
@@ -354,9 +302,10 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
       baseUrl: _baseUrl.text.trim(),
       apiKey: _apiKey.text.trim(),
       model: _models.first.modelId,
+      // 测试连接同样只消费模型配置的温度,不另设探测默认值。
+      temperature: _models.first.temperature,
       extraHeaders: _collectHeaders(),
       modernParams: _modernParams,
-      compat: _compat,
     );
     setState(() {
       _probing = true;
@@ -371,7 +320,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _probeError = '探测失败:$e');
+      setState(() => _probeError = '测试失败:$e');
     } finally {
       if (mounted) setState(() => _probing = false);
     }
@@ -397,7 +346,12 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
             FormTextField(
               controller: _baseUrl,
               label: 'API 地址',
-              hint: '如 https://api.openai.com/v1',
+              // 示例随协议切换:OpenAI 兼容后端在地址后拼 /chat/completions
+              // (官方需带 /v1);Anthropic 后端拼 /v1/messages,根地址写了
+              // /v1 会变成 /v1/v1/messages。
+              hint: _protocol == LlmProtocol.anthropic
+                  ? '如 https://api.anthropic.com(不含 /v1)'
+                  : '如 https://api.openai.com/v1',
             ),
             FormDropdownField<LlmProtocol>(
               value: _protocol,
@@ -441,52 +395,6 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
                   ],
                 ),
               ),
-            if (_protocol == LlmProtocol.openaiCompat)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 2, 14, 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const FieldLabel('端点兼容选项'),
-                        const SizedBox(width: 2),
-                        InfoButton(onTap: () => _showCompatHelp(context)),
-                        const Spacer(),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        const Expanded(child: Text('工具通道回复(正文被截断时)')),
-                        Switch(
-                          value: _compat.replyViaTool,
-                          onChanged: (v) => setState(
-                            () => _compat = _compat.copyWith(replyViaTool: v),
-                          ),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        const Expanded(child: Text('提示词随机前缀')),
-                        Switch(
-                          value: _compat.noncePrefix,
-                          onChanged: (v) => setState(
-                            () => _compat = _compat.copyWith(noncePrefix: v),
-                          ),
-                        ),
-                      ],
-                    ),
-                    Text(
-                      '按端点怪癖开启,默认全关;说明见右上问号。',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.outline,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             FormTextField(
               controller: _apiKey,
               label: 'API Key',
@@ -518,7 +426,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
           ],
         ),
         Text(
-          '部分网关按请求头放行;同名的会覆盖内置头。',
+          '部分网关通过请求头控制访问;与内置请求头同名时将覆盖内置值。',
           style: TextStyle(
             fontSize: 12,
             color: Theme.of(context).colorScheme.outline,
@@ -528,7 +436,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 16),
             child: Text(
-              '无自定义请求头;站点要求时再添加即可。',
+              '尚未配置自定义请求头。如服务端有要求,请点击「添加」进行配置。',
               style: TextStyle(color: Theme.of(context).colorScheme.outline),
             ),
           )
@@ -590,12 +498,12 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.network_check),
-              label: Text(_probing ? '探测中…' : '开始探测'),
+              label: Text(_probing ? '测试中…' : '开始测试'),
             ),
           ],
         ),
         Text(
-          '发一次最小请求验证端点,精确归因「为什么不通」。',
+          '发送一次最小请求以验证端点连通性,并对失败原因进行归因。',
           style: TextStyle(
             fontSize: 12,
             color: Theme.of(context).colorScheme.outline,

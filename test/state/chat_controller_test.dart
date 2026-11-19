@@ -3020,6 +3020,9 @@ void main() {
     expect(await repo.trash(sessionId), isEmpty);
     expect((await repo.pendingDeletions(sessionId)).single.key, 'hp');
     expect(container.read(chatControllerProvider).backgroundSummary, contains('待确认'));
+    final stats = container.read(chatControllerProvider).backgroundVariableStats;
+    expect(stats?.proposed, 1);
+    expect(stats?.removed, 0);
   });
 
   test('image-only without a provider skips every round without wasting LLM calls', () async {

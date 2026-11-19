@@ -6,7 +6,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:microscritt/ui/common/shrink_image.dart';
+import 'package:microscritt/data/shrink_image.dart';
 
 /// 用 dart:ui 画一张纯色 PNG(文件很小,但解压后像素很多 —— 刚好覆盖
 /// "文件不大也必须按尺寸缩"的情况)。

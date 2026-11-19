@@ -1,7 +1,7 @@
 part of 'database.dart';
 
 // 默认数据种子(仅建库路径):默认提示词预设、默认 Hook、默认正则脚本、
-// 默认 LLM provider 与两个内置生图协议插件。
+// 默认 LLM provider 与三个内置生图协议插件。
 //
 // 内容须为本项目原创的中性创作辅助素材;除默认预设只在建库时一次性写入外,
 // 其余均幂等(按 name/id 或空表判定),重复执行不重复、不覆盖用户改动。
@@ -81,7 +81,7 @@ Future<void> _seedDefaultLlmProvider(Database db) async {
   });
 }
 
-/// 种入两个内置生图协议插件(对话式网关 / Nai2API)。按 id 幂等:已存在同 id
+/// 种入三个内置生图协议插件(对话式网关 / Nai2API / NovelAI 官方 API)。按 id 幂等:已存在同 id
 /// 则跳过(含用户改过/停用),只补缺失的默认插件。manifest 与 JS 分列存储,
 /// 与用户导入插件走同一张 `image_plugins` 表、同一执行路径。
 Future<void> _seedImagePlugins(Database db) async {

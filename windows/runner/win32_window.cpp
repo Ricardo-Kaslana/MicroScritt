@@ -27,6 +27,22 @@ constexpr const wchar_t kGetPreferredBrightnessRegKey[] =
   L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme";
 
+// 读取系统「应用使用浅色主题」开关。读不到时返回 false,调用方保持原有
+// 边框设置,标题栏图标退回亮色胶囊。
+bool ReadSystemDarkMode(bool* dark) {
+  DWORD light_mode;
+  DWORD light_mode_size = sizeof(light_mode);
+  LSTATUS result = RegGetValue(
+      HKEY_CURRENT_USER, kGetPreferredBrightnessRegKey,
+      kGetPreferredBrightnessRegValue, RRF_RT_REG_DWORD, nullptr, &light_mode,
+      &light_mode_size);
+  if (result != ERROR_SUCCESS) {
+    return false;
+  }
+  *dark = light_mode == 0;
+  return true;
+}
+
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
 
@@ -207,6 +223,8 @@ Win32Window::MessageHandler(HWND hwnd,
 
       SetWindowPos(hwnd, nullptr, newRectSize->left, newRectSize->top, newWidth,
                    newHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+      // Reload the title-bar icon at the new monitor's DPI.
+      UpdateTheme(hwnd);
 
       return 0;
     }
@@ -229,6 +247,15 @@ Win32Window::MessageHandler(HWND hwnd,
     case WM_DWMCOLORIZATIONCOLORCHANGED:
       UpdateTheme(hwnd);
       return 0;
+
+    case WM_SETTINGCHANGE:
+      // 系统主题切换广播 "ImmersiveColorSet";同步边框与标题栏胶囊图标。
+      if (lparam != 0 &&
+          lstrcmpW(reinterpret_cast<LPCWSTR>(lparam),
+                   L"ImmersiveColorSet") == 0) {
+        UpdateTheme(hwnd);
+      }
+      break;
   }
 
   return DefWindowProc(window_handle_, message, wparam, lparam);
@@ -240,6 +267,14 @@ void Win32Window::Destroy() {
   if (window_handle_) {
     DestroyWindow(window_handle_);
     window_handle_ = nullptr;
+  }
+  if (title_icon_ != nullptr) {
+    DestroyIcon(title_icon_);
+    title_icon_ = nullptr;
+  }
+  if (app_icon_ != nullptr) {
+    DestroyIcon(app_icon_);
+    app_icon_ = nullptr;
   }
   if (g_active_window_count == 0) {
     WindowClassRegistrar::GetInstance()->UnregisterWindowClass();
@@ -286,16 +321,53 @@ void Win32Window::OnDestroy() {
 }
 
 void Win32Window::UpdateTheme(HWND const window) {
-  DWORD light_mode;
-  DWORD light_mode_size = sizeof(light_mode);
-  LSTATUS result = RegGetValue(HKEY_CURRENT_USER, kGetPreferredBrightnessRegKey,
-                               kGetPreferredBrightnessRegValue,
-                               RRF_RT_REG_DWORD, nullptr, &light_mode,
-                               &light_mode_size);
-
-  if (result == ERROR_SUCCESS) {
-    BOOL enable_dark_mode = light_mode == 0;
+  bool dark_mode = false;
+  if (ReadSystemDarkMode(&dark_mode)) {
+    BOOL enable_dark_mode = dark_mode ? TRUE : FALSE;
     DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
                           &enable_dark_mode, sizeof(enable_dark_mode));
+  }
+  UpdateWindowIcons(window, dark_mode);
+}
+
+void Win32Window::UpdateWindowIcons(HWND const window, bool dark) {
+  if (!window) return;
+
+  UINT dpi = FlutterDesktopGetDpiForMonitor(
+      MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST));
+  if (dpi == 0) dpi = 96;
+  // 系统标题栏图标槽为 16 逻辑像素;按窗口 DPI 取 ICO 里的对应档。
+  const int icon_size = MulDiv(16, static_cast<int>(dpi), 96);
+
+  // 任务栏在 ICON_BIG 缺省时会回落到窗口的小图标,于是标题栏胶囊会连带
+  // 出现在任务栏/Alt+Tab。这里把大图标显式固定为应用图标。
+  const int large_icon_size = MulDiv(32, static_cast<int>(dpi), 96);
+  HICON app_icon = static_cast<HICON>(LoadImage(
+      GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON,
+      large_icon_size, large_icon_size, LR_DEFAULTCOLOR));
+  if (app_icon != nullptr) {
+    HICON previous_app_icon = app_icon_;
+    app_icon_ = app_icon;
+    SendMessage(window, WM_SETICON, ICON_BIG,
+                reinterpret_cast<LPARAM>(app_icon));
+    if (previous_app_icon != nullptr) {
+      DestroyIcon(previous_app_icon);
+    }
+  }
+
+  HICON icon = static_cast<HICON>(LoadImage(
+      GetModuleHandle(nullptr),
+      MAKEINTRESOURCE(dark ? IDI_TITLE_ICON_DARK : IDI_TITLE_ICON_LIGHT),
+      IMAGE_ICON, icon_size, icon_size, LR_DEFAULTCOLOR));
+  if (icon == nullptr) return;
+
+  HICON previous = title_icon_;
+  title_icon_ = icon;
+  // 标题栏只换 ICON_SMALL;上面已把 ICON_BIG 固定为应用图标,任务栏、
+  // Alt+Tab 与 exe 图标不受影响。
+  SendMessage(window, WM_SETICON, ICON_SMALL,
+              reinterpret_cast<LPARAM>(icon));
+  if (previous != nullptr) {
+    DestroyIcon(previous);
   }
 }

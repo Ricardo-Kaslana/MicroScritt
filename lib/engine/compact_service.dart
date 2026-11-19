@@ -49,7 +49,8 @@ class CompactService {
   /// [maxSummarizeAttempts]:摘要调用的总尝试次数(默认 1 = 失败不重试;
   /// 自动路径传 4 = 首次 + 3 次失败重试)。每次失败(ErrorEvent/流错误/
   /// 空输出)都完整重试一遍摘要调用。
-  /// [onUsage] 在摘要调用结束时回调其 token 用量;压缩调用单独记账。
+  /// [onUsage] 在每次摘要调用结束时回调一次(成功/失败/中断都回调,失败与
+  /// 中断传零用量):用量计入会话压缩桶,回调次数供统计侧计请求次数。
   /// [stripSkillNames]:摘要转录里剥掉的 @技能名 记号(记号只在转录里保留
   /// 供气泡/编辑,任何 LLM 出口都剥离)。
   /// [cancelSignal]:可选的用户中断信号 —— 触发即放弃本次压缩(取消底层
@@ -58,6 +59,9 @@ class CompactService {
   Future<bool> compact({
     required int sessionId,
     required String model,
+
+    /// 摘要请求的采样温度,由调用方从模型配置透传(压缩不自设温度)。
+    required double temperature,
     int keep = 20,
     int maxSummarizeAttempts = 1,
     void Function(TokenUsage usage)? onUsage,
@@ -72,7 +76,15 @@ class CompactService {
     String? summary;
     try {
       for (var attempt = 0; attempt < maxSummarizeAttempts && summary == null; attempt++) {
-        summary = await _summarize(model, plan.toCompact, plan.prevSummaries, onUsage, stripSkillNames, cancelSignal: cancelSignal);
+        summary = await _summarize(
+          model,
+          temperature,
+          plan.toCompact,
+          plan.prevSummaries,
+          onUsage,
+          stripSkillNames,
+          cancelSignal: cancelSignal,
+        );
       }
     } on _CompactInterrupted {
       return false;
@@ -140,6 +152,7 @@ class CompactService {
 
   Future<String?> _summarize(
     String model,
+    double temperature,
     List<Message> msgs,
     List<Message> prevSummaries,
     void Function(TokenUsage usage)? onUsage,
@@ -181,6 +194,7 @@ class CompactService {
       model: model,
       systemPrompt: _summarySystemPrompt,
       messages: [ChatMessage(ChatRole.user, userContent)],
+      temperature: temperature,
     );
     final buffer = StringBuffer();
     var inTok = 0, outTok = 0, cachedTok = 0;
@@ -199,6 +213,8 @@ class CompactService {
             inTok += usage.inputTokens;
             outTok += usage.outputTokens;
             cachedTok += usage.cachedInputTokens;
+          case ToolCallsEvent():
+            break; // 压缩无工具消费方(tools 恒空),忽略。
           case DoneEvent():
             break;
           case ErrorEvent():
@@ -223,11 +239,18 @@ class CompactService {
     await finished.future;
     // 善后取消:中断时断链;自然完成后的补位取消无害(订阅已结束)。
     unawaited(sub.cancel());
-    if (interrupted) throw const _CompactInterrupted();
-    if (sawError) return null;
-    if (onUsage != null && (inTok > 0 || outTok > 0 || cachedTok > 0)) {
-      onUsage(TokenUsage(inputTokens: inTok, outputTokens: outTok, cachedInputTokens: cachedTok));
+    if (interrupted) {
+      // 中断的摘要请求同样已发出:回调零用量,只让统计计一次请求。
+      onUsage?.call(const TokenUsage());
+      throw const _CompactInterrupted();
     }
+    if (sawError) {
+      onUsage?.call(const TokenUsage());
+      return null;
+    }
+    // 即使上游未上报(全零)也回调一次:统计侧据此计入本摘要请求的次数,
+    // 累加方对全零是无害的。重试时每次尝试各回调一次。
+    onUsage?.call(TokenUsage(inputTokens: inTok, outputTokens: outTok, cachedInputTokens: cachedTok));
     final raw = buffer.toString().trim();
     if (raw.isEmpty) return null;
     final summary = formatCompactSummary(raw);

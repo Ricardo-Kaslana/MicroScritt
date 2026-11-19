@@ -8,6 +8,10 @@
 /// - 输入卡与消息列同宽收敛:宽窗左右缘对齐助手气泡左缘 / 用户气泡右缘,
 ///   窄窗吃满可用宽度;
 ///
+/// 制卡等独立工作台复用本组件时把 [showCommands] 关掉:命令行与命令/技能
+/// 入口整组消失,只保留模型 chip、推理徽标、上下文圆环与发送/中断键 ——
+/// 这些能力(选模型、调推理、看占用与缓存命中)与聊天页完全同源。
+///
 /// 视觉与交互不变量:
 /// - 输入卡聚焦时外描边过渡为主色、阴影加深,失焦回落发丝边;
 /// - 发送键随输入内容启用/禁用(空白输入发送必然被宿主拒绝,禁用是最直
@@ -27,6 +31,7 @@ import '../../state/providers.dart';
 import '../../state/slash_commands.dart';
 import '../common/chat_layout.dart';
 import '../common/motion.dart';
+import '../common/sheet_header.dart';
 import '../composer_span_builder.dart';
 import '../model_selector_bar.dart';
 import '../text_syntax.dart';
@@ -73,14 +78,14 @@ class ChatComposer extends ConsumerWidget {
   final ContextLink usage;
 
   /// 折叠/展开常驻命令按钮行。
-  final VoidCallback onToggleCommands;
+  final VoidCallback? onToggleCommands;
 
   /// 输入变化(用于刷新斜杠建议等派生状态)。
-  final ValueChanged<String> onChanged;
+  final ValueChanged<String>? onChanged;
 
   /// 选择一个命令(命令按钮 / 斜杠建议共用):宿主把命令文本写入输入框
   /// 并聚焦,由用户确认后发送,不立即执行。
-  final ValueChanged<SlashCommand> onInsertCommand;
+  final ValueChanged<SlashCommand>? onInsertCommand;
 
   /// 发送当前输入。
   final VoidCallback onSend;
@@ -88,19 +93,36 @@ class ChatComposer extends ConsumerWidget {
   /// 中断正在进行的生成/耗时命令。
   final VoidCallback onInterrupt;
 
+  /// 消息框提示文案;工作台复用时可换成场景化提示。
+  final String hintText;
+
+  /// 是否保留命令行与命令/技能入口。false 时只留底栏右半(模型/推理/
+  /// 上下文/发送),供没有命令语法的页面(如 AI 制卡)复用同一输入卡。
+  final bool showCommands;
+
+  /// 消息框是否可编辑。false 时发送键一并禁用,中断键不受影响。
+  final bool enabled;
+
+  /// 非空时键盘发送动作直接提交(Enter 不再换行),用于简报式输入。
+  final VoidCallback? onSubmitted;
+
   const ChatComposer({
     super.key,
     required this.interruptible,
-    required this.suggestions,
+    this.suggestions = const [],
     required this.inputController,
     required this.inputFocusNode,
-    required this.commandsExpanded,
+    this.commandsExpanded = false,
     required this.usage,
-    required this.onToggleCommands,
-    required this.onChanged,
-    required this.onInsertCommand,
+    this.onToggleCommands,
+    this.onChanged,
+    this.onInsertCommand,
     required this.onSend,
     required this.onInterrupt,
+    this.hintText = '输入消息…(/ 命令 · @ 技能)',
+    this.showCommands = true,
+    this.enabled = true,
+    this.onSubmitted,
   });
 
   @override
@@ -136,7 +158,7 @@ class ChatComposer extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _commandRow(context, motion),
+                if (showCommands) _commandRow(context, motion),
                 // 聚焦态只驱动外描边与阴影,不重建整页:FocusNode 是
                 // Listenable,失焦/聚焦在这里就地重建这一小块。
                 ListenableBuilder(
@@ -199,14 +221,17 @@ class ChatComposer extends ConsumerWidget {
     return TextField(
       controller: inputController,
       focusNode: inputFocusNode,
+      enabled: enabled,
       minLines: 1,
       maxLines: _kFieldMaxLines,
       keyboardType: TextInputType.multiline,
-      textInputAction: TextInputAction.newline,
+      textInputAction:
+          onSubmitted == null ? TextInputAction.newline : TextInputAction.send,
       onChanged: onChanged,
+      onSubmitted: onSubmitted == null ? null : (_) => onSubmitted!(),
       style: Theme.of(context).textTheme.bodyLarge?.copyWith(height: 1.4),
-      decoration: const InputDecoration(
-        hintText: '输入消息…(/ 命令 · @ 技能)',
+      decoration: InputDecoration(
+        hintText: hintText,
         hintMaxLines: 1,
         filled: false,
         border: InputBorder.none,
@@ -215,7 +240,7 @@ class ChatComposer extends ConsumerWidget {
         disabledBorder: InputBorder.none,
         errorBorder: InputBorder.none,
         focusedErrorBorder: InputBorder.none,
-        contentPadding: EdgeInsets.fromLTRB(16, 12, 16, 8),
+        contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
       ),
     );
   }
@@ -247,25 +272,30 @@ class ChatComposer extends ConsumerWidget {
       ),
       child: Row(
         children: [
-          _toolButton(
-            context,
-            tooltip: commandsExpanded ? '收起命令按钮行' : '展开命令按钮行',
-            icon: commandsExpanded ? Icons.expand_less : Icons.terminal,
-            active: commandsExpanded,
-            onPressed: onToggleCommands,
-          ),
-          const SizedBox(width: 2),
-          _toolButton(
-            context,
-            tooltip: '插入技能(@)',
-            icon: Icons.alternate_email,
-            onPressed: () => _pickSkill(context, ref),
-          ),
+          if (showCommands) ...[
+            _toolButton(
+              context,
+              tooltip: commandsExpanded ? '收起命令按钮行' : '展开命令按钮行',
+              icon: commandsExpanded ? Icons.expand_less : Icons.terminal,
+              active: commandsExpanded,
+              onPressed: onToggleCommands,
+            ),
+            const SizedBox(width: 2),
+            if (onInsertCommand != null)
+              _toolButton(
+                context,
+                tooltip: '插入技能(@)',
+                icon: Icons.alternate_email,
+                onPressed: () => _pickSkill(context, ref),
+              ),
+          ],
           // 中段全部让给模型 chip:Align 松开紧约束后按模型名自适应收窄,
-          // 长名省略;右侧固定组(徽标/圆环/发送键)始终贴边不抖动。
+          // 长名省略;聊天页继续贴右给固定组让位,精简模式(无命令/技能
+          // 入口的工作台)贴左,与输入框左缘对齐不再悬在中间。
           Expanded(
             child: Align(
-              alignment: Alignment.centerRight,
+              alignment:
+                  showCommands ? Alignment.centerRight : Alignment.centerLeft,
               child: ConstrainedBox(
                 constraints: const BoxConstraints(
                   maxWidth: _kModelChipMaxWidth,
@@ -289,7 +319,7 @@ class ChatComposer extends ConsumerWidget {
     BuildContext context, {
     required String tooltip,
     required IconData icon,
-    required VoidCallback onPressed,
+    required VoidCallback? onPressed,
     bool active = false,
   }) {
     final scheme = Theme.of(context).colorScheme;
@@ -322,7 +352,7 @@ class ChatComposer extends ConsumerWidget {
     return ValueListenableBuilder<TextEditingValue>(
       valueListenable: inputController,
       builder: (context, value, _) {
-        final canSend = value.text.trim().isNotEmpty;
+        final canSend = enabled && value.text.trim().isNotEmpty;
         return IconButton.filled(
           tooltip: interruptible ? '中断生成' : '发送',
           constraints: const BoxConstraints.tightFor(width: 38, height: 38),
@@ -411,7 +441,7 @@ class ChatComposer extends ConsumerWidget {
       backgroundColor: scheme.surface,
       side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.5)),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      onPressed: () => onInsertCommand(c),
+      onPressed: onInsertCommand == null ? null : () => onInsertCommand!(c),
     );
   }
 
@@ -437,11 +467,9 @@ class ChatComposer extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                '推理等级',
-                style: Theme.of(
-                  sheetContext,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+              const ChatSheetHeader(
+                icon: Icons.psychology_outlined,
+                title: '推理等级',
               ),
               const SizedBox(height: 4),
               ReasoningSlider(
@@ -557,7 +585,7 @@ class ChatComposer extends ConsumerWidget {
       selection: TextSelection.collapsed(offset: offset + token.length),
     );
     inputFocusNode.requestFocus();
-    onChanged(controller.text);
+    onChanged?.call(controller.text);
   }
 }
 

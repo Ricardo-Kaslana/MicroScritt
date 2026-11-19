@@ -308,6 +308,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     await tester.enterText(find.widgetWithText(TextField, '用户名'), '小明');
+    // 保存键在无改动时禁用:输入后先泵一帧让脏状态生效。
+    await tester.pump();
     await tester.runAsync(() async {
       await tester.tap(find.text('保存'));
       await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -443,6 +445,10 @@ void main() {
       'LLM 后端',
     );
     await settleProviders(tester);
+    // 区块标题刚进入视口时,下方空态卡片可能还在构建窗口外;再滚一屏让
+    // 空态进入实现树后再断言。
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, -200));
+    await tester.pump();
 
     // 空态提示。
     expect(find.textContaining('还没有配置任何 LLM provider'), findsOneWidget);
@@ -535,7 +541,7 @@ final scrollable = find.byType(Scrollable).first;
         '1m',
       );
       await tester.enterText(
-        find.byKey(const ValueKey('field_最大输出 tokens(留空用后端默认)')),
+        find.byKey(const ValueKey('field_最大输出 tokens')),
         '256k',
       );
       await tester.tap(find.text('确定'));

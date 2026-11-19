@@ -457,7 +457,7 @@ void main() {
   });
 
   test('modernParams wire style: max_completion_tokens + stream_options usage', () async {
-    // 官方 OpenAI 端点两件事:① o 系列推理模型只认 max_completion_tokens
+    // 官方 OpenAI 端点两件事:① o 系列 / GPT-5 等推理模型只认 max_completion_tokens
     //(发 max_tokens 直接 400);② 流式默认不带 usage,不开 include_usage
     // 用量统计恒为零。跟随 provider 级开关而非无条件发(劣质网关对未知字段
     // 会 400)。

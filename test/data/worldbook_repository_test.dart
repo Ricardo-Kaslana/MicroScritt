@@ -33,6 +33,17 @@ void main() {
     expect(entries[0].keys, ['king']);
   });
 
+  test('replaceForCharacterInTxn participates in an outer transaction', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    await db.transaction((txn) async {
+      await WorldbookRepository.replaceForCharacterInTxn(txn, charId, const [
+        WorldbookEntry(characterId: 0, keys: ['a'], content: 'one'),
+      ]);
+    });
+    final entries = await worldbook.byCharacter(charId);
+    expect(entries.single.content, 'one');
+  });
+
   test('replaceForCharacter clears previous entries for the same character', () async {
     final charId = await characters.insert(const CharacterCard(name: 'A'));
     await worldbook.replaceForCharacter(charId, const [

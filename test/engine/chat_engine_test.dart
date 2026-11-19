@@ -31,7 +31,7 @@ void main() {
     // 请求是提示词的权威来源(afterContextAssembly/beforeGenerate hook 可改写);
     // snapshot 只负责提供纯文本消息数组。
     final events = await engine
-        .generate(snapshot, const LlmRequest(model: 'm', systemPrompt: 'REWRITTEN', messages: []))
+        .generate(snapshot, const LlmRequest(model: 'm', systemPrompt: 'REWRITTEN', messages: [], temperature: 1))
         .toList();
 
     expect(events.whereType<TextDelta>().single.text, 'ok');

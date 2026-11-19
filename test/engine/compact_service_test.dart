@@ -89,7 +89,7 @@ void main() {
     final sessionId = await seedSession(25);
     final service = CompactService(_FakeBackend('SUMMARY'), messages);
 
-    final changed = await service.compact(sessionId: sessionId, model: 'fake', keep: 20);
+    final changed = await service.compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20);
 
     expect(changed, isTrue);
     final all = await messages.bySession(sessionId);
@@ -102,6 +102,21 @@ void main() {
     expect(compacted.every((m) => m.compactOf == summaries.single.id), isTrue);
   });
 
+  test('summary request carries the model temperature unchanged', () async {
+    final sessionId = await seedSession(25);
+    final backend = _FakeBackend('SUMMARY');
+
+    await CompactService(backend, messages).compact(
+      sessionId: sessionId,
+      model: 'fake',
+      temperature: 0.3,
+      keep: 20,
+    );
+
+    // 压缩不再走隐式默认:调用方透传什么温度,摘要请求就用什么。
+    expect(backend.lastRequest!.temperature, 0.3);
+  });
+
   test('second compaction merges the previous summary and folds it', () async {
     // 合并式单一摘要:第二次压缩把既有摘要作为「早期背景」随转录送入模型,
     // 要求产出可完全替代旧摘要的新版;旧摘要行与新摘要落库同一事务被折叠
@@ -109,7 +124,7 @@ void main() {
     // 最新、无矛盾的摘要,不随压缩次数堆叠。
     final sessionId = await seedSession(25);
     final changed = await CompactService(_FakeBackend('S1'), messages)
-        .compact(sessionId: sessionId, model: 'fake', keep: 20);
+        .compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20);
     expect(changed, isTrue);
 
     for (var i = 25; i < 35; i++) {
@@ -117,7 +132,7 @@ void main() {
     }
     final second = _FakeBackend('S2');
     final again = await CompactService(second, messages)
-        .compact(sessionId: sessionId, model: 'fake', keep: 20);
+        .compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20);
     expect(again, isTrue);
 
     // 摘要请求携带既有摘要背景块(S1 全文)与新转录。
@@ -141,7 +156,7 @@ void main() {
     // 摘要不能丢),旧摘要行同时折叠 —— 合并式不变量在兜底路径同样成立。
     final sessionId = await seedSession(25);
     await CompactService(_FakeBackend('S1'), messages)
-        .compact(sessionId: sessionId, model: 'fake', keep: 20);
+        .compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20);
 
     final folded = await CompactService(_AlwaysErrorBackend(), messages)
         .foldToFit(sessionId: sessionId, keep: 6);
@@ -161,7 +176,7 @@ void main() {
     final sessionId = await seedSession(10);
     final service = CompactService(_FakeBackend('SUMMARY'), messages);
 
-    final changed = await service.compact(sessionId: sessionId, model: 'fake', keep: 20);
+    final changed = await service.compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20);
 
     expect(changed, isFalse);
     final all = await messages.bySession(sessionId);
@@ -173,7 +188,7 @@ void main() {
     final sessionId = await seedSession(25);
     final service = CompactService(_FakeBackend(''), messages);
 
-    final changed = await service.compact(sessionId: sessionId, model: 'fake', keep: 20);
+    final changed = await service.compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20);
 
     expect(changed, isFalse);
     expect((await messages.bySession(sessionId)).where((m) => m.role == 'system'), isEmpty);
@@ -196,7 +211,7 @@ void main() {
     final backend = _FakeBackend('SUMMARY');
 
     final changed = await CompactService(backend, messages)
-        .compact(sessionId: sessionId, model: 'fake', keep: 5);
+        .compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 5);
 
     expect(changed, isTrue);
     final prompt = backend.lastRequest!.messages.single.content;
@@ -221,6 +236,7 @@ void main() {
     final changed = await service.compact(
       sessionId: sessionId,
       model: 'fake',
+      temperature: 1,
       keep: 20,
       onUsage: (u) => reported = u,
     );
@@ -235,7 +251,7 @@ void main() {
     final sessionId = await seedSession(10);
     final service = CompactService(_FakeBackend('SUMMARY'), messages);
     var called = false;
-    final changed = await service.compact(sessionId: sessionId, model: 'fake', keep: 20, onUsage: (_) => called = true);
+    final changed = await service.compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20, onUsage: (_) => called = true);
     expect(changed, isFalse);
     expect(called, isFalse);
   });
@@ -273,7 +289,7 @@ void main() {
       messages,
     );
 
-    await service.compact(sessionId: sessionId, model: 'fake', keep: 20);
+    await service.compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20);
 
     final all = await messages.bySession(sessionId);
     final summary = all.where((m) => m.role == 'system').single;
@@ -290,6 +306,7 @@ void main() {
     final changed = await service.compact(
       sessionId: sessionId,
       model: 'fake',
+      temperature: 1,
       keep: 20,
       maxSummarizeAttempts: 4,
     );
@@ -310,6 +327,7 @@ void main() {
     final changed = await service.compact(
       sessionId: sessionId,
       model: 'fake',
+      temperature: 1,
       keep: 20,
       maxSummarizeAttempts: 4,
     );
@@ -327,7 +345,7 @@ void main() {
     final backend = _FlakySummaryBackend(1);
     final service = CompactService(backend, messages);
 
-    final changed = await service.compact(sessionId: sessionId, model: 'fake', keep: 20);
+    final changed = await service.compact(sessionId: sessionId, model: 'fake', temperature: 1, keep: 20);
 
     expect(changed, isFalse);
     expect(backend.calls, 1);
