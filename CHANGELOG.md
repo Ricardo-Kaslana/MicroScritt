@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+### 变更
+
+- README 中英文状态行与 ARCHITECTURE 头部行同步 2.3.3+6 / schema v71
+  (schema 本版无变更)。
+
 ## [2.3.3] - 2026-11-19
 
 ### 新增
