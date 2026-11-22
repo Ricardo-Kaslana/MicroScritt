@@ -18,7 +18,7 @@
 
 移动端优先、本地优先的 AI 角色扮演与创作工作台。基于纯客户端 Flutter,无账号、无项目自有后端、无遥测;数据与任务编排留在你的设备上,LLM 推理和云端生图则由你配置的第三方 API 完成。
 
-> 当前源码 **2.3.3+6** · 数据库基线 **v75** · 主要维护 **Android / Windows**
+> 当前源码 **2.3.4+7** · 数据库基线 **v75** · 主要维护 **Android / Windows**
 >
 > 主分支包含尚未发布的变更,正式安装包的功能以对应 Release 与 tag 为准。应用界面目前为简体中文。
 
@@ -183,7 +183,7 @@ MicroScritt 是通用角色扮演写作工具,不内置规避模型安全策略�
 
 A mobile-first, local-first AI roleplay and creative-writing workspace. Built as a client-only Flutter app with no account, project-operated backend or telemetry. Your data and orchestration stay on your device; LLM inference and cloud image generation are performed by the third-party APIs you configure.
 
-> Current source **2.3.3+6** · database baseline **v75** · primary platforms: **Android / Windows**
+> Current source **2.3.4+7** · database baseline **v75** · primary platforms: **Android / Windows**
 >
 > The main branch contains unreleased changes. Refer to each Release and tag for the features included in official builds. The app UI is currently Simplified Chinese only.
 
