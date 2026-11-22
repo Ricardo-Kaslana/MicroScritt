@@ -6,13 +6,16 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'common/app_snack_bar.dart';
 import 'common/edit_form_scaffold.dart';
 import 'common/form_field.dart';
+import 'common/inline_spinner.dart';
 import 'common/section_header.dart';
 import '../backend/plugin_image_backend.dart';
 import '../models/image_config.dart';
 import '../models/image_plugin.dart';
 import '../models/image_style_preset.dart';
+import '../state/app_config_sync.dart';
 import '../state/providers.dart';
 import 'image_plugins_screen.dart';
 import 'image_styles_screen.dart';
@@ -378,10 +381,7 @@ class _ImageProviderEditScreenState
     negative: _imgNegative,
   );
 
-  void _showSnack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-  }
+  void _showSnack(String msg) => showAppSnack(context, msg);
 
   String _imageUrlOrDefault() {
     final text = _imgBaseUrl.text.trim();
@@ -488,6 +488,7 @@ class _ImageProviderEditScreenState
     );
     setState(() => _saving = true);
     try {
+      await markAppConfigDirty(ref);
       final repo = ref.read(imageConfigRepositoryProvider);
       await repo.saveProvider(
         ImageProviderRecord(
@@ -501,9 +502,13 @@ class _ImageProviderEditScreenState
       ref.read(imageConfigProvider.notifier).state = await repo
           .loadActiveConfig();
       ref.invalidate(imageProvidersProvider);
+      await syncAppConfigFile(ref);
       if (!mounted) return;
       _showSnack('生图配置已保存');
       Navigator.pop(context);
+    } catch (e) {
+      // 写库或配置同步失败:留在本页保留表单,明确提示失败原因。
+      if (mounted) _showSnack('保存失败: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -615,13 +620,7 @@ class _ImageProviderEditScreenState
                               ? null
                               : _refreshImageModels,
                           icon: _refreshingModels
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
+                              ? const InlineSpinner()
                               : const Icon(Icons.refresh, size: 18),
                           label: const Text('刷新模型列表'),
                         ),
@@ -635,13 +634,7 @@ class _ImageProviderEditScreenState
                               ? null
                               : _testImageConnection,
                           icon: _testingImage
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
+                              ? const InlineSpinner()
                               : const Icon(Icons.cable, size: 18),
                           label: const Text('测试连接'),
                         ),

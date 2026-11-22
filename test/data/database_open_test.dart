@@ -1,12 +1,53 @@
-// 基线数据库(v71):全新建库的表结构与种子;旧版本库的归档重建。
+// 基线数据库(v75):全新建库的表结构与种子;旧版本库的归档重建。
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:microscritt/data/database.dart';
+import 'package:microscritt/data/usage_repository.dart';
 import 'package:microscritt/models/data_root.dart';
 import 'package:microscritt/models/prompt_seeds.dart';
+
+/// v72 及以前的 `usage_records` 形态(与 v73 基线一致)。
+const String _usageRecordsDdl = '''
+  CREATE TABLE usage_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,
+    kind TEXT NOT NULL DEFAULT 'main',
+    provider_id TEXT NOT NULL DEFAULT '',
+    provider_name TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    model_name TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    reported INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+  )
+''';
+
+Map<String, Object?> _usageRow({
+  String model = 'deepseek-flash',
+  String kind = 'main',
+  int input = 100,
+  int output = 20,
+  int cached = 0,
+  int reported = 1,
+  required DateTime createdAt,
+}) => {
+  'session_id': 1,
+  'kind': kind,
+  'provider_id': 'deepseek',
+  'provider_name': 'DeepSeek 官网',
+  'model': model,
+  'model_name': model,
+  'input_tokens': input,
+  'output_tokens': output,
+  'cached_input_tokens': cached,
+  'reported': reported,
+  'created_at': createdAt.millisecondsSinceEpoch,
+};
 
 void main() {
   sqfliteFfiInit();
@@ -18,13 +59,15 @@ void main() {
     );
 
     final tables = (await db.db.rawQuery(
-      "SELECT name FROM sqlite_master WHERE type='table'",
+      "SELECT name FROM sqlite_master WHERE type='table' "
+      "AND name NOT LIKE 'sqlite_%'",
     )).map((r) => r['name'] as String).toSet();
 
     for (final expected in [
       'characters',
       'sessions',
       'messages',
+      'image_assets',
       'image_plugins',
       'image_providers',
       'prompt_items',
@@ -46,6 +89,28 @@ void main() {
     ]) {
       expect(tables, contains(expected), reason: '基线表 $expected 应存在');
     }
+    expect(tables, hasLength(22), reason: 'v75 基线共 22 张业务表');
+    expect(AppDatabase.schemaVersion, 75);
+    expect(
+      (await db.db.rawQuery('PRAGMA user_version')).single.values.single,
+      75,
+    );
+    final settingColumns = (await db.db.rawQuery(
+      "SELECT name FROM pragma_table_info('app_settings')",
+    )).map((r) => r['name'] as String).toSet();
+    expect(
+      settingColumns,
+      contains('compress_images'),
+      reason: 'v73 起新图片入库压缩开关可配置',
+    );
+    expect(
+      settingColumns,
+      containsAll([
+        'background_variable_injection',
+        'background_next_suggestions',
+      ]),
+      reason: 'v74 起 Agentic 增强开关可配置',
+    );
     // 2.0 清理掉的死表与死列。
     expect(
       tables,
@@ -63,8 +128,54 @@ void main() {
     )).map((r) => r['name'] as String).toSet();
     expect(
       messageColumns,
-      contains('image_prompt'),
-      reason: 'v65 起保存生图原始描述,供图片重新生成',
+      containsAll(['image_hash', 'image_url', 'image_prompt']),
+      reason: 'v72 起消息只保存图片哈希,URL 与生图描述保留',
+    );
+    expect(messageColumns, isNot(contains('image_base64')));
+
+    final characterColumns = (await db.db.rawQuery(
+      "SELECT name FROM pragma_table_info('characters')",
+    )).map((r) => r['name'] as String).toSet();
+    expect(characterColumns, containsAll(['avatar_hash', 'background_hash']));
+    expect(characterColumns, isNot(contains('avatar_base64')));
+    expect(characterColumns, isNot(contains('background_base64')));
+
+    final userColumns = (await db.db.rawQuery(
+      "SELECT name FROM pragma_table_info('user_profile')",
+    )).map((r) => r['name'] as String).toSet();
+    expect(userColumns, contains('avatar_hash'));
+    expect(userColumns, isNot(contains('avatar_base64')));
+
+    final assetColumns = (await db.db.rawQuery(
+      "SELECT name FROM pragma_table_info('image_assets')",
+    )).map((r) => r['name'] as String).toSet();
+    expect(assetColumns, {
+      'hash',
+      'byte_size',
+      'mime',
+      'width',
+      'height',
+      'ref_count',
+      'created_at',
+    });
+    final assetIndexes = (await db.db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='index' "
+      "AND tbl_name='image_assets'",
+    )).map((r) => r['name'] as String).toSet();
+    expect(assetIndexes, contains('idx_image_assets_reclaim'));
+
+    final filterIndexes = (await db.db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'",
+    )).map((r) => r['name'] as String).toSet();
+    expect(
+      filterIndexes,
+      containsAll([
+        'idx_sessions_character_id',
+        'idx_worldbook_entries_character_id',
+        'idx_llm_models_provider_id',
+        'idx_image_providers_plugin_id',
+      ]),
+      reason: 'v75 起高频筛选列有索引',
     );
 
     final sessionColumns = (await db.db.rawQuery(
@@ -79,11 +190,7 @@ void main() {
     final variableColumns = (await db.db.rawQuery(
       "SELECT name FROM pragma_table_info('variables')",
     )).map((r) => r['name'] as String).toSet();
-    expect(
-      variableColumns,
-      contains('agent_access'),
-      reason: 'v66 起变量带三档后台权限',
-    );
+    expect(variableColumns, contains('agent_access'), reason: 'v66 起变量带三档后台权限');
 
     final appSettingsColumns = (await db.db.rawQuery(
       "SELECT name FROM pragma_table_info('app_settings')",
@@ -107,11 +214,7 @@ void main() {
     final providerColumns = (await db.db.rawQuery(
       "SELECT name FROM pragma_table_info('llm_providers')",
     )).map((r) => r['name'] as String).toSet();
-    expect(
-      providerColumns,
-      isNot(contains('gateway_flags')),
-      reason: '旧列名已废弃',
-    );
+    expect(providerColumns, isNot(contains('gateway_flags')), reason: '旧列名已废弃');
     expect(providerColumns, contains('modern_params'));
     expect(
       providerColumns,
@@ -255,7 +358,11 @@ void main() {
       // 归档文件出现在同目录,主路径上是全新基线库。
       final files = dir.listSync().map((e) => p.basename(e.path)).toList();
       expect(
-        files.where((f) => f.startsWith('microscritt-legacy-v60-')),
+        files.where(
+          (f) =>
+              f.startsWith('microscritt-legacy-v60-') &&
+              !f.endsWith('.usage-salvaged'),
+        ),
         hasLength(1),
         reason: '旧库文件应被归档而非删除',
       );
@@ -330,7 +437,11 @@ void main() {
       final files = fakeHome.listSync().map((e) => p.basename(e.path)).toList();
       expect(files, contains('microscritt.db'));
       expect(
-        files.where((f) => f.startsWith('microscritt-legacy-v60-')),
+        files.where(
+          (f) =>
+              f.startsWith('microscritt-legacy-v60-') &&
+              !f.endsWith('.usage-salvaged'),
+        ),
         hasLength(1),
       );
 
@@ -381,4 +492,141 @@ void main() {
       await db.db.close();
     },
   );
+
+  test('legacy usage_records are salvaged into the rebuilt baseline', () async {
+    final dir = await Directory.systemTemp.createTemp('microscritt_test_');
+    addTearDown(() => dir.delete(recursive: true));
+    final legacyPath = p.join(dir.path, 'microscritt.db');
+
+    // v72 旧库:带逐请求用量明细。
+    final legacy = await databaseFactoryFfi.openDatabase(
+      legacyPath,
+      options: OpenDatabaseOptions(
+        version: 72,
+        onCreate: (db, version) async {
+          await db.execute(_usageRecordsDdl);
+          await db.insert(
+            'usage_records',
+            _usageRow(
+              input: 120,
+              output: 30,
+              cached: 20,
+              createdAt: DateTime(2026, 5, 1, 10),
+            ),
+          );
+          await db.insert(
+            'usage_records',
+            _usageRow(
+              kind: 'background',
+              model: 'deepseek-pro',
+              input: 40,
+              output: 10,
+              createdAt: DateTime(2026, 5, 2, 10),
+            ),
+          );
+        },
+      ),
+    );
+    await legacy.close();
+
+    final db = await AppDatabase.open(
+      factory: databaseFactoryFfi,
+      path: legacyPath,
+    );
+
+    // 统计页口径(聚合)与逐行数据都应保留。
+    final summary = await UsageRepository(db).summary();
+    expect(summary.requests, 2, reason: '升级重建后历史用量不归零');
+    expect(summary.totalTokens, 200);
+    expect(summary.cachedInputTokens, 20);
+    final rows = await db.db.query('usage_records', orderBy: 'id');
+    expect(rows, hasLength(2));
+    expect(rows.first['kind'], 'main');
+    expect(rows.last['model'], 'deepseek-pro');
+
+    final markers = dir
+        .listSync()
+        .map((e) => p.basename(e.path))
+        .where((name) => name.endsWith('.usage-salvaged'));
+    expect(markers, hasLength(1), reason: '归档只回灌一次');
+
+    await db.db.close();
+
+    // 二次启动不会重复回灌。
+    final reopened = await AppDatabase.open(
+      factory: databaseFactoryFfi,
+      path: legacyPath,
+    );
+    expect(await reopened.db.query('usage_records'), hasLength(2));
+    await reopened.db.close();
+  });
+
+  test('archives left by earlier upgrades are recovered once', () async {
+    final dir = await Directory.systemTemp.createTemp('microscritt_test_');
+    addTearDown(() => dir.delete(recursive: true));
+    final mainPath = p.join(dir.path, 'microscritt.db');
+
+    // 模拟本特性上线前遗留的 v71 归档:主库已是当前基线,归档未标记。
+    final archivePath = p.join(
+      dir.path,
+      'microscritt-legacy-v71-2026-01-01T00-00-00-000.db',
+    );
+    final archive = await databaseFactoryFfi.openDatabase(
+      archivePath,
+      options: OpenDatabaseOptions(
+        version: 71,
+        onCreate: (db, version) async {
+          await db.execute(_usageRecordsDdl);
+          await db.insert(
+            'usage_records',
+            _usageRow(createdAt: DateTime(2026, 1, 1, 9)),
+          );
+        },
+      ),
+    );
+    await archive.close();
+
+    final db = await AppDatabase.open(
+      factory: databaseFactoryFfi,
+      path: mainPath,
+    );
+    expect(
+      await db.db.query('usage_records'),
+      hasLength(1),
+      reason: '启动时应补救此前升级丢失的历史统计',
+    );
+    expect(File('$archivePath.usage-salvaged').existsSync(), isTrue);
+    await db.db.close();
+
+    final reopened = await AppDatabase.open(
+      factory: databaseFactoryFfi,
+      path: mainPath,
+    );
+    expect(await reopened.db.query('usage_records'), hasLength(1));
+    await reopened.db.close();
+  });
+
+  test('unreadable archives never block startup', () async {
+    final dir = await Directory.systemTemp.createTemp('microscritt_test_');
+    addTearDown(() => dir.delete(recursive: true));
+    final mainPath = p.join(dir.path, 'microscritt.db');
+    final archivePath = p.join(
+      dir.path,
+      'microscritt-legacy-v72-2026-01-01T00-00-00-000.db',
+    );
+    await File(archivePath).writeAsString('not a sqlite database');
+
+    final db = await AppDatabase.open(
+      factory: databaseFactoryFfi,
+      path: mainPath,
+    );
+    expect(await db.db.query('usage_records'), isEmpty);
+    expect(
+      File('$archivePath.usage-salvaged').existsSync(),
+      isFalse,
+      reason: '失败不写标记,下次启动重试',
+    );
+
+    await db.db.close();
+  });
 }

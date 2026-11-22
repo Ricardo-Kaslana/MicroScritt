@@ -13,6 +13,7 @@ import '../import/resource_importer.dart';
 import '../models/prompt_item.dart';
 import '../state/providers.dart';
 import 'common/app_menu.dart';
+import 'common/app_snack_bar.dart';
 import 'common/confirm_dialog.dart';
 import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
@@ -60,19 +61,12 @@ class PromptItemsScreen extends ConsumerWidget {
             original[i].kind == reordered[i].kind,
         ].every((same) => same);
     if (!sameKindLayout) {
-      _snack(context, '预设与规则不能互相调整顺序');
+      showAppSnack(context, '预设与规则不能互相调整顺序');
       return false;
     }
     await ref.read(promptItemRepositoryProvider).reorder(reordered);
     ref.invalidate(promptItemsProvider);
     return true;
-  }
-
-  static void _snack(BuildContext context, String message) {
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// 删除提示词项:确认弹层展示正文摘要,删除后不再进入 system。
@@ -277,9 +271,7 @@ class _PromptItemEditScreenState extends ConsumerState<PromptItemEditScreen> {
   Future<void> _save() async {
     if (_saving) return;
     if (_text.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('内容不能为空')));
+      showAppSnack(context, '内容不能为空');
       return;
     }
     setState(() => _saving = true);
@@ -310,6 +302,9 @@ class _PromptItemEditScreenState extends ConsumerState<PromptItemEditScreen> {
       }
       ref.invalidate(promptItemsProvider);
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      // 写库失败:留在本页保留表单,明确提示失败原因。
+      if (mounted) showAppSnack(context, '保存失败: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }

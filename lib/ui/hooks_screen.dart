@@ -12,6 +12,7 @@ import '../import/resource_importer.dart';
 import '../models/hook.dart';
 import '../state/providers.dart';
 import 'common/app_menu.dart';
+import 'common/app_snack_bar.dart';
 import 'common/confirm_dialog.dart';
 import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
@@ -217,15 +218,11 @@ class _HookEditScreenState extends ConsumerState<HookEditScreen> {
   Future<void> _save() async {
     if (_saving) return;
     if (_name.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('名字不能为空')));
+      showAppSnack(context, '名字不能为空');
       return;
     }
     if (_code.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('JS 代码不能为空')));
+      showAppSnack(context, 'JS 代码不能为空');
       return;
     }
     setState(() => _saving = true);
@@ -245,6 +242,9 @@ class _HookEditScreenState extends ConsumerState<HookEditScreen> {
       }
       ref.invalidate(hooksProvider);
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      // 写库失败:留在本页保留表单,明确提示失败原因。
+      if (mounted) showAppSnack(context, '保存失败: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -274,7 +274,7 @@ class _HookEditScreenState extends ConsumerState<HookEditScreen> {
           label: 'JS 代码 *',
           lines: 10,
           style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-          hint: '改写脚本...',
+          hint: '改写脚本…',
         ),
         const SizedBox(height: 12),
         SwitchListTile(

@@ -6,15 +6,15 @@ void main() {
   test('default user profile is empty', () {
     const user = UserProfile();
     expect(user.name, '');
-    expect(user.avatarBase64, isNull);
+    expect(user.avatarHash, isNull);
   });
 
   test('copyWith updates fields while keeping others', () {
-    const user = UserProfile(id: 1, name: 'a', avatarBase64: 'x');
+    const user = UserProfile(id: 1, name: 'a', avatarHash: 'x');
     final next = user.copyWith(name: 'b');
     expect(next.id, 1);
     expect(next.name, 'b');
-    expect(next.avatarBase64, 'x');
+    expect(next.avatarHash, 'x');
   });
 
   test('replaceUserPlaceholder only replaces when a username is set', () {

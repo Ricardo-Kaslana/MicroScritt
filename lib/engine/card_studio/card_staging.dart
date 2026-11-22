@@ -40,6 +40,22 @@ const Set<String> kEditableCardFieldKeySet = {
   'tags',
 };
 
+/// 可编辑卡面文本总长(列表字段按元素计,不含分隔符)。
+/// AI 暂存护栏与提交校验必须共用同一口径。
+int cardTextLengthOf(CharacterCard c) =>
+    c.name.length +
+    c.description.length +
+    c.personality.length +
+    c.scenario.length +
+    c.firstMessage.length +
+    c.mesExample.length +
+    c.systemPrompt.length +
+    c.postHistoryInstructions.length +
+    c.creatorNotes.length +
+    c.depthPrompt.length +
+    c.alternateGreetings.fold<int>(0, (s, v) => s + v.length) +
+    c.tags.fold<int>(0, (s, v) => s + v.length);
+
 /// 制卡暂存态。字段覆盖 last-action-wins;条目工作副本随 upsert/remove 变化。
 class CardStaging {
   /// 基线卡;null = 新建。
@@ -61,18 +77,18 @@ class CardStaging {
   /// 暂存的头像生图提示词;null/空 = 未产出。
   String? avatarPrompt;
 
-  /// 已生成的头像(base64,已缩图);与 [generatedPrompt] 配对。
-  String? avatarBase64;
+  /// 已生成并资产化的头像 hash;与 [generatedPrompt] 配对。
+  String? avatarHash;
 
-  /// 产生 [avatarBase64] 的提示词,用于避免重复生图。
+  /// 产生 [avatarHash] 的提示词,用于避免重复生图。
   String? generatedPrompt;
 
   CardStaging({
     this.baseCard,
     List<WorldbookEntry> baseEntries = const [],
     this.characterId = 0,
-  })  : baseEntries = List.unmodifiable(baseEntries),
-        _entries = List.of(baseEntries) {
+  }) : baseEntries = List.unmodifiable(baseEntries),
+       _entries = List.of(baseEntries) {
     // 多轮种子可能已带上轮新增条目(负临时 id);新 id 必须继续往更小分配,
     // 否则 `new:-1` 会撞号,审阅决策互相覆盖。
     for (final entry in _entries) {
@@ -106,7 +122,8 @@ class CardStaging {
     final b = baseCard;
     String str(String key, String fallback) =>
         _fields.containsKey(key) ? _fields[key] as String : fallback;
-    List<String> list(String key, List<String> fallback) => _fields.containsKey(key)
+    List<String> list(String key, List<String> fallback) =>
+        _fields.containsKey(key)
         ? List<String>.unmodifiable(_fields[key] as List<String>)
         : fallback;
     return CharacterCard(
@@ -117,14 +134,18 @@ class CardStaging {
       firstMessage: str('firstMessage', b?.firstMessage ?? ''),
       mesExample: str('mesExample', b?.mesExample ?? ''),
       systemPrompt: str('systemPrompt', b?.systemPrompt ?? ''),
-      postHistoryInstructions:
-          str('postHistoryInstructions', b?.postHistoryInstructions ?? ''),
+      postHistoryInstructions: str(
+        'postHistoryInstructions',
+        b?.postHistoryInstructions ?? '',
+      ),
       creatorNotes: str('creatorNotes', b?.creatorNotes ?? ''),
       depthPrompt: str('depthPrompt', b?.depthPrompt ?? ''),
-      avatarBase64: avatarBase64 ?? b?.avatarBase64,
-      backgroundBase64: b?.backgroundBase64,
-      alternateGreetings:
-          list('alternateGreetings', b?.alternateGreetings ?? const []),
+      avatarHash: avatarHash ?? b?.avatarHash,
+      backgroundHash: b?.backgroundHash,
+      alternateGreetings: list(
+        'alternateGreetings',
+        b?.alternateGreetings ?? const [],
+      ),
       tags: list('tags', b?.tags ?? const []),
       creator: b?.creator ?? '',
       characterVersion: b?.characterVersion ?? '',
@@ -167,7 +188,10 @@ class CardStaging {
   /// 追加新条目:分配负临时 id 与末尾 position。
   int addEntry(WorldbookEntry prototype) {
     final id = _nextTempId--;
-    final maxPos = _entries.fold<int>(-1, (m, e) => e.position > m ? e.position : m);
+    final maxPos = _entries.fold<int>(
+      -1,
+      (m, e) => e.position > m ? e.position : m,
+    );
     final entry = WorldbookEntry(
       id: id,
       characterId: characterId,
@@ -216,22 +240,8 @@ class CardStaging {
     return true;
   }
 
-  /// 可编辑卡面文本总长(护栏用;列表字段按条目计)。
-  int get cardTextLength {
-    final c = workingCard;
-    return c.name.length +
-        c.description.length +
-        c.personality.length +
-        c.scenario.length +
-        c.firstMessage.length +
-        c.mesExample.length +
-        c.systemPrompt.length +
-        c.postHistoryInstructions.length +
-        c.creatorNotes.length +
-        c.depthPrompt.length +
-        c.alternateGreetings.fold<int>(0, (s, v) => s + v.length) +
-        c.tags.fold<int>(0, (s, v) => s + v.length);
-  }
+  /// 可编辑卡面文本总长(护栏用)。
+  int get cardTextLength => cardTextLengthOf(workingCard);
 
   int get worldbookTextLength =>
       _entries.fold<int>(0, (s, e) => s + e.content.length);

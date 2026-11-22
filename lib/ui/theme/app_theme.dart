@@ -7,6 +7,8 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../common/layout_breakpoints.dart';
+
 /// 全局间距刻度(4 的倍数);布局留白从这里取,不写魔法数字。
 class AppSpacing {
   AppSpacing._();
@@ -15,6 +17,37 @@ class AppSpacing {
   static const double md = 12;
   static const double lg = 16;
   static const double xl = 24;
+}
+
+/// 统一圆角梯度:输入 12 / 按钮 14 / 卡片 16 / 底单 20。
+///
+/// 主题与共享卡片容器从这里取;页面里的小裁切(头像、缩略图)仍按自身
+/// 语义取值,不强行套用这四档。
+class AppRadius {
+  AppRadius._();
+  static const double input = 12;
+  static const double button = 14;
+  static const double card = 16;
+  static const double sheet = 20;
+  static const BorderRadius cardBorder = BorderRadius.all(
+    Radius.circular(card),
+  );
+}
+
+/// 发丝描边与分隔线的统一透明度。
+///
+/// 卡片、菜单、分组分隔线此前在 0.35–0.7 间各取一档,灰底上同一层级的
+/// 边界深浅不一;集中后只保留「卡片描边 / 分隔线」两档。
+class AppStroke {
+  AppStroke._();
+  static const double cardAlpha = 0.5;
+  static const double dividerAlpha = 0.6;
+
+  static BorderSide cardSide(ColorScheme scheme) =>
+      BorderSide(color: scheme.outlineVariant.withValues(alpha: cardAlpha));
+
+  static Color divider(ColorScheme scheme) =>
+      scheme.outlineVariant.withValues(alpha: dividerAlpha);
 }
 
 /// MicroScritt 的统一设计语言 —— 现代简洁、iOS 风格。
@@ -93,9 +126,9 @@ class AppTheme {
           ),
         );
 
-    // 统一的圆角语言。
-    const cardRadius = 16.0;
-    const buttonRadius = 14.0;
+    // 统一的圆角语言;数值来源见 [AppRadius]。
+    const cardRadius = AppRadius.card;
+    const buttonRadius = AppRadius.button;
 
     // 组件级文字样式(按钮 / 浮动提示 / 三点菜单)会替换 Material 默认的
     // DefaultTextStyle,不继承 ThemeData.fontFamily;统一从这里取主题字体,
@@ -106,7 +139,7 @@ class AppTheme {
       scaffoldBackgroundColor: groupedBg,
       canvasColor: groupedBg,
       textTheme: textTheme,
-      dividerColor: scheme.outlineVariant.withValues(alpha: 0.6),
+      dividerColor: AppStroke.divider(scheme),
       appBarTheme: const AppBarTheme(
         centerTitle: false,
         elevation: 0,
@@ -119,6 +152,7 @@ class AppTheme {
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(cardRadius),
+          side: AppStroke.cardSide(scheme),
         ),
         surfaceTintColor: Colors.transparent,
         shadowColor: Colors.transparent,
@@ -146,12 +180,17 @@ class AppTheme {
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(foregroundColor: scheme.primary),
       ),
+      // 浮动提示沿用 M3 的反色层级:浅色主题深底白字、深色主题浅底深字。
+      // 此前只写死白字不设底色,深色主题下会落到浅色 inverseSurface 上,
+      // 白字几乎不可读。
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        backgroundColor: scheme.inverseSurface,
+        actionTextColor: scheme.inversePrimary,
         contentTextStyle: TextStyle(
           fontFamily: fontFamily,
-          color: const Color(0xFFFFFFFF),
+          color: scheme.onInverseSurface,
         ),
       ),
       // 桌面滚动条:细圆角拇指取自主题色(静置发丝灰、悬停/拖动转主色),
@@ -197,8 +236,8 @@ class AppTheme {
       surfaceTintColor: Colors.transparent,
       elevation: 2,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.45)),
+        borderRadius: BorderRadius.circular(AppRadius.button),
+        side: AppStroke.cardSide(scheme),
       ),
       menuPadding: const EdgeInsets.symmetric(vertical: 6),
       textStyle: itemTextStyle.copyWith(color: scheme.onSurface),
@@ -220,9 +259,11 @@ class AppTheme {
       backgroundColor: scheme.surface,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
-      constraints: const BoxConstraints(maxWidth: 640),
+      constraints: const BoxConstraints(maxWidth: kSheetMaxWidth),
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(AppRadius.sheet),
+        ),
       ),
       clipBehavior: Clip.antiAlias,
     );
@@ -239,29 +280,31 @@ class AppTheme {
       filled: true,
       fillColor: fill,
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.input),
         borderSide: BorderSide(color: scheme.primary, width: 1.4),
       ),
       enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.input),
         borderSide: BorderSide.none,
       ),
       focusedErrorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.input),
         borderSide: BorderSide(color: scheme.error, width: 1.4),
       ),
       errorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.input),
         borderSide: BorderSide.none,
       ),
       disabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.input),
         borderSide: BorderSide.none,
       ),
       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
       labelStyle: TextStyle(color: scheme.onSurfaceVariant, fontSize: 14),
       hintStyle: TextStyle(
-        color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+        // 0.7 在浅色灰底上约 3.7:1,低于小字号正文门槛;0.85 仍弱于
+        // 输入值但足够可读。
+        color: scheme.onSurfaceVariant.withValues(alpha: 0.85),
         fontSize: 14,
       ),
     );

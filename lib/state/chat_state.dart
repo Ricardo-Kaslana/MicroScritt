@@ -82,6 +82,14 @@ class ChatState {
   /// 具体的键值明细;状态面板仍按摘要逐键回看。
   final BackgroundVariableStats? backgroundVariableStats;
 
+  /// Agentic 后台产出的下一步建议(用户口吻、可直接发送)。非空时聊天页自动
+  /// 弹出底单;关闭/忽略即清空。纯内存态,不跨会话/重启。
+  final List<String> nextSuggestions;
+
+  /// Agentic 后台产出的记忆提议(完整替换文本,纯内存态):只给用户审阅,
+  /// 采用后写入记忆库,应用到上下文仍走显式按钮。null = 无待审阅提议。
+  final String? memoryProposal;
+
   /// 最近一次组装出的上下文快照(发送时更新;load 时给出基线预览)。
   /// 供上下文面板实时展示分段组成与消息数。
   final ContextSnapshot? lastContext;
@@ -153,6 +161,8 @@ class ChatState {
     this.backgroundStatus = BackgroundStatus.idle,
     this.backgroundSummary = '',
     this.backgroundVariableStats,
+    this.nextSuggestions = const [],
+    this.memoryProposal,
     this.lastContext,
     this.frozenMemory,
     this.lastSentInputTokens,
@@ -192,6 +202,8 @@ class ChatState {
     BackgroundStatus? backgroundStatus,
     String? backgroundSummary,
     Object? backgroundVariableStats = _unset,
+    List<String>? nextSuggestions,
+    Object? memoryProposal = _unset,
     ContextSnapshot? lastContext,
     Object? frozenMemory = _unset,
     Object? lastSentInputTokens = _unset,
@@ -232,6 +244,10 @@ class ChatState {
     backgroundVariableStats: identical(backgroundVariableStats, _unset)
         ? this.backgroundVariableStats
         : backgroundVariableStats as BackgroundVariableStats?,
+    nextSuggestions: nextSuggestions ?? this.nextSuggestions,
+    memoryProposal: identical(memoryProposal, _unset)
+        ? this.memoryProposal
+        : memoryProposal as String?,
     lastContext: lastContext ?? this.lastContext,
     frozenMemory: identical(frozenMemory, _unset)
         ? this.frozenMemory

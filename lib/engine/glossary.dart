@@ -86,10 +86,12 @@ CompiledGlossary compileGlossary(List<WorldbookEntry> entries) {
   } else {
     final terms = byLowerTerm.values.toList()
       ..sort((a, b) => b.term.length.compareTo(a.term.length));
-    final alternation = terms.map((t) {
-      final escaped = RegExp.escape(t.term);
-      return t.wholeWord ? r'\b' + escaped + r'\b' : escaped;
-    }).join('|');
+    final alternation = terms
+        .map((t) {
+          final escaped = RegExp.escape(t.term);
+          return t.wholeWord ? r'\b' + escaped + r'\b' : escaped;
+        })
+        .join('|');
     result = CompiledGlossary._(
       terms,
       RegExp(alternation, caseSensitive: false),
@@ -101,6 +103,8 @@ CompiledGlossary compileGlossary(List<WorldbookEntry> entries) {
   return result;
 }
 
-/// 纯 ASCII 词(可加 \b 词边界):全部字符都在可打印 ASCII 范围内。
-bool _isAsciiWord(String s) =>
-    s.isNotEmpty && s.codeUnits.every((c) => c >= 0x20 && c <= 0x7E);
+/// 纯 ASCII 单词(可加 \b 词边界):只含字母/数字/下划线。含 `C++`、`e.g.`
+/// 等非单词字符的词条加 \b 会永远不命中,必须回退子串匹配。
+final _asciiWordPattern = RegExp(r'^[A-Za-z0-9_]+$');
+
+bool _isAsciiWord(String s) => _asciiWordPattern.hasMatch(s);

@@ -4,6 +4,8 @@
 /// 富文本都在气泡内完成;窗口化与分页由控制器决定,本列表不回库、不写消息。
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -13,6 +15,7 @@ import '../../engine/glossary.dart';
 import '../../models/bubble_style.dart';
 import '../../models/message.dart';
 import '../common/chat_layout.dart';
+import '../common/inline_spinner.dart';
 import '../common/motion.dart';
 import '../text_syntax.dart';
 import 'message_bubble.dart';
@@ -21,8 +24,19 @@ import 'rich_message_text.dart';
 /// 消息气泡的操作入口:复制 / 编辑 / 删除 / 重新生成(仅助手)/
 /// 按要求重写(仅最新一条有正文的助手回复,其后允许跟图片消息)/
 /// 重新发送(仅用户,把该条输入原样重发一遍)/
-/// 重新生成图片(带原始描述的图片)。
-enum MessageAction { copy, edit, delete, regenerate, rewrite, resend, regenerateImage }
+/// 重新生成 / 按要求重新生成(带原始描述的图片)/ 进入多选 / 下载图片。
+enum MessageAction {
+  copy,
+  edit,
+  delete,
+  regenerate,
+  rewrite,
+  resend,
+  regenerateImage,
+  reviseImagePrompt,
+  select,
+  download,
+}
 
 /// 聊天消息列表。
 ///
@@ -63,7 +77,7 @@ class MessageList extends StatefulWidget {
 
   /// 用户头像图片 provider(由 chat_screen 缓存后注入,同一实例全列表共用),
   /// 显示在用户气泡旁;为空时回退占位图标。共用同一实例可避免流式回复期间
-  /// 整页重建时每条用户消息各自 new MemoryImage 被反复解码而频闪。
+  /// 整页重建时每条用户消息各自新建 provider 而频闪。
   final ImageProvider? userAvatarImage;
 
   /// 角色头像图片 provider(与用户头像同款:chat_screen 按 base64 缓存实例),
@@ -99,9 +113,6 @@ class MessageList extends StatefulWidget {
   /// 角色级气泡样式(仅助手气泡生效;null = 应用默认)。
   final BubbleStyle? assistantBubbleStyle;
 
-  /// 按消息 id 惰性读取 image_base64(轻量查询后图片不随列表加载)。
-  final Future<String?> Function(int messageId)? imageLoader;
-
   /// 删除某条消息中的图片(全屏查看器"删除图片"按钮);null = 图片不可删。
   final Future<void> Function(int messageId)? onImageDelete;
 
@@ -109,11 +120,17 @@ class MessageList extends StatefulWidget {
   /// 操作行的图片重生成按钮禁用。
   final int? regeneratingImageId;
 
-  /// 各消息图片内容的本地修订号(原地替换后递增,气泡据此重新读库)。
-  final Map<int, int> imageRevisions;
-
   /// 搜索命中的消息 id:对应气泡叠一圈强调描边与外发光,短暂提示定位结果。
   final int? highlightedMessageId;
+
+  /// 是否处于多选模式:点击气泡切换 [selection],不显示单条操作排。
+  final bool selectionMode;
+
+  /// 多选模式下当前选中的消息 id 集合;null = 多选关闭。
+  final ValueListenable<Set<int>>? selection;
+
+  /// 多选模式下点击某条气泡的切换回调。
+  final void Function(int messageId)? onSelectionToggle;
 
   const MessageList({
     super.key,
@@ -139,11 +156,12 @@ class MessageList extends StatefulWidget {
     this.onTermTap,
     this.highlightDialogue = true,
     this.assistantBubbleStyle,
-    this.imageLoader,
     this.onImageDelete,
     this.regeneratingImageId,
-    this.imageRevisions = const {},
     this.highlightedMessageId,
+    this.selectionMode = false,
+    this.selection,
+    this.onSelectionToggle,
   });
 
   @override
@@ -183,6 +201,11 @@ class MessageListState extends State<MessageList> {
   /// 重建都要扫一遍列表。
   Map<int, int> _visibleIndexById = const {};
 
+  /// 定位请求代数:新的 reveal(搜索返回后连点导航、或连点两条卡片项)会
+  /// 作废仍在收敛的旧循环 —— 两个循环各自 jumpTo 会把视口在相邻消息之间
+  /// 来回拉扯,表现为疯狂抖动。
+  int _revealSeq = 0;
+
   /// 当前被选中、因而显示下方操作按钮的消息 id(null 表示都不显示)。
   /// 走 [ValueNotifier] 而非 setState 字段:切换选中时每个可见条目各自监听、
   /// 只在**本条**的选中态翻转时重建自己 —— 点选一条消息不再整列表 setState
@@ -192,6 +215,18 @@ class MessageListState extends State<MessageList> {
   void _toggle(int id) {
     _selectedId.value = _selectedId.value == id ? null : id;
     widget.onActionsVisibleChanged?.call(_selectedId.value != null);
+  }
+
+  @override
+  void didUpdateWidget(covariant MessageList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 进入多选时收起单条操作排:两种选择态互斥,否则按钮排会盖住列表底部。
+    if (widget.selectionMode && !oldWidget.selectionMode) {
+      _selectedId.value = null;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onActionsVisibleChanged?.call(false);
+      });
+    }
   }
 
   @override
@@ -341,52 +376,142 @@ class MessageListState extends State<MessageList> {
     return list;
   }
 
-  /// 搜索跳转的定位边距:目标气泡顶边距视口顶部留一点呼吸空间。
+  /// 搜索/导航跳转的对齐边距:目标气泡顶边距视口顶部留一点呼吸空间。
   static const double _revealTopMargin = 12;
 
-  /// 把指定消息滚动到视口内(聊天页搜索命中后的跳转)。
+  /// 定位循环的帧预算。正常 2–3 轮即可落定,预算只兜底极端高度差。
+  static const int _revealFrameBudget = 64;
+
+  /// 目标未布局时每轮至少推进的视口比例。估算偏小时(例如窗口内全是短
+  /// 文本、目标一侧全是图片)仍能单调逼近,不会在几十轮里只挪几条消息。
+  static const double _revealMinStepScreens = 0.8;
+
+  /// 目标未布局时连续「像素未变化」的轮数上限,超过即判定无法继续推进。
+  static const int _revealStallLimit = 2;
+
+  /// 条目间距先验(仅用于跨窗口外推;消息组间距远小于它,误差可忽略)。
+  static const double _estimatedItemGap = 6;
+
+  /// 主动等一个真实布局帧再继续定位。
   ///
-  /// 目标可能刚经 `ChatController.revealMessage` 扩窗补入,先等列表重建到
-  /// 可见投影里出现该 id;随后按**反向列表下标**定位 —— `reverse: true` 下
-  /// 条目 offset 从内容底部起算,目标不在已布局窗口时用已布局条目的
-  /// index→offset 局部斜率估算落点,跳到附近后再由真实布局校正,最多多帧
-  /// 收敛。返回是否成功滚到目标。
-  Future<bool> revealMessage(int messageId) async {
-    for (var attempt = 0; attempt < 12; attempt++) {
-      if (!mounted) return false;
-      if (_visibleIndexById.containsKey(messageId)) break;
-      await WidgetsBinding.instance.endOfFrame;
-    }
-    if (!_visibleIndexById.containsKey(messageId)) return false;
-    return _scrollToMessage(messageId);
+  /// `jumpTo` 只改 `position.pixels`,条目要等下一帧由 sliver 重排。此刻若
+  /// 没有别的脏对象,`endOfFrame` 可能迟迟不落 —— 旧循环于是读到**上一帧**
+  /// 的几何,按同一份数据算出同样的落点反复跳,表现为疯狂抖动且永远到不了
+  /// 目标。必须显式催帧。
+  Future<void> _awaitLayoutFrame() async {
+    WidgetsBinding.instance.scheduleForcedFrame();
+    await WidgetsBinding.instance.endOfFrame;
   }
 
-  /// 多帧收敛到 [messageId] 对应的条目。
+  /// 视口当前对应的 user 消息 id(桌面消息导航的高亮与展开定位口径)。
   ///
-  /// 每轮按当前可见投影重算反向下标(流式/分页可能在收敛途中改动列表),
-  /// 再按「已布局就精确对齐、未布局就局部斜率估算」推进。本列表条目高度差异
-  /// 极大(短文本 ~100px vs 图片气泡最高 520px),懒加载下 `maxScrollExtent`
-  /// 只是估算,无法一次算出精确位置;跳到估算落点后目标附近随即参与布局,
-  /// 下一轮即可按真实 `layoutOffset` 对齐其顶边。
-  Future<bool> _scrollToMessage(int messageId) async {
-    for (var attempt = 0; attempt < 40; attempt++) {
-      if (!mounted) return false;
+  /// 以视口内最上方/最下方的已布局条目确定可见时间段,先在其中找最靠上的
+  /// user;视口里没有 user 时才向上找刚滚过的那条。纯滚动比例
+  /// (`pixels / maxScrollExtent`)在条目高度差异大的会话里会指到相邻的
+  /// 其它消息 —— 用户看到"已经跳到目标,卡片高亮的却是别人"。
+  int? visibleUserMessageId() {
+    if (!widget.controller.hasClients) return null;
+    final visible = _visibleMessages;
+    if (visible == null || visible.isEmpty) return null;
+    final items = _getRenderedItems();
+    if (items.isEmpty) return null;
+    final pos = widget.controller.position;
+    final viewFar = pos.pixels + pos.viewportDimension;
+    final hasDraft = widget.draft.isNotEmpty || widget.streaming;
+    final leading = hasDraft ? 1 : 0;
+    final oldestRealIndex = leading + visible.length - 1;
+    _RenderItemInfo? top;
+    _RenderItemInfo? bottom;
+    for (final item in items) {
+      // 草稿与历史加载行是伪条目:它们没有时间序位置,进入视口时既不能
+      // 把锚点判成 null(滚到接近顶部时高亮会卡在旧值),也不能参与换算。
+      if (item.index < leading || item.index > oldestRealIndex) continue;
+      // 只取与视口相交的条目:上边缘在视口顶之下,下边缘在视口底之上。
+      if (item.layoutOffset >= viewFar - 1) continue;
+      if (item.bottom <= pos.pixels + 1) continue;
+      if (top == null || item.layoutOffset > top.layoutOffset) top = item;
+      if (bottom == null || item.layoutOffset < bottom.layoutOffset) {
+        bottom = item;
+      }
+    }
+    if (top == null) return null;
+    final topLogical = visible.length - 1 - (top.index - leading);
+    if (topLogical < 0 || topLogical >= visible.length) return null;
+    final bottomLogical = bottom == null
+        ? topLogical
+        : (visible.length - 1 - (bottom.index - leading)).clamp(
+            0,
+            visible.length - 1,
+          );
+    for (var logical = topLogical; logical <= bottomLogical; logical++) {
+      final message = visible[logical];
+      if (message.role == 'user' && message.id != null) return message.id;
+    }
+    for (var logical = topLogical - 1; logical >= 0; logical--) {
+      final message = visible[logical];
+      if (message.role == 'user' && message.id != null) return message.id;
+    }
+    return null;
+  }
+
+  /// 作废仍在飞的定位循环(回顶/回底等新的滚动意图接管视口)。
+  ///
+  /// 只递增代数、不碰滚动位置:在飞的 [_scrollToMessage] 下一轮检查代数后
+  /// 自行退出,不再与新的滚动意图互相拉扯。
+  void cancelReveal() {
+    _revealSeq++;
+  }
+
+  /// 把指定消息滚动到视口内(聊天页搜索/桌面导航的跳转入口)。
+  ///
+  /// 目标可能刚经 `ChatController.revealMessage` 扩窗补入,先等列表重建到
+  /// 可见投影里出现该 id;之后交给 [_scrollToMessage] 定位。返回是否成功。
+  Future<bool> revealMessage(int messageId) async {
+    final seq = ++_revealSeq;
+    for (var attempt = 0; attempt < 12; attempt++) {
+      if (!mounted || seq != _revealSeq) return false;
+      if (_visibleIndexById.containsKey(messageId)) break;
+      await _awaitLayoutFrame();
+    }
+    if (!_visibleIndexById.containsKey(messageId)) return false;
+    return _scrollToMessage(messageId, seq);
+  }
+
+  /// 定位到 [messageId] 对应的条目。
+  ///
+  /// 两段式设计:
+  /// 1. **目标一旦参与布局**,按 `layoutOffset` 一次精确对顶,随即返回 ——
+  ///    不再追图片解码/异步改高造成的几像素漂移,那是旧实现多帧微调、视口
+  ///    在相邻条目间反复跳的直接来源。
+  /// 2. **目标未布局**,按窗口外条目的**内容先验高度**累计出真实距离,朝目标
+  ///    一侧单方向推进;每轮至少推进 [_revealMinStepScreens] 个视口。方向
+  ///    由 `targetIndex` 与已布局窗口的上下界决定,绝不用估算值定方向 ——
+  ///    估算反向时旧实现会与下一轮互相拉扯,表现为疯狂抖动且最终到不了。
+  ///
+  /// `jumpTo` 允许越过当前 `maxScrollExtent`:懒加载列表的该值只是估算,
+  /// 落到边界后远端条目参与布局、上限随之增长,下一轮继续。旧实现在边界处
+  /// 直接放弃,长会话里目标永远到不了。
+  Future<bool> _scrollToMessage(int messageId, int seq) async {
+    var stalled = 0;
+    for (var attempt = 0; attempt < _revealFrameBudget; attempt++) {
+      if (!mounted || seq != _revealSeq) return false;
       final logical = _visibleIndexById[messageId];
       final visible = _visibleMessages;
       if (logical == null || visible == null) return false;
+
       final hasDraft = widget.draft.isNotEmpty || widget.streaming;
       final leading = hasDraft ? 1 : 0;
-      final total =
-          visible.length +
-          leading +
-          ((widget.canLoadOlder || widget.loadingOlder) ? 1 : 0);
-      final targetIndex = leading + visible.length - 1 - logical;
+      final oldestRealIndex = leading + visible.length - 1;
+      final targetIndex = oldestRealIndex - logical;
+
       if (!widget.controller.hasClients) {
-        await WidgetsBinding.instance.endOfFrame;
+        await _awaitLayoutFrame();
         continue;
       }
       final pos = widget.controller.position;
       final items = _getRenderedItems();
+
+      // 1) 目标已布局:一次精确落位,立即结束。
       _RenderItemInfo? target;
       for (final item in items) {
         if (item.index == targetIndex) {
@@ -397,70 +522,122 @@ class MessageListState extends State<MessageList> {
       if (target != null) {
         // reverse 下标下 layoutOffset 是条目**底边**到内容底部的距离,
         // bottom = layoutOffset + height 是视觉**上边缘**;把上边缘对齐
-        // 视口顶边: pixels = bottom - viewport。
+        // 视口顶边:pixels = bottom - viewport。
         final desired =
             (target.bottom - pos.viewportDimension + _revealTopMargin).clamp(
-              0.0,
+              pos.minScrollExtent,
               pos.maxScrollExtent,
             );
-        if ((pos.pixels - desired).abs() <= 1.0) return true;
-        pos.jumpTo(desired);
-        await WidgetsBinding.instance.endOfFrame;
+        if ((pos.pixels - desired).abs() > 1.0) {
+          pos.jumpTo(desired);
+          // 落位帧:调用方随后要读可见锚点、断言目标已进入视口,必须等
+          // 这一帧的布局真正完成,否则拿到的还是跳转前的渲染树。
+          await _awaitLayoutFrame();
+        }
+        return true;
+      }
+
+      if (items.isEmpty) {
+        // 还没有任何条目落地:先回到 offset 0(最新)让列表开始布局,
+        // 而不是盲跳估算的顶部。
+        pos.jumpTo(pos.pixels > 1.0 ? 0.0 : math.min(1.0, pos.maxScrollExtent));
+        await _awaitLayoutFrame();
         continue;
       }
-      final estimate = _estimateOffset(
-        items,
-        targetIndex,
-        total,
-        pos.maxScrollExtent,
+
+      // 2) 目标未布局:方向由下标边界决定,距离由内容先验估算。
+      final sorted = [...items]..sort((a, b) => a.index.compareTo(b.index));
+      final wantsOlder = targetIndex > sorted.last.index;
+      final wantsNewer = targetIndex < sorted.first.index;
+      if (!wantsOlder && !wantsNewer) return false;
+      final anchor = wantsOlder ? sorted.last : sorted.first;
+      final estimatedBottom = _estimateTargetBottom(
+        visible: visible,
+        leading: leading,
+        anchor: anchor,
+        targetIndex: targetIndex,
       );
-      final clamped = estimate.clamp(0.0, pos.maxScrollExtent);
-      if ((pos.pixels - clamped).abs() <= 1.0) {
-        // 估算饱和在当前 maxScrollExtent 而目标仍未布局:若目标接近列表
-        // 顶端,先跳到估算顶部让远端条目参与布局、修正 max 后再试;否则
-        // 说明索引/窗口已经错位,放弃(UI 仍可用,只是没有自动定位)。
-        if (pos.pixels < pos.maxScrollExtent - 1) {
-          pos.jumpTo(pos.maxScrollExtent);
-        } else {
-          return false;
-        }
+      final estimatedPixels =
+          estimatedBottom - pos.viewportDimension + _revealTopMargin;
+      final minStep = pos.viewportDimension * _revealMinStepScreens;
+      var desired = wantsOlder
+          ? math.max(estimatedPixels, pos.pixels + minStep)
+          : math.min(estimatedPixels, pos.pixels - minStep);
+      // 不超过框架当前给出的内容上界:越过它会被 position 立即 clamp 回来,
+      // 下一帧布局还可能回缩 maxScrollExtent,产生一次反向修正 —— 视口
+      // 先冲过头再被拉回,就是用户看到的"抖一下"。到边界后下一轮等远端
+      // 条目布局、上限增长再继续,单调推进不放弃。
+      desired = desired.clamp(pos.minScrollExtent, pos.maxScrollExtent);
+
+      final before = pos.pixels;
+      pos.jumpTo(desired);
+      await _awaitLayoutFrame();
+      if (!mounted || seq != _revealSeq) return false;
+      if ((pos.pixels - before).abs() < 1.0) {
+        if (++stalled >= _revealStallLimit) return false;
+        // 已顶在内容边界:等目标侧的新条目参与布局后再试一轮。
+        await _awaitLayoutFrame();
       } else {
-        pos.jumpTo(clamped);
+        stalled = 0;
       }
-      await WidgetsBinding.instance.endOfFrame;
     }
     return false;
   }
 
-  double _estimateOffset(
-    List<_RenderItemInfo> items,
-    int targetIndex,
-    int total,
-    double maxScrollExtent,
-  ) {
-    if (items.isEmpty) return maxScrollExtent;
-    final sorted = [...items]..sort((a, b) => a.index.compareTo(b.index));
-    // 距离目标最近的两条(不限同侧)拟合局部斜率:index 越大 offset 越大。
-    final nearest = [...sorted]
-      ..sort(
-        (a, b) => (a.index - targetIndex).abs().compareTo(
-          (b.index - targetIndex).abs(),
-        ),
-      );
-    final anchor = nearest.first;
-    final other = nearest.length > 1 ? nearest[1] : null;
-    var slope = 0.0;
-    if (other != null && other.index != anchor.index) {
-      slope =
-          (anchor.layoutOffset - other.layoutOffset) /
-          (anchor.index - other.index);
+  /// 估算 [targetIndex] 条目的视觉上边缘到内容底部的距离(bottom)。
+  ///
+  /// 从已布局窗口的端点 [anchor] 出发,逐条累计未布局条目的**内容先验高度**。
+  /// 旧实现用最近两条的局部斜率外推:条目高度差异大(短文本 ~100px、图片
+  /// 气泡最高 520px、长文可达数千 px)时斜率毫无代表性,估算可偏离真值一个
+  /// 数量级 —— 这正是长会话定位抖动/到不了的根源。按内容逐条累计把误差
+  /// 收敛到单条级别,再配合单方向推进,通常两三轮即可落到目标。
+  double _estimateTargetBottom({
+    required List<Message> visible,
+    required int leading,
+    required _RenderItemInfo anchor,
+    required int targetIndex,
+  }) {
+    var edge = anchor.bottom;
+    if (targetIndex > anchor.index) {
+      var index = anchor.index;
+      while (index < targetIndex) {
+        final logical = leading + visible.length - 1 - index;
+        final height = index == anchor.index
+            ? anchor.height
+            : (logical >= 0 && logical < visible.length)
+            ? _estimatedEntryHeight(visible[logical])
+            : 120.0;
+        edge += height + _estimatedItemGap;
+        index++;
+      }
+    } else {
+      var index = anchor.index;
+      while (index > targetIndex) {
+        final logical = leading + visible.length - 1 - (index - 1);
+        final height = (logical >= 0 && logical < visible.length)
+            ? _estimatedEntryHeight(visible[logical])
+            : 120.0;
+        edge -= height + _estimatedItemGap;
+        index--;
+      }
     }
-    if (!slope.isFinite || slope <= 0) {
-      // 退化(只有一个已布局条目等):退回整表平均高度。
-      slope = total > 1 ? maxScrollExtent / (total - 1) : 120.0;
-    }
-    if (!slope.isFinite || slope <= 0) slope = 120.0;
-    return anchor.layoutOffset + (targetIndex - anchor.index) * slope;
+    return edge;
+  }
+
+  /// 单条消息在滚动方向上的高度先验(含头像行与气泡内边距)。
+  ///
+  /// 只服务于跨窗口外推,不需要像素级准确 —— 相错一两倍也会被下一轮的
+  /// 「目标已布局 → 精确对顶」纠正,但必须体现文本长度与图片的巨大差异,
+  /// 否则跨几十上百条的累计会完全失真。
+  double _estimatedEntryHeight(Message message) {
+    // 桌面阅读列约 880、中文正文 16px:每行约 34 字,行高 24。
+    final lines = (message.content.runes.length / 34)
+        .ceil()
+        .clamp(1, 400)
+        .toDouble();
+    var height = 74.0 + lines * 24.0; // 头像行 + 气泡上下内边距
+    if (message.hasVisualImage) height += 280; // 图片中位高度(上界 520)
+    return height.clamp(96.0, 9600.0);
   }
 
   /// 流式草稿正文:常规长度走完整显示管线(宏替换 + 正则脚本 + 词条高亮 +
@@ -541,10 +718,6 @@ class MessageListState extends State<MessageList> {
       }
     }
     final visible = _visibleMessages ?? const <Message>[];
-    // 按修改要求重写只对「最新一条有正文的助手回复」开放:其后允许跟后台
-    // 生图落库的图片消息;更旧的回复后面若还有用户消息或其他有正文回复,
-    // 重写会连带剪掉它们,不给入口。
-    final rewritable = latestRewritableAssistantReply(visible);
     final hasDraft = widget.draft.isNotEmpty || widget.streaming;
     final hasHistoryLoader = widget.canLoadOlder || widget.loadingOlder;
     final leading = hasDraft ? 1 : 0;
@@ -633,9 +806,13 @@ class MessageListState extends State<MessageList> {
             child: _MessageItem(
               message: m,
               selectedId: _selectedId,
+              selectionMode: widget.selectionMode,
+              selection: widget.selection,
               userAvatarImage: widget.userAvatarImage,
               assistantAvatarImage: widget.assistantAvatarImage,
-              onAvatarTap: m.role == 'user'
+              onAvatarTap: widget.selectionMode
+                  ? null
+                  : m.role == 'user'
                   ? widget.onUserAvatarTap
                   : widget.onAssistantAvatarTap,
               displayUserName: widget.displayUserName,
@@ -646,16 +823,20 @@ class MessageListState extends State<MessageList> {
               onTermTap: widget.onTermTap,
               highlightDialogue: widget.highlightDialogue,
               assistantBubbleStyle: widget.assistantBubbleStyle,
-              imageLoader: widget.imageLoader,
               onImageDelete: widget.onImageDelete,
               regenerating: widget.regeneratingImageId == m.id,
-              canRewrite: m.id != null && m.id == rewritable?.id,
-              imageRevision: widget.imageRevisions[m.id] ?? 0,
               highlighted: widget.highlightedMessageId == m.id,
               groupStart: prev == null || prev.role != m.role,
               groupEnd: next == null || next.role != m.role,
-              onTap: m.id == null ? null : () => _toggle(m.id!),
-              onLongPress: widget.onMessageLongPress == null
+              onTap: m.id == null
+                  ? null
+                  : widget.selectionMode
+                  ? (widget.onSelectionToggle == null
+                        ? null
+                        : () => widget.onSelectionToggle!(m.id!))
+                  : () => _toggle(m.id!),
+              onLongPress:
+                  widget.selectionMode || widget.onMessageLongPress == null
                   ? null
                   : () => widget.onMessageLongPress!(m),
               onAction: widget.onMessageAction == null
@@ -682,18 +863,24 @@ class MessageListState extends State<MessageList> {
               children: [
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 2, 12, 0),
-                  child: GestureDetector(
-                    onTap: widget.onAssistantAvatarTap,
-                    child: CircleAvatar(
-                      radius: kMessageAvatarRadius,
-                      // foregroundImage 失败时下方 child 占位自然露出,
-                      // 坏图不会再留一个空白圆。
-                      foregroundImage: widget.assistantAvatarImage,
-                      onForegroundImageError:
-                          widget.assistantAvatarImage == null
-                          ? null
-                          : (_, __) {},
-                      child: const Icon(Icons.person_outline, size: 20),
+                  child: Semantics(
+                    button: widget.onAssistantAvatarTap != null,
+                    label: widget.onAssistantAvatarTap == null
+                        ? null
+                        : '查看角色资料',
+                    child: GestureDetector(
+                      onTap: widget.onAssistantAvatarTap,
+                      child: CircleAvatar(
+                        radius: kMessageAvatarRadius,
+                        // foregroundImage 失败时下方 child 占位自然露出,
+                        // 坏图不会再留一个空白圆。
+                        foregroundImage: widget.assistantAvatarImage,
+                        onForegroundImageError:
+                            widget.assistantAvatarImage == null
+                            ? null
+                            : (_, __) {},
+                        child: const Icon(Icons.person_outline, size: 20),
+                      ),
                     ),
                   ),
                 ),
@@ -729,11 +916,13 @@ class MessageListState extends State<MessageList> {
 /// [key] 必须落在这层包装上:sliver 的直接子项才是 `findChildIndexCallback`
 /// 的匹配对象,key 埋在行内容里会退回按下标匹配(删消息后幸存图片条目被
 /// 销毁重建、已解码帧丢失)。
+///
+/// 根 widget 类型在所有宽度下保持一致:Flutter 匹配 Element 时同时要求
+/// runtimeType 与 key,窄窗返回 KeyedSubtree、宽窗返回 Align 会让窗口跨过
+/// 宽窗断点时即使 key 相同也销毁整条消息子树(图片 State/解码帧一起丢,
+/// 拖拽宽度表现为闪灰)。窄窗把列宽退化为 infinity,视觉上仍是满宽。
 Widget _columnRow(double windowWidth, {Key? key, required Widget child}) {
   final columnWidth = chatColumnMaxWidth(windowWidth);
-  if (columnWidth == double.infinity) {
-    return key == null ? child : KeyedSubtree(key: key, child: child);
-  }
   return Align(
     key: key,
     alignment: Alignment.topCenter,
@@ -777,6 +966,10 @@ class _MessageItem extends StatefulWidget {
   /// 全列表共享的选中消息 id notifier(null = 无选中)。
   final ValueListenable<int?> selectedId;
 
+  /// 多选模式:选中态改由 [selection] 集合驱动,不渲染单条操作排。
+  final bool selectionMode;
+  final ValueListenable<Set<int>>? selection;
+
   /// 组内首条(上方无同角色消息):顶部间距加大,形成组间留白。
   final bool groupStart;
 
@@ -797,13 +990,9 @@ class _MessageItem extends StatefulWidget {
   final void Function(GlossaryTerm term)? onTermTap;
   final bool highlightDialogue;
   final BubbleStyle? assistantBubbleStyle;
-  final Future<String?> Function(int messageId)? imageLoader;
   final Future<void> Function(int messageId)? onImageDelete;
   final bool regenerating;
 
-  /// 本条是列表里最新一条可见对话行且为助手回复:显示「按要求重写」入口。
-  final bool canRewrite;
-  final int imageRevision;
   final bool highlighted;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
@@ -814,6 +1003,8 @@ class _MessageItem extends StatefulWidget {
     required this.selectedId,
     required this.groupStart,
     required this.groupEnd,
+    this.selectionMode = false,
+    this.selection,
     this.userAvatarImage,
     this.assistantAvatarImage,
     this.onAvatarTap,
@@ -825,11 +1016,8 @@ class _MessageItem extends StatefulWidget {
     this.onTermTap,
     this.highlightDialogue = true,
     this.assistantBubbleStyle,
-    this.imageLoader,
     this.onImageDelete,
     this.regenerating = false,
-    this.canRewrite = false,
-    this.imageRevision = 0,
     this.highlighted = false,
     this.onTap,
     this.onLongPress,
@@ -847,13 +1035,18 @@ class _MessageItemState extends State<_MessageItem> {
 
   bool _computeSelected() {
     final id = widget.message.id;
-    return id != null && widget.selectedId.value == id;
+    if (id == null) return false;
+    if (widget.selectionMode) {
+      return widget.selection?.value.contains(id) ?? false;
+    }
+    return widget.selectedId.value == id;
   }
 
   @override
   void initState() {
     super.initState();
     widget.selectedId.addListener(_handleSelectionChanged);
+    widget.selection?.addListener(_handleSelectionChanged);
   }
 
   @override
@@ -863,12 +1056,17 @@ class _MessageItemState extends State<_MessageItem> {
       oldWidget.selectedId.removeListener(_handleSelectionChanged);
       widget.selectedId.addListener(_handleSelectionChanged);
     }
+    if (!identical(oldWidget.selection, widget.selection)) {
+      oldWidget.selection?.removeListener(_handleSelectionChanged);
+      widget.selection?.addListener(_handleSelectionChanged);
+    }
     _selected = _computeSelected();
   }
 
   @override
   void dispose() {
     widget.selectedId.removeListener(_handleSelectionChanged);
+    widget.selection?.removeListener(_handleSelectionChanged);
     super.dispose();
   }
 
@@ -887,6 +1085,7 @@ class _MessageItemState extends State<_MessageItem> {
       message: message,
       onTap: widget.onTap,
       onLongPress: widget.onLongPress,
+      selectionMode: widget.selectionMode,
       displayUserName: widget.displayUserName,
       displayCharName: widget.displayCharName,
       syntax: widget.syntax,
@@ -895,10 +1094,8 @@ class _MessageItemState extends State<_MessageItem> {
       onTermTap: widget.onTermTap,
       highlightDialogue: widget.highlightDialogue,
       style: widget.assistantBubbleStyle,
-      imageLoader: widget.imageLoader,
       onImageDelete: widget.onImageDelete,
       regenerating: widget.regenerating,
-      imageRevision: widget.imageRevision,
       groupStart: widget.groupStart,
       groupEnd: widget.groupEnd,
       selected: _selected,
@@ -923,25 +1120,29 @@ class _MessageItemState extends State<_MessageItem> {
             isUser ? 20 : 12,
             0,
           ),
-          child: GestureDetector(
-            onTap: widget.onAvatarTap,
-            child: CircleAvatar(
-              radius: kMessageAvatarRadius,
-              foregroundImage: avatarImage,
-              onForegroundImageError: avatarImage == null ? null : (_, __) {},
-              child: Icon(
-                isUser ? Icons.person : Icons.person_outline,
-                size: 20,
+          child: Semantics(
+            button: widget.onAvatarTap != null,
+            label: widget.onAvatarTap == null
+                ? null
+                : (isUser ? '查看用户资料' : '查看角色资料'),
+            child: GestureDetector(
+              onTap: widget.onAvatarTap,
+              child: CircleAvatar(
+                radius: kMessageAvatarRadius,
+                foregroundImage: avatarImage,
+                onForegroundImageError: avatarImage == null ? null : (_, __) {},
+                child: Icon(
+                  isUser ? Icons.person : Icons.person_outline,
+                  size: 20,
+                ),
               ),
             ),
           ),
         ),
         bubble,
-        if (_selected && widget.onAction != null)
+        if (!widget.selectionMode && _selected && widget.onAction != null)
           _MessageActionsRow(
             message: message,
-            regenerating: widget.regenerating,
-            canRewrite: widget.canRewrite,
             onAction: widget.onAction!,
             // 长按/右键菜单的显式入口:选中后的操作排里给一颗「更多」,
             // 不必先发现长按手势。
@@ -952,21 +1153,18 @@ class _MessageItemState extends State<_MessageItem> {
   }
 }
 
-/// 气泡下方的操作按钮排:复制 / 编辑(有正文时)/ 删除 + 文本重新生成或重新发送;
-/// 最新一条有正文助手回复(其后允许跟图片消息)另给「按要求重写」,
-/// 带原始描述的图片另给「重新生成图片」。
+/// 气泡下方的快捷操作排。
+///
+/// 文本气泡只保留复制/编辑/多选,图片气泡只保留下载/多选;删除、重发、
+/// 按要求重写与重新生成等完整动作收进三点菜单和长按菜单,避免操作排过长。
 class _MessageActionsRow extends StatelessWidget {
   final Message message;
-  final bool regenerating;
-  final bool canRewrite;
   final void Function(MessageAction action) onAction;
 
   /// 打开完整操作菜单(长按/右键的同一入口);null 时不渲染。
   final VoidCallback? onMore;
   const _MessageActionsRow({
     required this.message,
-    required this.regenerating,
-    required this.canRewrite,
     required this.onAction,
     this.onMore,
   });
@@ -976,10 +1174,7 @@ class _MessageActionsRow extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final isUser = message.role == 'user';
     final hasText = message.content.trim().isNotEmpty;
-    final canRegenerateImage =
-        !isUser &&
-        message.hasVisualImage &&
-        (message.imagePrompt?.trim().isNotEmpty ?? false);
+    final hasImage = message.hasVisualImage;
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 2, 12, 0),
       child: ConstrainedBox(
@@ -991,46 +1186,23 @@ class _MessageActionsRow extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (hasText)
+              if (hasImage)
+                _action(
+                  context,
+                  Icons.download_outlined,
+                  '下载图片',
+                  MessageAction.download,
+                )
+              else if (hasText) ...[
                 _action(context, Icons.copy_outlined, '复制', MessageAction.copy),
-              if (hasText)
                 _action(context, Icons.edit_outlined, '编辑', MessageAction.edit),
+              ],
               _action(
                 context,
-                Icons.delete_outline,
-                '删除',
-                MessageAction.delete,
-                danger: true,
+                Icons.checklist_outlined,
+                '多选消息',
+                MessageAction.select,
               ),
-              if (isUser && hasText)
-                _action(
-                  context,
-                  Icons.send_outlined,
-                  '重新发送',
-                  MessageAction.resend,
-                ),
-              if (!isUser && hasText && canRewrite)
-                _action(
-                  context,
-                  Icons.edit_note,
-                  '按要求重写',
-                  MessageAction.rewrite,
-                ),
-              if (!isUser && hasText)
-                _action(
-                  context,
-                  Icons.refresh,
-                  '重新生成',
-                  MessageAction.regenerate,
-                ),
-              if (canRegenerateImage)
-                _action(
-                  context,
-                  Icons.autorenew,
-                  '重新生成图片',
-                  MessageAction.regenerateImage,
-                  enabled: !regenerating,
-                ),
               if (onMore != null)
                 IconButton(
                   tooltip: '更多操作',
@@ -1050,20 +1222,14 @@ class _MessageActionsRow extends StatelessWidget {
     BuildContext context,
     IconData icon,
     String tooltip,
-    MessageAction action, {
-    bool danger = false,
-    bool enabled = true,
-  }) {
-    final scheme = Theme.of(context).colorScheme;
-    final color = !enabled
-        ? scheme.outline
-        : (danger ? scheme.error : scheme.onSurfaceVariant);
+    MessageAction action,
+  ) {
     return IconButton(
       tooltip: tooltip,
       visualDensity: VisualDensity.compact,
       iconSize: 18,
-      onPressed: enabled ? () => onAction(action) : null,
-      icon: Icon(icon, color: color),
+      onPressed: () => onAction(action),
+      icon: Icon(icon, color: Theme.of(context).colorScheme.onSurfaceVariant),
     );
   }
 }
@@ -1083,11 +1249,7 @@ class _HistoryLoadRow extends StatelessWidget {
             ? Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const SizedBox(
-                    width: 15,
-                    height: 15,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
+                  const InlineSpinner(size: 15),
                   const SizedBox(width: 8),
                   Text(
                     '正在加载更早消息…',

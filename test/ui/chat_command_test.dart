@@ -627,24 +627,51 @@ void main() {
 
     // footer 若溢出会抛 RenderFlex overflow 异常,测试自动失败。
     expect(find.byTooltip('发送'), findsOneWidget);
-    // 窄行与宽行同一顺序:模型 chip → 推理徽标 → 圆环。
+    // 窄行与宽行:合并胶囊 → 圆环;移动端不再显示推理段。
     final chipRight = tester.getTopRight(find.byKey(const ValueKey('model_selector'))).dx;
-    final badgeLeft = tester.getTopLeft(find.byTooltip('推理等级:高')).dx;
-    final badgeRight = tester.getTopRight(find.byTooltip('推理等级:高')).dx;
     final ringLeft = tester.getTopLeft(find.byType(ContextUsageRing)).dx;
-    expect(badgeLeft - chipRight, closeTo(6, 0.5), reason: '推理徽标应紧贴模型 chip 右侧');
-    expect(ringLeft - badgeRight, closeTo(6, 0.5), reason: '圆环应紧随推理徽标之后');
+    expect(find.byTooltip('推理等级:High'), findsNothing, reason: '移动端不再单独显示推理档位');
+    expect(find.byKey(const ValueKey('model_reasoning_capsule')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('model_reasoning_divider')),
+      findsNothing,
+      reason: '移动端胶囊只留模型段,不应出现分隔线',
+    );
+    expect(ringLeft - chipRight, closeTo(4, 0.5), reason: '圆环应紧随模型 chip 之后');
     // 命令按钮行默认折叠:此时展示的是"展开"图标(终端),不占额外行高。
     expect(find.byTooltip('展开命令按钮行'), findsOneWidget);
     expect(find.byKey(const ValueKey('model_selector')), findsOneWidget);
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('reasoning badge sheet switches level with a slider', (tester) async {
+  testWidgets('mobile reasoning level switches via the model picker sheet', (tester) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
       await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      // 种入 provider,避免点 chip 走「无 provider → 设置页」分支。
+      await LlmProviderRepository(db).saveProvider(
+        LlmProviderConfig(
+          id: 0,
+          providerId: 'anthropic',
+          displayName: 'Anthropic',
+          baseUrl: 'https://api.anthropic.com',
+          protocol: LlmProtocol.anthropic,
+          apiKey: 'sk-an',
+          isActive: true,
+          models: [
+            LlmModelEntry(
+              id: 0,
+              providerId: 0,
+              modelId: 'claude-3-5-sonnet',
+              displayName: 'Claude Sonnet',
+              contextCapacity: 200000,
+              maxOutput: 8192,
+              isActive: true,
+            ),
+          ],
+        ),
+      );
     });
     await tester.pumpWidget(
       ProviderScope(
@@ -661,16 +688,14 @@ void main() {
     );
     await _pumpUntilLoaded(tester);
 
-    await tester.tap(find.byTooltip('推理等级:高'));
+    // 移动端底栏不再单独显示推理档位,调整走模型选择底单里的滑块。
+    expect(find.byTooltip('推理等级:High'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('model_selector')));
     await tester.pumpAndSettle();
     expect(find.text('推理等级'), findsOneWidget);
     expect(find.byType(Slider), findsOneWidget);
-    // 与模型选择/上下文用量底单一致的叉号关闭入口。
-    expect(find.byTooltip('关闭'), findsOneWidget);
-    // 旧的档位说明文字已移除,只留滑块与刻度。
-    expect(find.textContaining('不发送推理'), findsNothing);
 
-    // 滑块拖到最左端 = 关闭;松手即关闭底单并落库。
+    // 滑块拖到最左端 = Off;松手即关闭底单并落库。
     await tester.drag(find.byType(Slider), const Offset(-600, 0));
     await tester.pumpAndSettle();
 
@@ -683,9 +708,6 @@ void main() {
       }
     });
     expect(persisted, ReasoningLevel.off);
-    await tester.pumpAndSettle();
-    // off 档不显示推理徽标。
-    expect(find.byTooltip('推理等级:高'), findsNothing);
 
     await tester.runAsync(() => db.db.close());
   });
@@ -760,6 +782,64 @@ void main() {
     for (var i = 0; i < 10; i++) {
       expect(find.text('m$i'), findsOneWidget, reason: 'm$i should remain visible after compact');
     }
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('/clear 需二次确认,取消保留历史与命令文本', (tester) async {
+    late final AppDatabase db;
+    late final int characterId;
+    late final int sessionId;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      characterId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(characterId, 's');
+      await MessageRepository(
+        db,
+      ).append(sessionId: sessionId, role: 'user', content: '保留我');
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: MaterialApp(
+          home: ChatScreen(
+            sessionId: sessionId,
+            characterId: characterId,
+            character: const CharacterCard(name: 'Alice'),
+          ),
+        ),
+      ),
+    );
+    await _pumpUntilLoaded(tester);
+
+    await expandCommands(tester);
+    await runCommandChip(tester, '/clear 清空历史');
+    await tester.pumpAndSettle();
+    expect(find.text('清空会话历史?'), findsOneWidget);
+
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.text('保留我'), findsOneWidget, reason: '取消不应清空历史');
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller?.text.trim(), '/clear', reason: '取消后命令文本应保留');
+
+    await tester.tap(find.byTooltip('发送'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('清空'));
+    // 等到命令完整收尾(反馈文案在 _reassembleContext 之后才推入),
+    // 否则关闭 DB 会撞上仍在进行的技能查询。
+    await tester.runAsync(() async {
+      for (var i = 0; i < 120; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        await tester.pump();
+        if (find.textContaining('已清空会话历史').evaluate().isNotEmpty) {
+          break;
+        }
+      }
+    });
+    expect(find.text('保留我'), findsNothing, reason: '确认后历史应被清空');
     await tester.runAsync(() => db.db.close());
   });
 }

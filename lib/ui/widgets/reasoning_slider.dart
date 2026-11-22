@@ -1,8 +1,9 @@
-/// 推理等级滑块:关 / 低 / 中 / 高四档横向拖动选择。
+/// 推理等级滑块:Off / Minimal / Low / Medium / High / XHigh / Max 七档横向拖动选择。
 ///
 /// 拖动期间只更新本地拇指与档位标签,松手才回调 [onSelected];父级落库
 /// 失败未采纳新值时,滑块自动回到原档,不保留假成功的位置。
-/// 轨道自带四个停靠点,刻度文字与停靠点对齐且可点选;跨档时给一次轻触感。
+/// 轨道自带七个停靠点,刻度用短标签避让窄卡宽度,无障碍与语义值仍用全称;
+/// 刻度文字与停靠点对齐且可点选;跨档时给一次轻触感。
 library;
 
 import 'dart:math' as math;
@@ -10,6 +11,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../models/app_settings.dart';
+import '../common/motion.dart';
 
 const double _kTrackHeight = 6;
 const double _kThumbRadius = 9;
@@ -110,24 +112,34 @@ class _ReasoningSliderState extends State<ReasoningSlider> {
           height: _kLabelHeight,
           child: LayoutBuilder(
             builder: (context, constraints) {
+              final count = ReasoningLevel.values.length;
+              final divisions = count - 1;
               final usable = math.max(
                 0.0,
                 constraints.maxWidth - _kOverlayRadius * 2,
               );
+              final spacing = usable / divisions;
               return Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  for (var i = 0; i < ReasoningLevel.values.length; i++)
+                  for (var i = 0; i < count; i++)
                     Positioned(
-                      left:
-                          _kOverlayRadius +
-                          usable * i / (ReasoningLevel.values.length - 1),
+                      left: _kOverlayRadius + usable * i / divisions,
                       top: 0,
-                      // 以停靠点为中心摆放文字:文字宽度自适应,不因固定
-                      // 单元格把首尾标签推离刻度。
+                      // 以停靠点为中心摆放;每格限宽并等比缩字,七个刻度在
+                      // 320 宽与大字号下也不会互相压住。
                       child: FractionalTranslation(
                         translation: const Offset(-0.5, 0),
-                        child: _tickLabel(context, ReasoningLevel.values[i]),
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(maxWidth: spacing),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: _tickLabel(
+                              context,
+                              ReasoningLevel.values[i],
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                 ],
@@ -147,22 +159,25 @@ class _ReasoningSliderState extends State<ReasoningSlider> {
       borderRadius: BorderRadius.circular(8),
       onTap: () => _select(level),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
         child: AnimatedDefaultTextStyle(
-          duration: const Duration(milliseconds: 160),
+          duration: motionDurationOf(
+            context,
+            const Duration(milliseconds: 160),
+          ),
           curve: Curves.easeOut,
           style: theme.textTheme.bodySmall!.copyWith(
             color: active ? scheme.primary : scheme.onSurfaceVariant,
             fontWeight: active ? FontWeight.w700 : FontWeight.w500,
           ),
-          child: Text(level.label),
+          child: Text(level.shortLabel),
         ),
       ),
     );
   }
 }
 
-/// 四档轨道:通栏圆角底轨 + 主色已选段 + 四个停靠点(已越过的点用对比色)。
+/// 七档轨道:通栏圆角底轨 + 主色已选段 + 七个停靠点(已越过的点用对比色)。
 class _ReasoningTrackShape extends SliderTrackShape {
   const _ReasoningTrackShape({
     required this.trackColor,

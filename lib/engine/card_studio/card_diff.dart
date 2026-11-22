@@ -29,7 +29,8 @@ class TextDiff {
 
   int get addedCount => lines.where((l) => l.kind == DiffLineKind.added).length;
 
-  int get removedCount => lines.where((l) => l.kind == DiffLineKind.removed).length;
+  int get removedCount =>
+      lines.where((l) => l.kind == DiffLineKind.removed).length;
 
   bool get hasChanges => addedCount > 0 || removedCount > 0;
 }
@@ -49,7 +50,8 @@ const int kLineDiffCellLimit = 40000;
 TextDiff diffText(String oldText, String newText) {
   if (oldText == newText) {
     return TextDiff([
-      for (final line in _splitLines(oldText)) DiffLine(DiffLineKind.same, line),
+      for (final line in _splitLines(oldText))
+        DiffLine(DiffLineKind.same, line),
     ]);
   }
   final a = _splitLines(oldText);
@@ -187,6 +189,48 @@ const Map<String, String> kCardFieldLabels = {
   'tags': '标签',
 };
 
+/// 制卡字段护栏:AI 工具面([CardProfile])与提交前校验共用同一份上限。
+/// 放在共享模型层,审阅页内联编辑也必须接受同样的检查,不能绕过 AI 侧护栏。
+const int kCardMaxNameChars = 80;
+const int kCardMaxDescriptionChars = 4000;
+const int kCardMaxPersonalityChars = 2000;
+const int kCardMaxScenarioChars = 2000;
+const int kCardMaxSystemPromptChars = 2000;
+const int kCardMaxPostHistoryChars = 2000;
+const int kCardMaxCreatorNotesChars = 2000;
+const int kCardMaxFirstMessageChars = 8000;
+const int kCardMaxMesExampleChars = 8000;
+const int kCardMaxDepthPromptChars = 1000;
+const int kCardMaxGreetings = 10;
+const int kCardMaxGreetingChars = 3000;
+const int kCardMaxTags = 20;
+const int kCardMaxTagChars = 40;
+const int kCardMaxCardTextChars = 48000;
+
+/// 世界书护栏(同为 AI 工具面与提交校验共用)。
+const int kCardMaxEntriesTotal = 60;
+const int kCardMaxEntryContentChars = 6000;
+const int kCardMaxEntryKeys = 20;
+const int kCardMaxEntryKeyChars = 40;
+const int kCardMaxWorldbookTextChars = 80000;
+
+/// 单值字符串字段的长度上限(与 AI 侧 `_stringFieldCaps` 同源)。
+const Map<String, int> kCardStringFieldCaps = {
+  'name': kCardMaxNameChars,
+  'description': kCardMaxDescriptionChars,
+  'personality': kCardMaxPersonalityChars,
+  'scenario': kCardMaxScenarioChars,
+  'firstMessage': kCardMaxFirstMessageChars,
+  'mesExample': kCardMaxMesExampleChars,
+  'systemPrompt': kCardMaxSystemPromptChars,
+  'postHistoryInstructions': kCardMaxPostHistoryChars,
+  'creatorNotes': kCardMaxCreatorNotesChars,
+  'depthPrompt': kCardMaxDepthPromptChars,
+};
+
+/// 可编辑卡面文本总长(与 AI 暂存同一口径)。
+int cardEditableTextLength(CharacterCard card) => cardTextLengthOf(card);
+
 /// 单个字段的差异(old/new + 行级 diff)。
 class FieldDiff {
   final String key;
@@ -239,13 +283,13 @@ class WorldbookEntryDiff {
   }
 }
 
-/// 头像变更(before/after base64;两者不同才视为变更)。
+/// 头像资产 hash 变更(before/after;新 hash 非空且不同才视为变更)。
 class AvatarDiff {
-  final String? oldBase64;
-  final String? newBase64;
-  const AvatarDiff({this.oldBase64, this.newBase64});
+  final String? oldHash;
+  final String? newHash;
+  const AvatarDiff({this.oldHash, this.newHash});
 
-  bool get hasChange => newBase64 != null && newBase64 != oldBase64;
+  bool get hasChange => newHash != null && newHash != oldHash;
 }
 
 /// 一轮提案相对基线的全部差异。
@@ -254,7 +298,11 @@ class CardDiff {
   final List<WorldbookEntryDiff> entries;
   final AvatarDiff? avatar;
 
-  const CardDiff({this.fields = const [], this.entries = const [], this.avatar});
+  const CardDiff({
+    this.fields = const [],
+    this.entries = const [],
+    this.avatar,
+  });
 
   bool get hasChanges =>
       fields.isNotEmpty || entries.isNotEmpty || (avatar?.hasChange ?? false);
@@ -276,13 +324,15 @@ CardDiff computeCardDiff({
     final oldText = cardFieldText(baseCard, key);
     final newText = cardFieldText(draftCard, key);
     if (oldText == newText) continue;
-    fields.add(FieldDiff(
-      key: key,
-      label: kCardFieldLabels[key] ?? key,
-      oldText: oldText,
-      newText: newText,
-      diff: diffText(oldText, newText),
-    ));
+    fields.add(
+      FieldDiff(
+        key: key,
+        label: kCardFieldLabels[key] ?? key,
+        oldText: oldText,
+        newText: newText,
+        diff: diffText(oldText, newText),
+      ),
+    );
   }
 
   final baseById = <int, WorldbookEntry>{
@@ -301,11 +351,13 @@ CardDiff computeCardDiff({
     // 这类 id 原样存进基线)。它既不新增也不删除,否则会和下面的删除分支
     // 凑成一对内容完全相同的假差异。
     if (id != null && baseById.containsKey(id)) continue;
-    added.add(WorldbookEntryDiff(
-      kind: WorldbookChangeKind.added,
-      newEntry: e,
-      fieldDiffs: entryFieldDiffs(null, e),
-    ));
+    added.add(
+      WorldbookEntryDiff(
+        kind: WorldbookChangeKind.added,
+        newEntry: e,
+        fieldDiffs: entryFieldDiffs(null, e),
+      ),
+    );
   }
   final modified = <WorldbookEntryDiff>[];
   final removed = <WorldbookEntryDiff>[];
@@ -314,29 +366,33 @@ CardDiff computeCardDiff({
     if (id == null) continue;
     final draft = draftById[id];
     if (draft == null) {
-      removed.add(WorldbookEntryDiff(
-        kind: WorldbookChangeKind.removed,
-        baseId: id,
-        oldEntry: base,
-        fieldDiffs: entryFieldDiffs(base, null),
-      ));
+      removed.add(
+        WorldbookEntryDiff(
+          kind: WorldbookChangeKind.removed,
+          baseId: id,
+          oldEntry: base,
+          fieldDiffs: entryFieldDiffs(base, null),
+        ),
+      );
       continue;
     }
     final diffs = entryFieldDiffs(base, draft);
     if (diffs.isEmpty) continue;
-    modified.add(WorldbookEntryDiff(
-      kind: WorldbookChangeKind.modified,
-      baseId: id,
-      oldEntry: base,
-      newEntry: draft,
-      fieldDiffs: diffs,
-    ));
+    modified.add(
+      WorldbookEntryDiff(
+        kind: WorldbookChangeKind.modified,
+        baseId: id,
+        oldEntry: base,
+        newEntry: draft,
+        fieldDiffs: diffs,
+      ),
+    );
   }
 
-  final oldAvatar = baseCard.avatarBase64;
-  final newAvatar = draftCard.avatarBase64;
+  final oldAvatar = baseCard.avatarHash;
+  final newAvatar = draftCard.avatarHash;
   final avatar = newAvatar != oldAvatar
-      ? AvatarDiff(oldBase64: oldAvatar, newBase64: newAvatar)
+      ? AvatarDiff(oldHash: oldAvatar, newHash: newAvatar)
       : null;
 
   return CardDiff(
@@ -348,20 +404,20 @@ CardDiff computeCardDiff({
 
 /// 卡片字段的文本投影(列表字段按行拼接),供 diff 与提示词共用。
 String cardFieldText(CharacterCard card, String key) => switch (key) {
-      'name' => card.name,
-      'description' => card.description,
-      'personality' => card.personality,
-      'scenario' => card.scenario,
-      'firstMessage' => card.firstMessage,
-      'alternateGreetings' => card.alternateGreetings.join('\n'),
-      'mesExample' => card.mesExample,
-      'systemPrompt' => card.systemPrompt,
-      'postHistoryInstructions' => card.postHistoryInstructions,
-      'creatorNotes' => card.creatorNotes,
-      'depthPrompt' => card.depthPrompt,
-      'tags' => card.tags.join('\n'),
-      _ => '',
-    };
+  'name' => card.name,
+  'description' => card.description,
+  'personality' => card.personality,
+  'scenario' => card.scenario,
+  'firstMessage' => card.firstMessage,
+  'alternateGreetings' => card.alternateGreetings.join('\n'),
+  'mesExample' => card.mesExample,
+  'systemPrompt' => card.systemPrompt,
+  'postHistoryInstructions' => card.postHistoryInstructions,
+  'creatorNotes' => card.creatorNotes,
+  'depthPrompt' => card.depthPrompt,
+  'tags' => card.tags.join('\n'),
+  _ => '',
+};
 
 /// 两条世界书条目之间的建模字段差异。
 ///
@@ -370,42 +426,62 @@ List<FieldDiff> entryFieldDiffs(WorldbookEntry? old, WorldbookEntry? now) {
   final out = <FieldDiff>[];
   void add(String key, String label, String a, String b) {
     if (a == b) return;
-    out.add(FieldDiff(
-      key: key,
-      label: label,
-      oldText: a,
-      newText: b,
-      diff: diffText(a, b),
-    ));
+    out.add(
+      FieldDiff(
+        key: key,
+        label: label,
+        oldText: a,
+        newText: b,
+        diff: diffText(a, b),
+      ),
+    );
   }
 
   add('name', '名称', old?.name ?? '', now?.name ?? '');
-  add('keys', '关键词', (old?.keys ?? const []).join(', '),
-      (now?.keys ?? const []).join(', '));
-  add('secondaryKeys', '次关键词', (old?.secondaryKeys ?? const []).join(', '),
-      (now?.secondaryKeys ?? const []).join(', '));
+  add(
+    'keys',
+    '关键词',
+    (old?.keys ?? const []).join(', '),
+    (now?.keys ?? const []).join(', '),
+  );
+  add(
+    'secondaryKeys',
+    '次关键词',
+    (old?.secondaryKeys ?? const []).join(', '),
+    (now?.secondaryKeys ?? const []).join(', '),
+  );
   add('content', '内容', old?.content ?? '', now?.content ?? '');
   add('constant', '常驻', _flag(old?.constant), _flag(now?.constant));
   add('selective', '选择性触发', _flag(old?.selective), _flag(now?.selective));
   add('useRegex', '正则', _flag(old?.useRegex), _flag(now?.useRegex));
-  add('caseSensitive', '区分大小写', _flag(old?.caseSensitive),
-      _flag(now?.caseSensitive));
-  add('matchWholeWords', '整词匹配', _flag(old?.matchWholeWords),
-      _flag(now?.matchWholeWords));
+  add(
+    'caseSensitive',
+    '区分大小写',
+    _flag(old?.caseSensitive),
+    _flag(now?.caseSensitive),
+  );
+  add(
+    'matchWholeWords',
+    '整词匹配',
+    _flag(old?.matchWholeWords),
+    _flag(now?.matchWholeWords),
+  );
   add('enabled', '启用', _flag(old?.enabled), _flag(now?.enabled));
   add('background', '后台锚定', _flag(old?.background), _flag(now?.background));
   return out;
 }
 
-/// 决策后的字段展示文本(编辑值优先)。
+/// 决策后的字段展示文本(编辑值优先;列表字段按行拼接仅供展示)。
 String effectiveFieldText(FieldDiff field, FieldDecision decision) =>
-    decision.editedText ?? field.newText;
+    decision.editedList?.join('\n') ?? decision.editedText ?? field.newText;
 
 /// 决策后的字段展示 diff;编辑回原文视为无差异并返回 null。
 TextDiff? effectiveFieldDiff(FieldDiff field, FieldDecision decision) {
   final text = effectiveFieldText(field, decision);
   if (text == field.oldText) return null;
-  if (decision.editedText == null) return field.diff;
+  if (decision.editedText == null && decision.editedList == null) {
+    return field.diff;
+  }
   return diffText(field.oldText, text);
 }
 
@@ -432,8 +508,17 @@ String _flag(bool? value) => value == null ? '' : (value ? '是' : '否');
 /// 单个字段的审阅决策。编辑即视为接受(accepted 同时置 true)。
 class FieldDecision {
   final bool accepted;
+
+  /// 纯文本字段的编辑结果;列表字段不使用。
   final String? editedText;
-  const FieldDecision({this.accepted = true, this.editedText});
+
+  /// 列表字段(备用开场白/标签)的逐元素编辑结果。
+  ///
+  /// 与 [editedText] 互斥:列表字段必须按元素保存,不能经换行/逗号文本投影
+  /// 往返,否则元素内部的换行或逗号会被拆成多条。
+  final List<String>? editedList;
+
+  const FieldDecision({this.accepted = true, this.editedText, this.editedList});
 }
 
 /// 单条世界书条目的审阅决策。
@@ -462,22 +547,22 @@ class ReviewDecisions {
   EntryDecision entry(String key) => entries[key] ?? const EntryDecision();
 
   ReviewDecisions withField(String key, FieldDecision value) => ReviewDecisions(
-        fields: {...fields, key: value},
-        entries: entries,
-        avatarAccepted: avatarAccepted,
-      );
+    fields: {...fields, key: value},
+    entries: entries,
+    avatarAccepted: avatarAccepted,
+  );
 
   ReviewDecisions withEntry(String key, EntryDecision value) => ReviewDecisions(
-        fields: fields,
-        entries: {...entries, key: value},
-        avatarAccepted: avatarAccepted,
-      );
+    fields: fields,
+    entries: {...entries, key: value},
+    avatarAccepted: avatarAccepted,
+  );
 
   ReviewDecisions withAvatar(bool accepted) => ReviewDecisions(
-        fields: fields,
-        entries: entries,
-        avatarAccepted: accepted,
-      );
+    fields: fields,
+    entries: entries,
+    avatarAccepted: accepted,
+  );
 }
 
 /// 提交值:最终卡(含头像)与完整世界书列表。
@@ -513,6 +598,8 @@ CardSubmission buildCardSubmission({
   }) {
     final d = decisions.field(key);
     if (!d.accepted) return base;
+    if (d.editedList != null) return List.of(d.editedList!);
+    // 兼容旧草稿留下的文本投影编辑值;新审阅 UI 一律写 editedList。
     final text = d.editedText;
     if (text == null) return draft;
     final pattern = commaSeparated ? RegExp(r'[,，\n]') : RegExp(r'\n');
@@ -525,35 +612,58 @@ CardSubmission buildCardSubmission({
 
   final card = CharacterCard(
     name: pickString('name', baseCard.name, draftCard.name).trim(),
-    description: pickString('description', baseCard.description, draftCard.description),
-    personality: pickString('personality', baseCard.personality, draftCard.personality),
+    description: pickString(
+      'description',
+      baseCard.description,
+      draftCard.description,
+    ),
+    personality: pickString(
+      'personality',
+      baseCard.personality,
+      draftCard.personality,
+    ),
     scenario: pickString('scenario', baseCard.scenario, draftCard.scenario),
-    firstMessage: pickString('firstMessage', baseCard.firstMessage, draftCard.firstMessage),
-    mesExample: pickString('mesExample', baseCard.mesExample, draftCard.mesExample),
-    systemPrompt: pickString('systemPrompt', baseCard.systemPrompt, draftCard.systemPrompt),
+    firstMessage: pickString(
+      'firstMessage',
+      baseCard.firstMessage,
+      draftCard.firstMessage,
+    ),
+    mesExample: pickString(
+      'mesExample',
+      baseCard.mesExample,
+      draftCard.mesExample,
+    ),
+    systemPrompt: pickString(
+      'systemPrompt',
+      baseCard.systemPrompt,
+      draftCard.systemPrompt,
+    ),
     postHistoryInstructions: pickString(
       'postHistoryInstructions',
       baseCard.postHistoryInstructions,
       draftCard.postHistoryInstructions,
     ),
-    creatorNotes: pickString('creatorNotes', baseCard.creatorNotes, draftCard.creatorNotes),
-    depthPrompt: pickString('depthPrompt', baseCard.depthPrompt, draftCard.depthPrompt),
-    avatarBase64: decisions.avatarAccepted && draftCard.avatarBase64 != null
-        ? draftCard.avatarBase64
-        : baseCard.avatarBase64,
-    backgroundBase64: baseCard.backgroundBase64,
+    creatorNotes: pickString(
+      'creatorNotes',
+      baseCard.creatorNotes,
+      draftCard.creatorNotes,
+    ),
+    depthPrompt: pickString(
+      'depthPrompt',
+      baseCard.depthPrompt,
+      draftCard.depthPrompt,
+    ),
+    avatarHash: decisions.avatarAccepted && draftCard.avatarHash != null
+        ? draftCard.avatarHash
+        : baseCard.avatarHash,
+    backgroundHash: baseCard.backgroundHash,
     alternateGreetings: pickList(
       'alternateGreetings',
       baseCard.alternateGreetings,
       draftCard.alternateGreetings,
       commaSeparated: false,
     ),
-    tags: pickList(
-      'tags',
-      baseCard.tags,
-      draftCard.tags,
-      commaSeparated: true,
-    ),
+    tags: pickList('tags', baseCard.tags, draftCard.tags, commaSeparated: true),
     creator: baseCard.creator,
     characterVersion: baseCard.characterVersion,
     talkativeness: baseCard.talkativeness,
@@ -637,19 +747,85 @@ bool _listEquals(List<String> a, List<String> b) {
 }
 
 /// 应用前校验;返回空列表表示可提交。
+///
+/// 与 AI 工具面复用同一份上限:审阅页内联编辑可能把值改到超限,提交前必须
+/// 以同一口径复查,否则 UI 编辑成为绕过护栏的通道。保留最小语义校验
+/// (名字/正文/关键词)在前,便于用户先修硬伤。
 List<String> validateCardSubmission(CardSubmission submission) {
   final errors = <String>[];
-  if (submission.card.name.trim().isEmpty) {
+  final card = submission.card;
+  final name = card.name.trim();
+  if (name.isEmpty) {
     errors.add('角色名字不能为空');
+  } else if (card.name.length > kCardMaxNameChars) {
+    errors.add('角色名字不能超过 $kCardMaxNameChars 字符');
   }
+  for (final field in kCardStringFieldCaps.entries) {
+    if (field.key == 'name') continue;
+    final length = cardFieldText(card, field.key).length;
+    if (length > field.value) {
+      errors.add(
+        '${kCardFieldLabels[field.key] ?? field.key}不能超过 ${field.value} 字符'
+        '(当前 $length)',
+      );
+    }
+  }
+  if (card.alternateGreetings.length > kCardMaxGreetings) {
+    errors.add('备用开场白不能超过 $kCardMaxGreetings 条');
+  }
+  for (final greeting in card.alternateGreetings) {
+    if (greeting.length > kCardMaxGreetingChars) {
+      errors.add('备用开场白单条不能超过 $kCardMaxGreetingChars 字符');
+      break;
+    }
+  }
+  if (card.tags.length > kCardMaxTags) {
+    errors.add('标签不能超过 $kCardMaxTags 个');
+  }
+  for (final tag in card.tags) {
+    if (tag.length > kCardMaxTagChars) {
+      errors.add('标签单条不能超过 $kCardMaxTagChars 字符');
+      break;
+    }
+  }
+  final cardTextLength = cardEditableTextLength(card);
+  if (cardTextLength > kCardMaxCardTextChars) {
+    errors.add('角色卡可编辑文本不能超过 $kCardMaxCardTextChars 字符(当前 $cardTextLength)');
+  }
+  if (submission.entries.length > kCardMaxEntriesTotal) {
+    errors.add('世界书条目不能超过 $kCardMaxEntriesTotal 条');
+  }
+  var worldbookChars = 0;
   for (final e in submission.entries) {
     final label = e.displayLabel;
+    worldbookChars += e.content.length;
     if (e.content.trim().isEmpty) {
       errors.add('世界书条目「$label」内容不能为空');
+    } else if (e.content.length > kCardMaxEntryContentChars) {
+      errors.add(
+        '世界书条目「$label」内容不能超过 $kCardMaxEntryContentChars 字符'
+        '(当前 ${e.content.length})',
+      );
     }
     if (e.keys.isEmpty && !e.constant) {
       errors.add('世界书条目「$label」需要关键词或设为常驻');
     }
+    if (e.keys.length > kCardMaxEntryKeys ||
+        e.secondaryKeys.length > kCardMaxEntryKeys) {
+      errors.add('世界书条目「$label」关键词不能超过 $kCardMaxEntryKeys 个');
+    }
+    for (final key in [...e.keys, ...e.secondaryKeys]) {
+      if (key.length > kCardMaxEntryKeyChars) {
+        errors.add('世界书条目「$label」关键词不能超过 $kCardMaxEntryKeyChars 字符');
+        break;
+      }
+    }
+  }
+  if (worldbookChars > kCardMaxWorldbookTextChars) {
+    errors.add(
+      '世界书正文总量不能超过 $kCardMaxWorldbookTextChars 字符'
+      '(当前 $worldbookChars)',
+    );
   }
   return errors;
 }

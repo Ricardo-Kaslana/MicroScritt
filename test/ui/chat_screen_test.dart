@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,8 +27,10 @@ import 'package:microscritt/models/user.dart';
 import 'package:microscritt/state/chat_controller.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/chat_screen.dart';
+import 'package:microscritt/ui/common/chat_layout.dart';
 import 'package:microscritt/ui/model_selector_bar.dart';
 import 'package:microscritt/ui/user_screen.dart';
+import 'package:microscritt/ui/widgets/image_asset_preview.dart';
 import 'package:microscritt/ui/widgets/message_list.dart';
 import '../support/test_database.dart';
 
@@ -42,6 +45,16 @@ Future<String> _pngBase64(int width, int height) async {
   final img = await recorder.endRecording().toImage(width, height);
   final data = await img.toByteData(format: ui.ImageByteFormat.png);
   return base64Encode(data!.buffer.asUint8List());
+}
+
+Future<String> _assetHash(
+  AppDatabase db,
+  String png, {
+  bool preview = false,
+}) async {
+  final ref = await db.images.putBytes(base64Decode(png));
+  if (preview) await ImagePreviewCache.ensure(db.images, ref.hash);
+  return ref.hash;
 }
 
 /// 反复 pump 直到 [condition] 成立(图片解码是真实异步,固定延时在负载下会抖)。
@@ -97,6 +110,21 @@ class _WidgetRegenImageBackend implements ImageBackend {
   }
 }
 
+/// 单图提示词改写专用:后台请求固定回一段新描述,并记录请求。
+class _RevisionWidgetBackend implements LlmBackend {
+  final requests = <LlmRequest>[];
+
+  @override
+  String get id => 'widget-revision';
+
+  @override
+  Stream<LlmEvent> generate(LlmRequest request) async* {
+    requests.add(request);
+    yield const TextDelta('{"imagePrompt":"silver hair, close-up"}');
+    yield const DoneEvent();
+  }
+}
+
 /// 主写立即回 'reply N',首个后台调用挂起直到 [unblock]:用来断言后台维护
 /// 未收敛时发送键仍可用、第二轮发送不与后台轮串行。
 class _QueuedWidgetBackend implements LlmBackend {
@@ -144,10 +172,7 @@ class _RewriteWidgetBackend implements LlmBackend {
     }
     requests.add(request);
     mainCalls++;
-    return Stream.fromIterable([
-      TextDelta('reply $mainCalls'),
-      DoneEvent(),
-    ]);
+    return Stream.fromIterable([TextDelta('reply $mainCalls'), DoneEvent()]);
   }
 }
 
@@ -187,56 +212,85 @@ Future<void> _settleChat(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('send button remains usable while background maintenance is pending', (tester) async {
-    late AppDatabase db;
-    late int characterId;
-    late int sessionId;
-    late _QueuedWidgetBackend backend;
-    await tester.runAsync(() async {
-      backend = _QueuedWidgetBackend();
-      db = await openTestDb();
-      characterId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
-      sessionId = await SessionRepository(db).create(characterId, 's');
-      await MemoryRepository(db).set(sessionId, 'A quiet training room.');
-    });
-    addTearDown(backend.unblock);
-    await tester.pumpWidget(ProviderScope(
-      overrides: [
-        databaseProvider.overrideWithValue(db),
-        backendConfigProvider.overrideWith((ref) => const BackendConfig(
-          provider: BackendProvider.openai, baseUrl: 'http://127.0.0.1', apiKey: 'test', model: 'test',
-        )),
-        backendProvider.overrideWith((ref) => backend),
-        hookRuntimeProvider.overrideWith((ref) => _NoopHookRuntime()),
-      ],
-      child: MaterialApp(home: ChatScreen(
-        sessionId: sessionId, characterId: characterId, character: const CharacterCard(name: 'Alice'),
-      )),
-    ));
-    await _settleChat(tester);
-    await tester.enterText(find.byType(TextField), 'first');
-    await tester.pump(); // 发送键在文本变化后随下一帧启用
-    await tester.runAsync(() => tester.tap(find.byTooltip('发送')));
-    await _pumpUntil(tester, () => backend.backgroundCalls == 1);
-    expect(find.byTooltip('发送'), findsOneWidget);
-    expect(find.byTooltip('中断生成'), findsNothing);
-    await tester.enterText(find.byType(TextField), 'second');
-    await tester.pump();
-    await tester.runAsync(() => tester.tap(find.byTooltip('发送')));
-    final container = ProviderScope.containerOf(tester.element(find.byType(ChatScreen)));
-    await _pumpUntil(tester, () =>
-        container.read(chatControllerProvider).messages.where((m) => m.role == 'assistant').length == 2);
-    expect(backend.backgroundCalls, 1);
-    await tester.runAsync(() async {
-      backend.unblock();
-      await container.read(chatControllerProvider.notifier).backgroundTask;
-      final rows = await MessageRepository(db).bySession(sessionId);
-      expect(rows.where((m) => m.role == 'user').map((m) => m.content), ['first', 'second']);
-    });
-    expect(backend.backgroundCalls, 2);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.runAsync(() => db.db.close());
-  });
+  testWidgets(
+    'send button remains usable while background maintenance is pending',
+    (tester) async {
+      late AppDatabase db;
+      late int characterId;
+      late int sessionId;
+      late _QueuedWidgetBackend backend;
+      await tester.runAsync(() async {
+        backend = _QueuedWidgetBackend();
+        db = await openTestDb();
+        characterId = await CharacterRepository(
+          db,
+        ).insert(const CharacterCard(name: 'Alice'));
+        sessionId = await SessionRepository(db).create(characterId, 's');
+        await MemoryRepository(db).set(sessionId, 'A quiet training room.');
+      });
+      addTearDown(backend.unblock);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            backendConfigProvider.overrideWith(
+              (ref) => const BackendConfig(
+                provider: BackendProvider.openai,
+                baseUrl: 'http://127.0.0.1',
+                apiKey: 'test',
+                model: 'test',
+              ),
+            ),
+            backendProvider.overrideWith((ref) => backend),
+            hookRuntimeProvider.overrideWith((ref) => _NoopHookRuntime()),
+          ],
+          child: MaterialApp(
+            home: ChatScreen(
+              sessionId: sessionId,
+              characterId: characterId,
+              character: const CharacterCard(name: 'Alice'),
+            ),
+          ),
+        ),
+      );
+      await _settleChat(tester);
+      await tester.enterText(find.byType(TextField), 'first');
+      await tester.pump(); // 发送键在文本变化后随下一帧启用
+      await tester.runAsync(() => tester.tap(find.byTooltip('发送')));
+      await _pumpUntil(tester, () => backend.backgroundCalls == 1);
+      expect(find.byTooltip('发送'), findsOneWidget);
+      expect(find.byTooltip('中断生成'), findsNothing);
+      await tester.enterText(find.byType(TextField), 'second');
+      await tester.pump();
+      await tester.runAsync(() => tester.tap(find.byTooltip('发送')));
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ChatScreen)),
+      );
+      await _pumpUntil(
+        tester,
+        () =>
+            container
+                .read(chatControllerProvider)
+                .messages
+                .where((m) => m.role == 'assistant')
+                .length ==
+            2,
+      );
+      expect(backend.backgroundCalls, 1);
+      await tester.runAsync(() async {
+        backend.unblock();
+        await container.read(chatControllerProvider.notifier).backgroundTask;
+        final rows = await MessageRepository(db).bySession(sessionId);
+        expect(rows.where((m) => m.role == 'user').map((m) => m.content), [
+          'first',
+          'second',
+        ]);
+      });
+      expect(backend.backgroundCalls, 2);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() => db.db.close());
+    },
+  );
 
   testWidgets('chat screen renders messages and streams assistant reply', (
     tester,
@@ -338,7 +392,10 @@ void main() {
             tester.element(find.byType(ChatScreen)),
           );
           final st = container.read(chatControllerProvider);
-          if (st.sessionId == sessionA && st.messages.any((m) => m.content == '会话A内容')) break;
+          if (st.sessionId == sessionA &&
+              st.messages.any((m) => m.content == '会话A内容')) {
+            break;
+          }
         }
       });
       expect(find.textContaining('会话A内容'), findsOneWidget);
@@ -353,7 +410,10 @@ void main() {
             tester.element(find.byType(ChatScreen)),
           );
           final st = container.read(chatControllerProvider);
-          if (st.sessionId == sessionB && st.messages.any((m) => m.content == '会话B内容')) break;
+          if (st.sessionId == sessionB &&
+              st.messages.any((m) => m.content == '会话B内容')) {
+            break;
+          }
         }
       });
       // 切换后:显示会话 B 的内容,且不再残留会话 A 的消息。
@@ -372,12 +432,9 @@ void main() {
       late final AppDatabase db;
       await tester.runAsync(() async {
         db = await openTestDb();
+        final hash = await _assetHash(db, png);
         await CharacterRepository(db).insert(
-          const CharacterCard(
-            name: 'Alice',
-            avatarBase64: png,
-            backgroundBase64: png,
-          ),
+          CharacterCard(name: 'Alice', avatarHash: hash, backgroundHash: hash),
         );
       });
 
@@ -430,12 +487,14 @@ void main() {
       const png =
           'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=';
       late final AppDatabase db;
+      late final String avatarHash;
       await tester.runAsync(() async {
         db = await openTestDb();
+        avatarHash = await _assetHash(db, png);
         // 只设头像、不设背景:开启背景后应回退头像做背景。
         await CharacterRepository(
           db,
-        ).insert(const CharacterCard(name: 'Alice', avatarBase64: png));
+        ).insert(CharacterCard(name: 'Alice', avatarHash: avatarHash));
       });
 
       await tester.pumpWidget(
@@ -447,11 +506,11 @@ void main() {
             ),
           ],
           // 只设头像、不设背景:开启背景后 _ChatBackground 应回退头像做背景。
-          child: const MaterialApp(
+          child: MaterialApp(
             home: ChatScreen(
               sessionId: 1,
               characterId: 1,
-              character: CharacterCard(name: 'Alice', avatarBase64: png),
+              character: CharacterCard(name: 'Alice', avatarHash: avatarHash),
             ),
           ),
         ),
@@ -483,8 +542,10 @@ void main() {
       const png =
           'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=';
       late final AppDatabase db;
+      late final String avatarHash;
       await tester.runAsync(() async {
         db = await openTestDb();
+        avatarHash = await _assetHash(db, png);
       });
 
       Widget harness(double blur) => ProviderScope(
@@ -499,11 +560,11 @@ void main() {
             ),
           ),
         ],
-        child: const MaterialApp(
+        child: MaterialApp(
           home: ChatScreen(
             sessionId: 1,
             characterId: 1,
-            character: CharacterCard(name: 'Alice', avatarBase64: png),
+            character: CharacterCard(name: 'Alice', avatarHash: avatarHash),
           ),
         ),
       );
@@ -555,7 +616,7 @@ void main() {
           sessionId: sid,
           role: 'assistant',
           content: 'scene',
-          imageBase64: base64,
+          imageHash: await _assetHash(db, base64, preview: true),
         );
         // 预置一条非空记忆:否则灵岛的「初始化记忆」行动项(优先级高于用量粒)
         // 会顶掉用量粒,用量出现的断言无从谈起。
@@ -681,82 +742,235 @@ void main() {
     },
   );
 
-  testWidgets('image message action row regenerates in place with the stored prompt', (tester) async {
-    late final AppDatabase db;
-    late final int charId;
-    late final int sid;
-    late final String oldPng;
-    late final String newPng;
-    late final int messageId;
-    await tester.runAsync(() async {
-      db = await openTestDb();
-      oldPng = await _pngBase64(20, 20);
-      newPng = await _pngBase64(30, 10);
-      charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
-      sid = await SessionRepository(db).create(charId, 's');
-      messageId = (await MessageRepository(db).append(
-        sessionId: sid,
-        role: 'assistant',
-        content: '',
-        imageBase64: oldPng,
-        imagePrompt: 'a cave',
-      )).id!;
-    });
-    final images = _WidgetRegenImageBackend(newPng);
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          databaseProvider.overrideWithValue(db),
-          backendConfigProvider.overrideWith(
-            (ref) => const BackendConfig(
-              provider: BackendProvider.openai,
-              baseUrl: 'https://api.openai.com/v1',
-              apiKey: 'sk-test',
-              model: 'gpt-4o',
+  testWidgets(
+    'image message action row regenerates in place with the stored prompt',
+    (tester) async {
+      late final AppDatabase db;
+      late final int charId;
+      late final int sid;
+      late final String oldPng;
+      late final String newPng;
+      await tester.runAsync(() async {
+        db = await openTestDb();
+        oldPng = await _pngBase64(20, 20);
+        newPng = await _pngBase64(30, 10);
+        charId = await CharacterRepository(
+          db,
+        ).insert(const CharacterCard(name: 'Alice'));
+        sid = await SessionRepository(db).create(charId, 's');
+        await MessageRepository(db).append(
+          sessionId: sid,
+          role: 'assistant',
+          content: '',
+          imageHash: await _assetHash(db, oldPng, preview: true),
+          imagePrompt: 'a cave',
+        );
+      });
+      final images = _WidgetRegenImageBackend(newPng);
+      final newHash = sha256.convert(base64Decode(newPng)).toString();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            backendConfigProvider.overrideWith(
+              (ref) => const BackendConfig(
+                provider: BackendProvider.openai,
+                baseUrl: 'https://api.openai.com/v1',
+                apiKey: 'sk-test',
+                model: 'gpt-4o',
+              ),
+            ),
+            backendProvider.overrideWith((ref) => _QueuedWidgetBackend()),
+            imageBackendProvider.overrideWithValue(images),
+            hookRuntimeProvider.overrideWith((ref) => _NoopHookRuntime()),
+          ],
+          child: MaterialApp(
+            home: ChatScreen(
+              sessionId: sid,
+              characterId: charId,
+              character: const CharacterCard(name: 'Alice'),
             ),
           ),
-          backendProvider.overrideWith((ref) => _QueuedWidgetBackend()),
-          imageBackendProvider.overrideWithValue(images),
-          hookRuntimeProvider.overrideWith((ref) => _NoopHookRuntime()),
-        ],
-        child: MaterialApp(
-          home: ChatScreen(
-            sessionId: sid,
-            characterId: charId,
-            character: const CharacterCard(name: 'Alice'),
+        ),
+      );
+      await _settleChat(tester);
+      await _pumpUntil(
+        tester,
+        () => find.byType(RawImage).evaluate().isNotEmpty,
+      );
+
+      // 图片本体点击进全屏;点气泡边缘(图片外留白)选中并显示操作行。
+      final rect = tester.getRect(find.byType(RawImage).first);
+      await tester.runAsync(() async {
+        await tester.tapAt(Offset(rect.left - 6, rect.center.dy));
+      });
+      await tester.pumpAndSettle();
+      // 图片气泡底部只保留下载/多选;重新生成在三点完整菜单里。
+      expect(find.byTooltip('下载图片'), findsOneWidget);
+      expect(find.byTooltip('多选消息'), findsOneWidget);
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      expect(find.text('重新生成图片'), findsOneWidget);
+      await tester.runAsync(() async {
+        await tester.tap(find.text('重新生成图片'));
+        for (var i = 0; i < 100; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          final stored = await MessageRepository(db).bySession(sid);
+          if (stored.single.imageHash == newHash) break;
+          await tester.pump();
+        }
+      });
+      await tester.pump();
+
+      expect(images.prompts, ['a cave']);
+      final rows = await tester.runAsync(
+        () => MessageRepository(db).bySession(sid),
+      );
+      expect(rows!.single.imageHash, newHash);
+      expect(rows.single.imagePrompt, 'a cave');
+      await _pumpUntil(
+        tester,
+        () => find.text('图片已重新生成').evaluate().isNotEmpty,
+      );
+      await tester.runAsync(() => db.db.close());
+    },
+  );
+
+  testWidgets(
+    'image message AI-revises its prompt and redraws only that image',
+    (tester) async {
+      late final AppDatabase db;
+      late final int charId;
+      late final int sid;
+      late final int messageId;
+      late final String oldPng;
+      late final String newPng;
+      await tester.runAsync(() async {
+        db = await openTestDb();
+        oldPng = await _pngBase64(20, 20);
+        newPng = await _pngBase64(30, 10);
+        charId = await CharacterRepository(
+          db,
+        ).insert(const CharacterCard(name: 'Alice'));
+        sid = await SessionRepository(db).create(charId, 's');
+        final row = await MessageRepository(db).append(
+          sessionId: sid,
+          role: 'assistant',
+          content: '',
+          imageHash: await _assetHash(db, oldPng, preview: true),
+          imagePrompt: 'a cave',
+        );
+        messageId = row.id!;
+      });
+      final backend = _RevisionWidgetBackend();
+      final images = _WidgetRegenImageBackend(newPng);
+      final newHash = sha256.convert(base64Decode(newPng)).toString();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            backendConfigProvider.overrideWith(
+              (ref) => const BackendConfig(
+                provider: BackendProvider.openai,
+                baseUrl: 'https://api.openai.com/v1',
+                apiKey: 'sk-test',
+                model: 'gpt-4o',
+              ),
+            ),
+            backendProvider.overrideWith((ref) => backend),
+            imageBackendProvider.overrideWithValue(images),
+            hookRuntimeProvider.overrideWith((ref) => _NoopHookRuntime()),
+          ],
+          child: MaterialApp(
+            home: ChatScreen(
+              sessionId: sid,
+              characterId: charId,
+              character: const CharacterCard(name: 'Alice'),
+            ),
           ),
         ),
-      ),
-    );
-    await _settleChat(tester);
-    await _pumpUntil(tester, () => find.byType(RawImage).evaluate().isNotEmpty);
+      );
+      await _settleChat(tester);
+      await _pumpUntil(
+        tester,
+        () => find.byType(RawImage).evaluate().isNotEmpty,
+      );
 
-    // 图片本体点击进全屏;点气泡边缘(图片外留白)选中并显示操作行。
-    final rect = tester.getRect(find.byType(RawImage).first);
-    await tester.runAsync(() async {
-      await tester.tapAt(Offset(rect.left - 6, rect.center.dy));
-    });
-    await tester.pumpAndSettle();
-    expect(find.byTooltip('重新生成图片'), findsOneWidget);
-    await tester.runAsync(() async {
-      await tester.tap(find.byTooltip('重新生成图片'));
-      for (var i = 0; i < 100; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        if (await MessageRepository(db).imageBase64For(messageId) == newPng) break;
-        await tester.pump();
+      // 选中图片气泡 → 完整菜单 → 按要求重新生成。
+      final rect = tester.getRect(find.byType(RawImage).first);
+      await tester.runAsync(() async {
+        await tester.tapAt(Offset(rect.left - 6, rect.center.dy));
+      });
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      expect(find.text('按要求重新生成'), findsOneWidget);
+      await tester.runAsync(() async {
+        await tester.tap(find.text('按要求重新生成'));
+      });
+      await tester.pumpAndSettle();
+
+      // 第一张单:修改要求。
+      final firstField = find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.byType(TextField),
+      );
+      expect(firstField, findsOneWidget);
+      await tester.enterText(firstField, 'make her hair silver');
+      await tester.pump();
+      await tester.tap(find.text('生成描述'));
+      await _pumpUntil(tester, () => find.text('确认图片描述').evaluate().isNotEmpty);
+      // 让第二张单的入场动画走完(编辑框光标动画会让 pumpAndSettle 超时)。
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
       }
-    });
-    await tester.pump();
 
-    expect(images.prompts, ['a cave']);
-    final rows = await tester.runAsync(
-      () => MessageRepository(db).bySession(sid, includeImages: true),
-    );
-    expect(rows!.single.imageBase64, newPng);
-    expect(rows.single.imagePrompt, 'a cave');
-    await _pumpUntil(tester, () => find.text('图片已重新生成').evaluate().isNotEmpty);
-    await tester.runAsync(() => db.db.close());
-  });
+      // 第二张单:确认时可再手动编辑,然后只重绘这一张。第一张单可能仍在
+      // 退场动画里,pick 后压入的那张(最后一个编辑框)。
+      final secondFields = find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.byType(TextField),
+      );
+      expect(secondFields, findsWidgets);
+      final secondField = secondFields.last;
+      expect(
+        tester.widget<TextField>(secondField).controller?.text,
+        'silver hair, close-up',
+      );
+      await tester.enterText(secondField, 'silver hair, close-up edited');
+      await tester.pump();
+      await tester.ensureVisible(find.text('重新生成'));
+      await tester.tap(find.text('重新生成'));
+      await _pumpUntil(tester, () => images.prompts.isNotEmpty);
+      await tester.runAsync(() async {
+        for (var i = 0; i < 100; i++) {
+          final rows = await MessageRepository(db).bySession(sid);
+          if (rows.firstWhere((m) => m.id == messageId).imagePrompt ==
+              'silver hair, close-up edited') {
+            break;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+      });
+      await _pumpUntil(
+        tester,
+        () => find.text('图片已按要求重新生成').evaluate().isNotEmpty,
+      );
+
+      expect(backend.requests.single.systemPrompt, contains('a cave'));
+      expect(
+        backend.requests.single.systemPrompt,
+        contains('make her hair silver'),
+      );
+      expect(images.prompts, ['silver hair, close-up edited']);
+      final rows = await tester.runAsync(
+        () => MessageRepository(db).bySession(sid),
+      );
+      expect(rows!.single.imagePrompt, 'silver hair, close-up edited');
+      expect(rows.single.imageHash, newHash);
+      await tester.runAsync(() => db.db.close());
+    },
+  );
 
   testWidgets('输入框底部行:宽视口 chip 自适应右靠 + 输入区封顶居中,窄视口吃满剩余宽', (tester) async {
     late final AppDatabase db;
@@ -794,9 +1008,15 @@ void main() {
     final chipRight = tester
         .getTopRight(find.byKey(const ValueKey('model_selector')))
         .dx;
-    expect(ringLeft - chipRight, closeTo(6, 0.5), reason: 'chip 应右靠且紧贴右侧组件组');
+    expect(ringLeft - chipRight, closeTo(4, 0.5), reason: 'chip 应右靠且紧贴右侧组件组');
     final fieldRight = tester.getTopRight(find.byType(TextField)).dx;
-    expect(fieldRight, lessThan(1024.0), reason: '输入框与会话列同宽收敛,右侧留出留白');
+    final columnRight = (1150 + chatColumnMaxWidth(1150)) / 2;
+    expect(fieldRight, lessThan(columnRight), reason: '输入框与会话列同宽收敛,右侧留出列边距');
+    expect(
+      chatColumnMaxWidth(1150),
+      kChatColumnMaxWidth,
+      reason: '宽窗会话列封顶 880,输入卡收在 856,不再拉成狭长条',
+    );
 
     tester.view
       ..physicalSize = const Size(390, 844)
@@ -807,8 +1027,14 @@ void main() {
     expect(chipWidth(), greaterThan(80), reason: '窄屏 chip 仍完整显示模型名');
     expect(chipWidth(), lessThan(280), reason: 'chip 不再定宽 280 撑满中段');
     final narrowRingLeft = tester.getTopLeft(find.byType(ContextUsageRing)).dx;
-    final narrowChipRight = tester.getTopRight(find.byKey(const ValueKey('model_selector'))).dx;
-    expect(narrowRingLeft - narrowChipRight, closeTo(6, 0.5), reason: '窄屏 chip 仍紧贴右侧组件组');
+    final narrowChipRight = tester
+        .getTopRight(find.byKey(const ValueKey('model_selector')))
+        .dx;
+    expect(
+      narrowRingLeft - narrowChipRight,
+      closeTo(4, 0.5),
+      reason: '移动端间隙收紧为 4,chip 仍紧贴右侧组件组',
+    );
     final narrowFieldRight = tester.getTopRight(find.byType(TextField)).dx;
     expect(narrowFieldRight, greaterThan(390 - 24), reason: '窄屏输入框仍占满整行');
   });
@@ -868,8 +1094,10 @@ void main() {
     late final AppDatabase db;
     late final int charId;
     late final int sessionId;
+    late final String avatarHash;
     await tester.runAsync(() async {
       db = await openTestDb();
+      avatarHash = await _assetHash(db, png);
       charId = await CharacterRepository(
         db,
       ).insert(const CharacterCard(name: 'Alice'));
@@ -884,7 +1112,7 @@ void main() {
         overrides: [
           databaseProvider.overrideWithValue(db),
           userProfileProvider.overrideWith(
-            (ref) => const UserProfile(name: '小明', avatarBase64: png),
+            (ref) => UserProfile(name: '小明', avatarHash: avatarHash),
           ),
         ],
         child: MaterialApp(
@@ -1040,10 +1268,12 @@ void main() {
       () => find.text('old reply').evaluate().isNotEmpty,
     );
 
-    // 选中最新助手气泡 → 操作排「按要求重写」→ 底单输入修改要求。
+    // 选中最新助手气泡 → 三点菜单「按要求重写」→ 底单输入修改要求。
     await tester.tap(find.text('old reply'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('按要求重写'));
+    await tester.tap(find.byTooltip('更多操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('按要求重写'));
     await tester.pumpAndSettle();
     final sheetField = find.descendant(
       of: find.byType(BottomSheet),
@@ -1052,17 +1282,11 @@ void main() {
     await tester.enterText(sheetField, '更短一些');
     await tester.pump();
     await tester.tap(
-      find.descendant(
-        of: find.byType(BottomSheet),
-        matching: find.text('重写'),
-      ),
+      find.descendant(of: find.byType(BottomSheet), matching: find.text('重写')),
     );
 
     await _pumpUntil(tester, () => backend.requests.isNotEmpty);
-    await _pumpUntil(
-      tester,
-      () => find.text('reply 1').evaluate().isNotEmpty,
-    );
+    await _pumpUntil(tester, () => find.text('reply 1').evaluate().isNotEmpty);
 
     // 修改要求与旧稿随当次请求发出;旧回复被新回复替换,要求不落库。
     final sent = backend.requests.single.messages
@@ -1102,9 +1326,7 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('桌面端灵动岛升入 AppBar 带并与角色名同高,移动端仍贴消息区顶边', (
-    tester,
-  ) async {
+  testWidgets('桌面端灵动岛升入 AppBar 带并与角色名同高,移动端仍贴消息区顶边', (tester) async {
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     late final AppDatabase db;
     await tester.runAsync(() async {
@@ -1149,9 +1371,7 @@ void main() {
     final messagesTop = tester
         .getTopLeft(find.byKey(const ValueKey('messages-area')))
         .dy;
-    var islandRect = tester.getRect(
-      find.byKey(const ValueKey('chat-island')),
-    );
+    var islandRect = tester.getRect(find.byKey(const ValueKey('chat-island')));
     expect(islandRect.top, moreOrLessEquals(messagesTop + 6, epsilon: 0.5));
 
     // 桌面端:岛升进 AppBar 带,中心与工具栏中线(角色名所在行)对齐。

@@ -10,6 +10,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../../import/resource_importer.dart';
+import 'app_snack_bar.dart';
 import 'export_helper.dart';
 import 'pick_file_bytes.dart';
 
@@ -32,21 +33,21 @@ Future<void> importResourceFile(
   // 系统文件选择器的返回键是标准取消路径,取消不是失败。
   if (picked == null) {
     if (!context.mounted) return;
-    _snack(context, '已取消导入');
+    showAppSnack(context, '已取消导入');
     return;
   }
   try {
     final bytes = await pickedFileBytes(picked.files.single);
     if (bytes == null) {
       if (!context.mounted) return;
-      _snack(context, '导入失败:未读取到所选文件');
+      showAppSnack(context, '导入失败:未读取到所选文件');
       return;
     }
     final result = await importer(bytes);
     onImported();
     if (!context.mounted) return;
     // 导入往往紧跟一次导出/其它提示;直接清掉旧 SnackBar,别让结果排队等 4 秒。
-    _snack(
+    showAppSnack(
       context,
       result.skipped == 0
           ? '已导入 ${result.imported} 项$label'
@@ -54,14 +55,9 @@ Future<void> importResourceFile(
     );
   } on FormatException catch (e) {
     if (!context.mounted) return;
-    _snack(context, '导入失败:${e.message}');
+    showAppSnack(context, '导入失败:${e.message}');
   } catch (e) {
     if (!context.mounted) return;
-    _snack(context, '导入失败:$e');
+    showAppSnack(context, '导入失败:$e');
   }
-}
-
-void _snack(BuildContext context, String message) {
-  final messenger = ScaffoldMessenger.of(context)..removeCurrentSnackBar();
-  messenger.showSnackBar(SnackBar(content: Text(message)));
 }

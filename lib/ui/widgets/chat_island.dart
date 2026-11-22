@@ -43,7 +43,11 @@ class IslandNotice {
   final String text;
   final IslandTone tone;
   final IconData icon;
-  const IslandNotice({required this.text, this.tone = IslandTone.info, this.icon = Icons.info_outline});
+  const IslandNotice({
+    required this.text,
+    this.tone = IslandTone.info,
+    this.icon = Icons.info_outline,
+  });
 }
 
 /// 瞬态通知中枢:聊天页持有并传给灵岛;任何处(如命令收尾的反馈文本)可
@@ -231,12 +235,15 @@ class _ChatIslandState extends State<ChatIsland> {
     final status = widget.chat.backgroundStatus;
     if (status != old.chat.backgroundStatus) {
       _bgFlashTimer?.cancel();
-      if (status == BackgroundStatus.running || status == BackgroundStatus.idle) {
+      if (status == BackgroundStatus.running ||
+          status == BackgroundStatus.idle) {
         _bgFlash = false;
       } else {
         // 运行后消息:闪示一次,TTL 后收敛。失败/中断多停一拍,给足感知。
         _bgFlash = true;
-        final ttl = status == BackgroundStatus.failed || status == BackgroundStatus.interrupted
+        final ttl =
+            status == BackgroundStatus.failed ||
+                status == BackgroundStatus.interrupted
             ? const Duration(seconds: 7)
             : const Duration(seconds: 5);
         _bgFlashTimer = Timer(ttl, () {
@@ -284,7 +291,8 @@ class _ChatIslandState extends State<ChatIsland> {
 
   /// 备用模型建议在场:错误横幅据此渲染「切换备用模型」胶囊。
   bool get _hasFallbackSuggestion =>
-      (widget.chat.fallbackModelHint ?? '').isNotEmpty && widget.onSwitchFallbackModel != null;
+      (widget.chat.fallbackModelHint ?? '').isNotEmpty &&
+      widget.onSwitchFallbackModel != null;
 
   /// 按优先级从高到低解析当前要显示的模式。
   ///
@@ -296,7 +304,9 @@ class _ChatIslandState extends State<ChatIsland> {
     if ((widget.chat.error ?? '').isNotEmpty) return _IslandMode.alert;
     if (widget.compacting) return _IslandMode.liveCompact;
     if (widget.chat.streaming) return _IslandMode.liveStream;
-    if (widget.chat.backgroundStatus == BackgroundStatus.running) return _IslandMode.liveBg;
+    if (widget.chat.backgroundStatus == BackgroundStatus.running) {
+      return _IslandMode.liveBg;
+    }
     if (_bgFlash) return _IslandMode.flashBg;
     if (widget.memoryInitPrompt) return _IslandMode.action;
     if (_hasUsage && !widget.idleHushed) return _IslandMode.idle;
@@ -312,8 +322,11 @@ class _ChatIslandState extends State<ChatIsland> {
   /// 活动时钟随模式启停(见 [_liveTimer] 注释)。build 内直接调用,不触发 setState。
   /// 减弱动态效果时连波形/旋转一并停住,只保留静态图标与文字。
   void _syncAnimations(_IslandMode mode, {required bool reduceMotion}) {
-    final live = !reduceMotion &&
-        (mode == _IslandMode.liveStream || mode == _IslandMode.liveBg || mode == _IslandMode.liveCompact);
+    final live =
+        !reduceMotion &&
+        (mode == _IslandMode.liveStream ||
+            mode == _IslandMode.liveBg ||
+            mode == _IslandMode.liveCompact);
     if (live && _liveTimer == null) {
       _liveTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
         if (!mounted) return;
@@ -329,8 +342,12 @@ class _ChatIslandState extends State<ChatIsland> {
   Widget build(BuildContext context) {
     final mode = _resolve();
     final reduceMotion = reduceMotionOf(context);
-    final sizeMotion = reduceMotion ? Duration.zero : const Duration(milliseconds: 220);
-    final switchMotion = reduceMotion ? Duration.zero : const Duration(milliseconds: 240);
+    final sizeMotion = reduceMotion
+        ? Duration.zero
+        : const Duration(milliseconds: 220);
+    final switchMotion = reduceMotion
+        ? Duration.zero
+        : const Duration(milliseconds: 240);
     _syncAnimations(mode, reduceMotion: reduceMotion);
     // 离开可展开的模式时静默收起,回到该模式不带着上一次的展开态。
     if (_expanded &&
@@ -375,10 +392,40 @@ class _ChatIslandState extends State<ChatIsland> {
                     ),
                     child: KeyedSubtree(
                       key: ValueKey(mode),
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => _onTapPill(mode),
-                        child: _pill(context, mode),
+                      child: MouseRegion(
+                        cursor: switch (mode) {
+                          _IslandMode.idle ||
+                          _IslandMode.liveStream ||
+                          _IslandMode.alert ||
+                          _IslandMode.flashBg ||
+                          _IslandMode.flashNotice => SystemMouseCursors.click,
+                          _ => MouseCursor.defer,
+                        },
+                        child: Semantics(
+                          // 只有整粒点击有动作的模式才是按钮;后台/压缩活动态与
+                          // 行动项的动作都在内部按钮上。
+                          button: switch (mode) {
+                            _IslandMode.idle ||
+                            _IslandMode.liveStream ||
+                            _IslandMode.alert ||
+                            _IslandMode.flashBg ||
+                            _IslandMode.flashNotice => true,
+                            _ => false,
+                          },
+                          // 闪示与错误是异步结果,读屏应主动播报;流式秒表
+                          // 每秒都在变,加 liveRegion 会造成持续打断。
+                          liveRegion: switch (mode) {
+                            _IslandMode.alert ||
+                            _IslandMode.flashBg ||
+                            _IslandMode.flashNotice => true,
+                            _ => false,
+                          },
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => _onTapPill(mode),
+                            child: _pill(context, mode),
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -426,11 +473,23 @@ class _ChatIslandState extends State<ChatIsland> {
       decoration: BoxDecoration(
         color: dark ? _pillDark : _pillLight,
         borderRadius: BorderRadius.circular(expanded ? 26 : 24),
-        border: Border.all(color: Colors.white.withValues(alpha: dark ? 0.10 : 0.06)),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: dark ? 0.10 : 0.06),
+        ),
         boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.22), blurRadius: 18, offset: const Offset(0, 6)),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.22),
+            blurRadius: 18,
+            offset: const Offset(0, 6),
+          ),
           if (glow != null)
-            BoxShadow(color: glow.withValues(alpha: 0.08 + 0.10 * (0.5 + 0.5 * math.sin(_tick * 0.18))), blurRadius: 24, spreadRadius: 0.5),
+            BoxShadow(
+              color: glow.withValues(
+                alpha: 0.08 + 0.10 * (0.5 + 0.5 * math.sin(_tick * 0.18)),
+              ),
+              blurRadius: 24,
+              spreadRadius: 0.5,
+            ),
         ],
       ),
       child: expanded ? _detail(context, mode) : _capsule(context, mode),
@@ -447,10 +506,17 @@ class _ChatIslandState extends State<ChatIsland> {
             const _EngineDots(),
             const SizedBox(width: 8),
             Flexible(
-              child: _RichLabel('in ${_fmt(widget.chat.inputTokens)} tok', append: ' · out ${_fmt(widget.chat.outputTokens)} tok'),
+              child: _RichLabel(
+                'in ${_fmt(widget.chat.inputTokens)} tok',
+                append: ' · out ${_fmt(widget.chat.outputTokens)} tok',
+              ),
             ),
             const SizedBox(width: 6),
-            Icon(Icons.expand_less_rounded, size: 16, color: Colors.white.withValues(alpha: 0.45)),
+            Icon(
+              Icons.expand_less,
+              size: 16,
+              color: Colors.white.withValues(alpha: 0.6),
+            ),
           ],
         );
       case _IslandMode.liveStream:
@@ -462,11 +528,16 @@ class _ChatIslandState extends State<ChatIsland> {
             Flexible(
               child: _RichLabel(
                 '生成中',
-                append: ' · ${_elapsed}s · out +${_fmt(widget.chat.outputTokens - _outAtStreamStart)} tok',
+                append:
+                    ' · ${_elapsed}s · out +${_fmt(widget.chat.outputTokens - _outAtStreamStart)} tok',
               ),
             ),
             const SizedBox(width: 6),
-            Icon(Icons.expand_less_rounded, size: 16, color: Colors.white.withValues(alpha: 0.45)),
+            Icon(
+              Icons.expand_less,
+              size: 16,
+              color: Colors.white.withValues(alpha: 0.6),
+            ),
           ],
         );
       case _IslandMode.liveBg:
@@ -502,13 +573,20 @@ class _ChatIslandState extends State<ChatIsland> {
             Flexible(child: _RichLabel(widget.chat.error!, maxLines: 2)),
             if (_hasFallbackSuggestion) ...[
               const SizedBox(width: 6),
-              _PillButton(label: '切换备用模型', onTap: widget.onSwitchFallbackModel!),
+              _PillButton(
+                label: '切换备用模型',
+                onTap: widget.onSwitchFallbackModel!,
+              ),
             ],
             const SizedBox(width: 6),
             _MiniAction(
               tooltip: '关闭',
               onTap: widget.onDismissError,
-              child: Icon(Icons.close_rounded, size: 15, color: Colors.white.withValues(alpha: 0.55)),
+              child: Icon(
+                Icons.close,
+                size: 15,
+                color: Colors.white.withValues(alpha: 0.65),
+              ),
             ),
           ],
         );
@@ -523,7 +601,11 @@ class _ChatIslandState extends State<ChatIsland> {
                 '新会话记忆为空,可用角色卡 + 常驻世界书初始化一次',
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, height: 1.25, color: Colors.white.withValues(alpha: 0.92)),
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.25,
+                  color: Colors.white.withValues(alpha: 0.92),
+                ),
               ),
             ),
             const SizedBox(width: 8),
@@ -532,7 +614,11 @@ class _ChatIslandState extends State<ChatIsland> {
             _MiniAction(
               tooltip: '关闭初始化提示',
               onTap: widget.onDismissMemoryInit,
-              child: Icon(Icons.close_rounded, size: 15, color: Colors.white.withValues(alpha: 0.45)),
+              child: Icon(
+                Icons.close,
+                size: 15,
+                color: Colors.white.withValues(alpha: 0.62),
+              ),
             ),
           ],
         );
@@ -562,9 +648,7 @@ class _ChatIslandState extends State<ChatIsland> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _RichLabel(
-                          '后台引擎 · ${backgroundStatusLabel(status)}',
-                        ),
+                        _RichLabel('后台引擎 · ${backgroundStatusLabel(status)}'),
                         const SizedBox(height: 5),
                         _FlashSummary(
                           text: summary,
@@ -580,7 +664,7 @@ class _ChatIslandState extends State<ChatIsland> {
               child: Icon(
                 Icons.chevron_right_rounded,
                 size: 16,
-                color: Colors.white.withValues(alpha: 0.35),
+                color: Colors.white.withValues(alpha: 0.6),
               ),
             ),
           ],
@@ -624,13 +708,19 @@ class _ChatIslandState extends State<ChatIsland> {
               Expanded(
                 child: Text(
                   '请求出错(点击收起)',
-                  style: labelStyle.copyWith(color: Colors.white.withValues(alpha: 0.75)),
+                  style: labelStyle.copyWith(
+                    color: Colors.white.withValues(alpha: 0.75),
+                  ),
                 ),
               ),
               _MiniAction(
                 tooltip: '关闭',
                 onTap: widget.onDismissError,
-                child: Icon(Icons.close_rounded, size: 15, color: Colors.white.withValues(alpha: 0.55)),
+                child: Icon(
+                  Icons.close,
+                  size: 15,
+                  color: Colors.white.withValues(alpha: 0.65),
+                ),
               ),
             ],
           ),
@@ -640,7 +730,11 @@ class _ChatIslandState extends State<ChatIsland> {
             child: SingleChildScrollView(
               child: SelectableText(
                 chat.error ?? '',
-                style: TextStyle(fontSize: 12, height: 1.35, color: Colors.white.withValues(alpha: 0.92)),
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.35,
+                  color: Colors.white.withValues(alpha: 0.92),
+                ),
               ),
             ),
           ),
@@ -661,7 +755,13 @@ class _ChatIslandState extends State<ChatIsland> {
               children: [
                 _WaveBars(phase: _tick * 0.5),
                 const SizedBox(width: 8),
-                _RichLabel('生成中', append: ' · ${_elapsed}s · 本轮 out +${_fmt(chat.outputTokens - _outAtStreamStart)} tok'),
+                Flexible(
+                  child: _RichLabel(
+                    '生成中',
+                    append:
+                        ' · ${_elapsed}s · 本轮 out +${_fmt(chat.outputTokens - _outAtStreamStart)} tok',
+                  ),
+                ),
               ],
             ),
           )
@@ -677,14 +777,33 @@ class _ChatIslandState extends State<ChatIsland> {
             const SizedBox(width: 8),
             Text('用量', style: labelStyle),
             const Spacer(),
-            GestureDetector(
-              onTap: () => setState(() => _expanded = false),
-              child: Icon(Icons.expand_more_rounded, size: 18, color: Colors.white.withValues(alpha: 0.45)),
+            Semantics(
+              button: true,
+              label: '收起用量明细',
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => setState(() => _expanded = false),
+                child: SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: Icon(
+                    Icons.expand_more,
+                    size: 18,
+                    color: Colors.white.withValues(alpha: 0.65),
+                  ),
+                ),
+              ),
             ),
           ],
         ),
         const SizedBox(height: 8),
-        _engineRow(color: _toneBlue, name: '主写', input: chat.inputTokens, cached: chat.cachedInputTokens, output: chat.outputTokens),
+        _engineRow(
+          color: _toneBlue,
+          name: '主写',
+          input: chat.inputTokens,
+          cached: chat.cachedInputTokens,
+          output: chat.outputTokens,
+        ),
         if (chat.backgroundInputTokens > 0 || chat.backgroundOutputTokens > 0)
           _engineRow(
             color: _toneGreen,
@@ -702,15 +821,22 @@ class _ChatIslandState extends State<ChatIsland> {
             output: chat.compactOutputTokens,
           ),
         const SizedBox(height: 6),
-        Divider(height: 1, thickness: 0.5, color: Colors.white.withValues(alpha: 0.10)),
+        Divider(
+          height: 1,
+          thickness: 0.5,
+          color: Colors.white.withValues(alpha: 0.10),
+        ),
         const SizedBox(height: 6),
         Row(
           children: [
             Text('合计', style: labelStyle),
             const SizedBox(width: 10),
-            _RichLabel(
-              'in ${_fmt(chat.inputTokens + chat.backgroundInputTokens + chat.compactInputTokens)} tok',
-              append: ' · out ${_fmt(chat.outputTokens + chat.backgroundOutputTokens + chat.compactOutputTokens)} tok',
+            Flexible(
+              child: _RichLabel(
+                'in ${_fmt(chat.inputTokens + chat.backgroundInputTokens + chat.compactInputTokens)} tok',
+                append:
+                    ' · out ${_fmt(chat.outputTokens + chat.backgroundOutputTokens + chat.compactOutputTokens)} tok',
+              ),
             ),
           ],
         ),
@@ -718,27 +844,61 @@ class _ChatIslandState extends State<ChatIsland> {
     );
   }
 
-  Widget _engineRow({required Color color, required String name, required int input, required int cached, required int output}) {
+  Widget _engineRow({
+    required Color color,
+    required String name,
+    required int input,
+    required int cached,
+    required int output,
+  }) {
     final hit = input == 0 ? null : cached / input;
-    final detailStyle = TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.92));
-    final dimStyle = TextStyle(fontSize: 11, color: Colors.white.withValues(alpha: 0.5));
+    final detailStyle = TextStyle(
+      fontSize: 12,
+      color: Colors.white.withValues(alpha: 0.92),
+    );
+    final dimStyle = TextStyle(
+      fontSize: 11,
+      color: Colors.white.withValues(alpha: 0.62),
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
         children: [
-          Container(width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
           const SizedBox(width: 8),
-          SizedBox(
-            width: 30,
-            child: Text(name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white.withValues(alpha: 0.75))),
+          ConstrainedBox(
+            // 最小 30 保持三路引擎名对齐;大字号时随文字自然增宽,
+            // 不把「主写」折成两行。
+            constraints: const BoxConstraints(minWidth: 30),
+            child: Text(
+              name,
+              maxLines: 1,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Colors.white.withValues(alpha: 0.75),
+              ),
+            ),
           ),
           Expanded(
             child: Text.rich(
               TextSpan(
                 children: [
                   TextSpan(text: 'in ${_fmt(input)} tok', style: detailStyle),
-                  if (hit != null) TextSpan(text: ' (cached ${_fmt(cached)} tok · hit ${(hit * 100).toStringAsFixed(0)}%)', style: dimStyle),
-                  TextSpan(text: ' · out ${_fmt(output)} tok', style: detailStyle),
+                  if (hit != null)
+                    TextSpan(
+                      text:
+                          ' (cached ${_fmt(cached)} tok · hit ${(hit * 100).toStringAsFixed(0)}%)',
+                      style: dimStyle,
+                    ),
+                  TextSpan(
+                    text: ' · out ${_fmt(output)} tok',
+                    style: detailStyle,
+                  ),
                 ],
               ),
               maxLines: 1,
@@ -754,7 +914,8 @@ class _ChatIslandState extends State<ChatIsland> {
     BackgroundStatus.succeeded => _toneGreen,
     BackgroundStatus.failed => _toneRed,
     BackgroundStatus.interrupted => _toneOrange,
-    BackgroundStatus.skipped || BackgroundStatus.disabled => Colors.white.withValues(alpha: 0.5),
+    BackgroundStatus.skipped ||
+    BackgroundStatus.disabled => Colors.white.withValues(alpha: 0.62),
     _ => _toneBlue,
   };
 
@@ -790,7 +951,11 @@ class _EngineDots extends StatelessWidget {
       children: [
         for (var i = 0; i < colors.length; i++) ...[
           if (i > 0) const SizedBox(width: 3),
-          Container(width: 5, height: 5, decoration: BoxDecoration(color: colors[i], shape: BoxShape.circle)),
+          Container(
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(color: colors[i], shape: BoxShape.circle),
+          ),
         ],
       ],
     );
@@ -811,12 +976,22 @@ class _RichLabel extends StatelessWidget {
         children: [
           TextSpan(
             text: text,
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, height: 1.25, color: Colors.white.withValues(alpha: 0.95)),
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              height: 1.25,
+              color: Colors.white.withValues(alpha: 0.95),
+            ),
           ),
           if (append != null)
             TextSpan(
               text: append,
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w400, height: 1.25, color: Colors.white.withValues(alpha: 0.55)),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w400,
+                height: 1.25,
+                color: Colors.white.withValues(alpha: 0.62),
+              ),
             ),
         ],
       ),
@@ -826,9 +1001,10 @@ class _RichLabel extends StatelessWidget {
   }
 }
 
-/// 运行后闪示摘要:成功摘要按「变量 / 移除 / 待确认 / 生图 / 审计」分组,
-/// 组内变量改动只报数量(新增/修改/删除/待确认),具体键值明细留在状态面板
-/// 回看;生图状态与审计统计保持迷你胶囊。认不出的文案保持两行淡文本。
+/// 运行后闪示摘要:成功摘要按「变量 / 移除 / 待确认 / 注入 / 生图 / 审计」分组,
+/// 每组一行:左侧固定宽度的灰组名列,右侧数值文本 —— 组与组靠行列对齐,
+/// 不再用各色胶囊拼贴。颜色只保留三档:白色正文、灰组名、以及仅有的两个
+/// 语义色(headline 绿点与「待确认」橙字)。认不出的文案保持两行淡文本。
 class _FlashSummary extends StatelessWidget {
   final String text;
   final BackgroundStatus status;
@@ -855,185 +1031,116 @@ class _FlashSummary extends StatelessWidget {
         ),
       );
     }
-    final blocks = <Widget>[];
+    final rows = <Widget>[];
     if (parts.headline != null) {
-      blocks.add(
-        _chip(
-          Text(
-            parts.headline!,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 11,
-              height: 1.2,
-              fontWeight: FontWeight.w600,
-              color: _toneGreen,
+      rows.add(
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 6,
+              height: 6,
+              decoration: const BoxDecoration(
+                color: _toneGreen,
+                shape: BoxShape.circle,
+              ),
             ),
-          ),
-          background: _toneGreen.withValues(alpha: 0.16),
-          maxWidth: 170,
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                parts.headline!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  height: 1.25,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ],
         ),
       );
     }
     if (parts.updates.isNotEmpty) {
-      blocks.add(_label('变量'));
       final stats = this.stats;
-      if (stats == null) {
-        blocks.add(_countChip('更新 ${parts.updates.length}'));
-      } else {
-        if (stats.added > 0) {
-          blocks.add(_countChip('新增 ${stats.added}', color: _toneGreen));
-        }
-        if (stats.updated > 0) {
-          blocks.add(_countChip('修改 ${stats.updated}'));
-        }
-      }
+      final value = stats == null
+          ? '更新 ${parts.updates.length}'
+          : [
+              if (stats.added > 0) '新增 ${stats.added}',
+              if (stats.updated > 0) '修改 ${stats.updated}',
+            ].join(' · ');
+      if (value.isNotEmpty) rows.add(_groupRow('变量', value));
     }
     if (parts.removed.isNotEmpty) {
-      blocks.add(_label('移除'));
-      blocks.add(_countChip('${parts.removed.length}', dim: true));
+      rows.add(_groupRow('移除', '删除 ${parts.removed.length}'));
     }
     if (parts.proposed.isNotEmpty) {
-      blocks.add(_label('待确认', color: _toneOrange));
-      blocks.add(_countChip('${parts.proposed.length}', color: _toneOrange));
-    }
-    for (final stat in parts.auditStats) {
-      blocks.add(
-        _chip(
-          Text(
-            stat,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 11,
-              height: 1.2,
-              color: Colors.white.withValues(
-                alpha: stat.contains('待确认') ? 0.72 : 0.62,
-              ),
-            ),
-          ),
-          background: stat.contains('待确认')
-              ? _toneOrange.withValues(alpha: 0.16)
-              : null,
+      rows.add(
+        _groupRow(
+          '待确认',
+          '建议删除 ${parts.proposed.length}',
+          valueColor: _toneOrange,
         ),
       );
+    }
+    if (parts.injected.isNotEmpty) {
+      rows.add(_groupRow('注入', '${parts.injected.length} 键'));
+    }
+    if (parts.auditStats.isNotEmpty) {
+      rows.add(_groupRow('审计', parts.auditStats.join(' · ')));
     }
     if (parts.imageState != null) {
-      blocks.add(_label('生图', color: _toneGreen));
-      blocks.add(
-        _chip(
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.image_outlined, size: 11, color: _toneGreen),
-              const SizedBox(width: 3),
-              Flexible(
-                child: Text(
-                  parts.imageState!,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    height: 1.2,
-                    fontWeight: FontWeight.w600,
-                    color: _toneGreen,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          background: _toneGreen.withValues(alpha: 0.16),
-          maxWidth: 150,
-        ),
-      );
+      rows.add(_groupRow('生图', parts.imageState!));
     }
     if (parts.noChange != null) {
-      blocks.add(_dimChip(parts.noChange!));
+      rows.add(_groupRow('结果', parts.noChange!));
     }
     if (parts.note != null) {
-      blocks.add(_dimChip(parts.note!));
+      rows.add(_groupRow('备注', parts.note!));
     }
-    if (blocks.isEmpty) {
-      return Text(
-        text,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          fontSize: 11.5,
-          height: 1.3,
-          color: Colors.white.withValues(alpha: 0.62),
-        ),
-      );
-    }
-    return Wrap(
-      spacing: 4,
-      runSpacing: 4,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: blocks,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: 3,
+      children: rows,
     );
   }
 
-  Widget _label(String text, {Color? color}) => Text(
-    text,
-    style: TextStyle(
-      fontSize: 10,
-      height: 1.2,
-      fontWeight: FontWeight.w600,
-      color: color ?? Colors.white.withValues(alpha: 0.42),
-    ),
-  );
-
-  Widget _dimChip(String text) => _chip(
-    Text(
-      text,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: TextStyle(
-        fontSize: 11,
-        height: 1.2,
-        color: Colors.white.withValues(alpha: 0.48),
-      ),
-    ),
-    background: Colors.white.withValues(alpha: 0.06),
-    maxWidth: 210,
-  );
-
-  /// 变量改动的数量胶囊:[color] 非空时用同色底(新增绿 / 待确认橙),
-  /// [dim] 用于已删除的退阶样式,其余保持默认白胶囊。
-  Widget _countChip(String text, {Color? color, bool dim = false}) => _chip(
-    Text(
-      text,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: TextStyle(
-        fontSize: 11,
-        height: 1.2,
-        fontWeight: FontWeight.w600,
-        color: dim
-            ? Colors.white.withValues(alpha: 0.48)
-            : (color ?? Colors.white.withValues(alpha: 0.82)),
-      ),
-    ),
-    background: dim
-        ? Colors.white.withValues(alpha: 0.06)
-        : (color?.withValues(alpha: 0.16)),
-  );
-
-  Widget _chip(Widget child, {Color? background, double? maxWidth}) {
-    final box = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: background ?? Colors.white.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: child,
+  /// 一条分组行:灰组名固定宽度左对齐,右侧数值白字;仅在语义需要时
+  /// ([valueColor],如「待确认」)给数值着色,其余统一白,避免色彩杂乱。
+  Widget _groupRow(String label, String value, {Color? valueColor}) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 38,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 10.5,
+              height: 1.35,
+              fontWeight: FontWeight.w600,
+              color: Colors.white.withValues(alpha: 0.55),
+            ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11.5,
+              height: 1.3,
+              fontWeight: FontWeight.w500,
+              color: valueColor ?? Colors.white.withValues(alpha: 0.88),
+            ),
+          ),
+        ),
+      ],
     );
-    return maxWidth == null
-        ? box
-        : ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: maxWidth),
-            child: box,
-          );
   }
 }
 
@@ -1045,15 +1152,28 @@ class _PillButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(999),
+    return Semantics(
+      button: true,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.16),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Colors.white,
+              ),
+            ),
+          ),
         ),
-        child: Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white)),
       ),
     );
   }
@@ -1064,16 +1184,26 @@ class _MiniAction extends StatelessWidget {
   final String tooltip;
   final Widget child;
   final VoidCallback onTap;
-  const _MiniAction({required this.tooltip, required this.child, required this.onTap});
+  const _MiniAction({
+    required this.tooltip,
+    required this.child,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
-      message: tooltip,
-      triggerMode: TooltipTriggerMode.tap,
-      child: GestureDetector(
-        onTap: onTap,
-        child: Padding(padding: const EdgeInsets.all(3), child: child),
+    return Semantics(
+      button: true,
+      child: Tooltip(
+        message: tooltip,
+        triggerMode: TooltipTriggerMode.tap,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: onTap,
+            child: Padding(padding: const EdgeInsets.all(3), child: child),
+          ),
+        ),
       ),
     );
   }
@@ -1095,7 +1225,10 @@ class _WaveBars extends StatelessWidget {
             width: 3,
             height: 5 + 9 * (0.5 + 0.5 * math.sin(phase + i * 1.1)),
             margin: const EdgeInsets.symmetric(horizontal: 1.5),
-            decoration: BoxDecoration(color: _toneBlue, borderRadius: BorderRadius.circular(2)),
+            decoration: BoxDecoration(
+              color: _toneBlue,
+              borderRadius: BorderRadius.circular(2),
+            ),
           ),
       ],
     );
@@ -1110,6 +1243,9 @@ class _Spin extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Transform.rotate(angle: phase, child: Icon(Icons.autorenew, size: 15, color: color));
+    return Transform.rotate(
+      angle: phase,
+      child: Icon(Icons.autorenew, size: 15, color: color),
+    );
   }
 }

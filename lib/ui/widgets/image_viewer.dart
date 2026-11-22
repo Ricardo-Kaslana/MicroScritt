@@ -1,25 +1,26 @@
 /// 全屏图片查看页:缩放平移、下载保存与可选的删除入口。
 ///
-/// 展示用 provider 与保存用原始字节解耦:字节来源直接可用,URL 来源先读
+/// 展示用 provider 与保存用原始字节解耦:文件资产直接读原图,URL 来源先读
 /// 磁盘缓存、再联网;删除由调用方落库,成功后关闭本页。
 library;
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import '../../backend/disk_image_cache.dart';
 import '../../backend/image_downloader.dart';
+import '../common/app_snack_bar.dart';
 import '../common/confirm_dialog.dart';
 import '../common/export_helper.dart';
+import '../common/inline_spinner.dart';
 
 /// 全屏查看一张聊天图片:黑底铺满、双指缩放/平移、点击任意处或右上角关闭
 /// 按钮退出;右上角附**下载**按钮,可把原始字节存到用户选择的位置。
 ///
-/// [bytes] 与 [url] 二选一(同时给时优先字节):
-/// - 本地字节(气泡里 base64 解码的结果):直接以内存图解码,不重复读库;
-/// - 远程 URL:与气泡内网络图同一策略 —— 先读 [DiskImageCache],命中则本地
-///   解码;未命中走网络即时展示,并把字节后台写盘,供下次查看直接读盘。
+/// [file]、[bytes] 与 [url] 按此顺序择一。文件资产始终以原图 FileImage
+/// 降采样展示;URL 与气泡共用磁盘缓存,未命中走网络并后台写盘。
 ///
 /// [onDelete] 非空时右上角额外出现**删除**按钮:确认后执行回调,成功后关闭
 /// 本页;聊天气泡传入「清空该消息图片字段」的落库动作,不传则不显示入口。
@@ -27,6 +28,7 @@ import '../common/export_helper.dart';
 /// 返回的 Future 在全屏页关闭时完成。
 Future<void> showImageFullscreen(
   BuildContext context, {
+  File? file,
   Uint8List? bytes,
   String? url,
   Future<void> Function()? onDelete,
@@ -36,23 +38,32 @@ Future<void> showImageFullscreen(
       // 淡入淡出,不让"切到下一屏"的横滑打断查看;整体遮住聊天页。
       transitionDuration: const Duration(milliseconds: 200),
       reverseTransitionDuration: const Duration(milliseconds: 150),
-      pageBuilder: (_, __, ___) =>
-          _ImageViewerPage(bytes: bytes, url: url, onDelete: onDelete),
+      pageBuilder: (_, __, ___) => _ImageViewerPage(
+        file: file,
+        bytes: bytes,
+        url: url,
+        onDelete: onDelete,
+      ),
       transitionsBuilder: (_, animation, __, child) =>
           FadeTransition(opacity: animation, child: child),
     ),
   );
 }
 
-/// 全屏查看页。StatefulWidget:URL 来源要先异步查磁盘缓存再定 provider;
-/// 字节来源在 initState 直接定,一整页无需在解码期间重建。
+/// 全屏查看页。StatefulWidget:URL 来源要先异步查磁盘缓存再定 provider。
 class _ImageViewerPage extends StatefulWidget {
+  final File? file;
   final Uint8List? bytes;
   final String? url;
 
   /// 确认后从消息中移除这张图的回调;null = 不显示删除入口。
   final Future<void> Function()? onDelete;
-  const _ImageViewerPage({required this.bytes, required this.url, this.onDelete});
+  const _ImageViewerPage({
+    required this.file,
+    required this.bytes,
+    required this.url,
+    this.onDelete,
+  });
 
   @override
   State<_ImageViewerPage> createState() => _ImageViewerPageState();
@@ -62,8 +73,10 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
   /// 当前展示用的 provider;null = URL 的磁盘缓存仍在读取(显示转圈)。
   ImageProvider? _provider;
 
-  /// 图片的**原始字节**(下载用,与展示用的 provider 解耦):字节来源立即可用;
-  /// URL 来源在磁盘缓存命中/网络写盘成功后填充,否则为 null(下载时现取)。
+  /// 下载用原始文件;本地资产与 URL 磁盘命中均优先从文件读取。
+  File? _fullFile;
+
+  /// 无文件时的原始字节(仅网络尚未落盘或直接内存来源)。
   Uint8List? _fullBytes;
 
   /// 保存对话框未关闭/正在重取网络字节时,禁止重复点下载。
@@ -75,8 +88,12 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
   @override
   void initState() {
     super.initState();
+    final file = widget.file;
     final bytes = widget.bytes;
-    if (bytes != null) {
+    if (file != null) {
+      _provider = _viewSizeFile(file);
+      _fullFile = file;
+    } else if (bytes != null) {
       _provider = _viewSize(bytes);
       _fullBytes = bytes;
     } else {
@@ -84,18 +101,18 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
     }
   }
 
-  /// URL 来源:磁盘缓存命中 → 本地解码;未命中 → 网络即时展示,同时后台下载
-  /// 写盘,写盘成功后再把 provider 换成内存图(之后不再依赖网络)。
+  /// URL 来源:磁盘缓存命中 → FileImage;未命中 → 网络即时展示,同时后台
+  /// 下载写盘,写盘成功后切换到稳定的缓存文件 provider。
   Future<void> _loadNetwork() async {
     final url = widget.url;
     if (url == null || !mounted) return;
     try {
-      final cached = await DiskImageCache.read(url);
+      final cached = await DiskImageCache.existingFile(url);
       if (!mounted) return;
       if (cached != null) {
         setState(() {
-          _provider = _viewSize(cached);
-          _fullBytes = cached;
+          _provider = _viewSizeFile(cached);
+          _fullFile = cached;
         });
         return;
       }
@@ -115,38 +132,31 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
     final bytes = await downloadImageBytes(url);
     if (bytes == null || !mounted) return;
     await DiskImageCache.write(url, bytes);
+    final cached = await DiskImageCache.existingFile(url);
     if (!mounted) return;
     setState(() {
-      _provider = _viewSize(bytes);
-      _fullBytes = bytes;
+      if (cached != null) {
+        _provider = _viewSizeFile(cached);
+        _fullFile = cached;
+        _fullBytes = null;
+      } else {
+        _provider = _viewSize(bytes);
+        _fullBytes = bytes;
+      }
     });
   }
 
   /// 下载当前图片:优先用已有原始字节(本地来源/磁盘缓存/写盘回填);没有时按 URL
-  /// 现场重取一次。保存动作交给 [saveBytesFile](file_picker,成功/失败自带反馈)。
+  /// 现场重取一次。保存动作交给 [saveChatImage] → [saveBytesFile]。
   Future<void> _download() async {
     if (_downloading) return;
     setState(() => _downloading = true);
     try {
-      var bytes = _fullBytes;
-      if (bytes == null) {
-        final url = widget.url;
-        if (url == null) {
-          _toast('下载失败:图片数据不可用');
-          return;
-        }
-        bytes = await downloadImageBytes(url);
-        if (!mounted) return; // 重取网络字节期间全屏页已被关闭
-        if (bytes == null) {
-          _toast('下载失败:无法获取图片');
-          return;
-        }
-      }
-      await saveBytesFile(
+      await saveChatImage(
         context,
-        fileName: 'chat-image_${_timestamp()}.${_imageExtension(bytes)}',
-        bytes: bytes,
-        allowedExtensions: const ['png', 'jpg', 'jpeg', 'webp', 'gif'],
+        file: _fullFile,
+        bytes: _fullBytes,
+        url: widget.url,
       );
     } finally {
       if (mounted) setState(() => _downloading = false);
@@ -173,11 +183,6 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
     } finally {
       if (mounted) setState(() => _deleting = false);
     }
-  }
-
-  void _toast(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -212,18 +217,16 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
                       _deleting
                           ? const Padding(
                               padding: EdgeInsets.all(8),
-                              child: SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white70,
-                                ),
+                              child: InlineSpinner(
+                                size: 18,
+                                color: Colors.white70,
                               ),
                             )
                           : IconButton(
                               tooltip: '删除图片',
-                              style: IconButton.styleFrom(backgroundColor: Colors.black38),
+                              style: IconButton.styleFrom(
+                                backgroundColor: Colors.black38,
+                              ),
                               color: Theme.of(context).colorScheme.error,
                               icon: const Icon(Icons.delete_outline),
                               onPressed: _delete,
@@ -232,25 +235,25 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
                     _downloading
                         ? const Padding(
                             padding: EdgeInsets.all(8),
-                            child: SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white70,
-                              ),
+                            child: InlineSpinner(
+                              size: 18,
+                              color: Colors.white70,
                             ),
                           )
                         : IconButton(
                             tooltip: '下载图片',
-                            style: IconButton.styleFrom(backgroundColor: Colors.black38),
+                            style: IconButton.styleFrom(
+                              backgroundColor: Colors.black38,
+                            ),
                             color: Colors.white,
                             icon: const Icon(Icons.download_outlined),
                             onPressed: _download,
                           ),
                     IconButton(
                       tooltip: '关闭',
-                      style: IconButton.styleFrom(backgroundColor: Colors.black38),
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.black38,
+                      ),
                       color: Colors.white,
                       icon: const Icon(Icons.close),
                       onPressed: () => Navigator.of(context).pop(),
@@ -315,23 +318,92 @@ ImageProvider _viewSize(Uint8List bytes) => ResizeImage(
   policy: ResizeImagePolicy.fit,
 );
 
+/// 文件资产与 URL 磁盘命中共用原图文件路径,全屏不经过聊天预览。
+ImageProvider _viewSizeFile(File file) => ResizeImage(
+  FileImage(file),
+  width: 2560,
+  height: 2560,
+  policy: ResizeImagePolicy.fit,
+);
+
 /// 按图片魔数推断扩展名(下载保存用;识别不出回退 png)。
+/// 把一张聊天图片保存到用户选择的位置。
+///
+/// [file]、[bytes]、[url] 按顺序择一;本地文件优先,URL 先读磁盘缓存再联网。
+/// 读取失败或检查到页面已卸载时给出 SnackBar,不抛给调用方。
+Future<void> saveChatImage(
+  BuildContext context, {
+  File? file,
+  Uint8List? bytes,
+  String? url,
+}) async {
+  Uint8List? data = bytes;
+  if (data == null && file != null) {
+    try {
+      data = await file.readAsBytes();
+    } catch (_) {
+      data = null;
+    }
+  }
+  if (data == null && url != null && url.isNotEmpty) {
+    try {
+      final cached = await DiskImageCache.existingFile(url);
+      if (cached != null) data = await cached.readAsBytes();
+    } catch (_) {
+      data = null;
+    }
+  }
+  if (data == null && url != null && url.isNotEmpty) {
+    try {
+      data = await downloadImageBytes(url);
+    } catch (_) {
+      data = null;
+    }
+  }
+  if (!context.mounted) return;
+  if (data == null) {
+    showAppSnack(context, '下载失败:无法获取图片');
+    return;
+  }
+  await saveBytesFile(
+    context,
+    fileName: 'chat-image_${_timestamp()}.${_imageExtension(data)}',
+    bytes: data,
+    allowedExtensions: const ['png', 'jpg', 'jpeg', 'webp', 'gif'],
+  );
+}
+
 String _imageExtension(Uint8List bytes) {
   if (bytes.length >= 8 &&
-      bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
+      bytes[0] == 0x89 &&
+      bytes[1] == 0x50 &&
+      bytes[2] == 0x4E &&
+      bytes[3] == 0x47) {
     return 'png';
   }
-  if (bytes.length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+  if (bytes.length >= 3 &&
+      bytes[0] == 0xFF &&
+      bytes[1] == 0xD8 &&
+      bytes[2] == 0xFF) {
     return 'jpg';
   }
   // RIFF....WEBP(WebP 头为 "RIFF" + 大小 + "WEBP")。
   if (bytes.length >= 12 &&
-      bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 &&
-      bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) {
+      bytes[0] == 0x52 &&
+      bytes[1] == 0x49 &&
+      bytes[2] == 0x46 &&
+      bytes[3] == 0x46 &&
+      bytes[8] == 0x57 &&
+      bytes[9] == 0x45 &&
+      bytes[10] == 0x42 &&
+      bytes[11] == 0x50) {
     return 'webp';
   }
   if (bytes.length >= 6 &&
-      bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
+      bytes[0] == 0x47 &&
+      bytes[1] == 0x49 &&
+      bytes[2] == 0x46 &&
+      bytes[3] == 0x38) {
     return 'gif';
   }
   return 'png';

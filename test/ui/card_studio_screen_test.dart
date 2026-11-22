@@ -419,7 +419,7 @@ void main() {
       final state = container.read(cardStudioControllerProvider);
       expect(state.phase, CardStudioPhase.review);
       expect(state.diff!.avatar, isNull, reason: '续轮没有生成新头像');
-      expect(state.draftCard!.avatarBase64, isNotNull, reason: '已应用头像继续作为基线');
+      expect(state.draftCard!.avatarHash, isNotNull, reason: '已应用头像继续作为基线');
       expect(
         find.byKey(const ValueKey('card_avatar_preview_current')),
         findsOneWidget,

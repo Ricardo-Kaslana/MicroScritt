@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../theme/app_theme.dart';
 import 'copy_button.dart';
 
 /// 字段标题:小号、低饱和灰、常规字重、微字距。
@@ -31,6 +32,59 @@ class FieldLabel extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 统一的输入框装饰:默认沿用主题的内嵌实底风格,传 [borderAlpha] 时
+/// 叠加细描边。
+///
+/// 桌面工作区的变量/记忆/生图指导编辑区共用描边档;表单字段保持主题的
+/// 无描边内嵌档。`radius`、`borderAlpha`、`fillColor` 与 `contentPadding`
+/// 只用于同档内的细微差异,不再各页手写整份 `InputDecoration`。
+InputDecoration appInputDecoration(
+  BuildContext context, {
+  String? labelText,
+  String? hintText,
+  String? helperText,
+  int? helperMaxLines = 3,
+  Widget? prefixIcon,
+  Widget? suffixIcon,
+  bool isDense = false,
+  double? borderAlpha,
+  Color? fillColor,
+  double radius = AppRadius.input,
+  EdgeInsetsGeometry contentPadding = const EdgeInsets.symmetric(
+    horizontal: 14,
+    vertical: 12,
+  ),
+}) {
+  final scheme = Theme.of(context).colorScheme;
+  final outlined = borderAlpha != null;
+  final border = outlined
+      ? OutlineInputBorder(
+          borderRadius: BorderRadius.circular(radius),
+          borderSide: BorderSide(
+            color: scheme.outlineVariant.withValues(alpha: borderAlpha),
+          ),
+        )
+      : null;
+  return InputDecoration(
+    labelText: labelText,
+    hintText: hintText,
+    helperText: helperText,
+    helperMaxLines: helperMaxLines,
+    prefixIcon: prefixIcon,
+    suffixIcon: suffixIcon,
+    isDense: isDense,
+    filled: outlined || fillColor != null ? true : null,
+    fillColor:
+        fillColor ??
+        (outlined
+            ? scheme.surfaceContainerHighest.withValues(alpha: 0.45)
+            : null),
+    contentPadding: contentPadding,
+    border: border,
+    enabledBorder: border,
+  );
 }
 
 /// 单行/多行文本字段:标题在上、实底输入框在下。字段名会成为输入框的
@@ -105,10 +159,11 @@ class FormTextField extends StatelessWidget {
             keyboardType: keyboardType,
             style: style,
             onChanged: onChanged,
-            decoration: InputDecoration(
+            decoration: appInputDecoration(
+              context,
               hintText: hint,
               suffixIcon: suffixIcon,
-              contentPadding: EdgeInsets.symmetric(
+              contentPadding: const EdgeInsets.symmetric(
                 horizontal: 14,
                 vertical: 12,
               ).copyWith(right: suffixIcon == null ? 14 : 0),
@@ -177,7 +232,8 @@ class FormDropdownField<T> extends StatelessWidget {
             icon: const Icon(Icons.expand_more, size: 20),
             iconSize: 20,
             iconEnabledColor: scheme.onSurfaceVariant,
-            decoration: InputDecoration(
+            decoration: appInputDecoration(
+              context,
               hintText: hint,
               helperText: helperText,
               helperMaxLines: helperMaxLines,

@@ -45,26 +45,7 @@ class ImageConfigRepository {
   /// 配置为 null 时返回 null)。
   Future<int> saveProvider(ImageProviderRecord r) async {
     return db.db.transaction((txn) async {
-      final Map<String, Object?> data = {
-        'display_name': r.displayName,
-        'kind': r.config.kind.wire,
-        'base_url': r.config.baseUrl,
-        'api_key': r.config.apiKey,
-        'model': r.config.model,
-        'size': r.config.size,
-        'scale': r.config.scale,
-        'cfg': r.config.cfg,
-        'negative': r.config.negative,
-        'sampler': r.config.sampler,
-        'artist': r.config.artist,
-        'noise_schedule': r.config.noiseSchedule,
-        'steps': r.config.steps,
-        'count': r.config.count,
-        'plugin_id': r.config.pluginId,
-        'settings_json': jsonEncode(r.config.pluginSettings),
-        'is_active': r.isActive ? 1 : 0,
-        'position': r.position,
-      };
+      final data = _dataFor(r);
       if (r.id != 0) {
         await txn.update(_table, data, where: 'id = ?', whereArgs: [r.id]);
         return r.id;
@@ -78,6 +59,52 @@ class ImageConfigRepository {
       return txn.insert(_table, data);
     });
   }
+
+  /// 在调用方事务内**整体替换**全部配置(配置文件应用)。
+  ///
+  /// 按传入顺序写库、`position` 归一化为数组索引;活跃标记收敛为至多一条:
+  /// 保留首个 active,没有 active 且列表非空时首条自动 active(与单条
+  /// `saveProvider` 的"首条落库自动活跃"一致)。空列表即清空。
+  Future<void> replaceAllInTransaction(
+    DatabaseExecutor executor,
+    List<ImageProviderRecord> records,
+  ) async {
+    await executor.delete(_table);
+    if (records.isEmpty) return;
+    var activeIndex = records.indexWhere((r) => r.isActive);
+    if (activeIndex < 0) activeIndex = 0;
+    for (var i = 0; i < records.length; i++) {
+      await executor.insert(
+        _table,
+        _dataFor(records[i], isActive: i == activeIndex, position: i),
+      );
+    }
+  }
+
+  Map<String, Object?> _dataFor(
+    ImageProviderRecord r, {
+    bool? isActive,
+    int? position,
+  }) => {
+    'display_name': r.displayName,
+    'kind': r.config.kind.wire,
+    'base_url': r.config.baseUrl,
+    'api_key': r.config.apiKey,
+    'model': r.config.model,
+    'size': r.config.size,
+    'scale': r.config.scale,
+    'cfg': r.config.cfg,
+    'negative': r.config.negative,
+    'sampler': r.config.sampler,
+    'artist': r.config.artist,
+    'noise_schedule': r.config.noiseSchedule,
+    'steps': r.config.steps,
+    'count': r.config.count,
+    'plugin_id': r.config.pluginId,
+    'settings_json': jsonEncode(r.config.pluginSettings),
+    'is_active': (isActive ?? r.isActive) ? 1 : 0,
+    'position': position ?? r.position,
+  };
 
   /// 删除一条配置。删掉的若是**当前在用**的那套,顺位补一条为活跃 —— 否则会
   /// 留下"有配置但无活跃"的状态,生图静默跳过而 UI 上看不出原因。

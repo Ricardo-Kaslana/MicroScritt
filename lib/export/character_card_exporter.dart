@@ -1,7 +1,7 @@
 /// 角色卡导出:输出 ST 兼容 JSON,并按当前世界书重建 `character_book`。
 ///
-/// 头像由 [CharacterCard.toExportJson] 从列补回;世界书以独立表为准覆盖
-/// 导入时 raw 里的旧快照。
+/// 文件资产只在调用方显式传入 avatarBase64 时还原为外部协议头像;
+/// 世界书以独立表为准覆盖导入时 raw 里的旧快照。
 library;
 
 import 'dart:convert';
@@ -12,21 +12,26 @@ import 'worldbook_exporter.dart';
 
 /// 角色卡 JSON 导出入口;会话导出等需要嵌套时用 [exportJson]。
 class CharacterCardExporter {
-  /// data_json 落库时已把内嵌头像剥掉([CharacterCard.toStorageJson])、头像只存
-  /// 列里;导出前经 toExportJson 把列里的头像补回 JSON,保证导出的卡在其它
-  /// 酒馆端也带头像,不会丢图。
-  ///
-  /// [worldbook] 是该角色当前的世界书条目(独立表维护):非空时以它为准覆盖
-  /// 导出 JSON 的 `character_book` —— 否则导出的卡带的还是导入时 raw 里的
-  /// 旧快照,与本端编辑后的世界书不一致。为空时保留 raw 原有 character_book
-  /// (可能包含导入时被过滤的停用条目,不无故丢弃)。
-  static String export(CharacterCard card, {List<WorldbookEntry>? worldbook}) =>
-      jsonEncode(exportJson(card, worldbook: worldbook));
+  /// [avatarBase64] 由导出边界从文件资产按需读取,模型自身不持有 base64。
+  /// [worldbook] 非空时覆盖 raw 旧快照;为空时保留 raw 原有 character_book。
+  static String export(
+    CharacterCard card, {
+    List<WorldbookEntry>? worldbook,
+    String? avatarBase64,
+  }) =>
+      jsonEncode(exportJson(
+        card,
+        worldbook: worldbook,
+        avatarBase64: avatarBase64,
+      ));
 
-  /// [export] 的 Map 形态:会话导出等需要把角色卡嵌进更大 JSON 的场合复用,
-  /// 避免二次 encode/decode。
-  static Map<String, dynamic> exportJson(CharacterCard card, {List<WorldbookEntry>? worldbook}) {
-    var json = card.toExportJson();
+  /// [export] 的 Map 形态,供角色卡文件或其他外部导出边界复用。
+  static Map<String, dynamic> exportJson(
+    CharacterCard card, {
+    List<WorldbookEntry>? worldbook,
+    String? avatarBase64,
+  }) {
+    var json = card.toExportJson(avatarBase64: avatarBase64);
     if (worldbook != null && worldbook.isNotEmpty) {
       json = _withCharacterBook(json, worldbook);
     }

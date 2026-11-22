@@ -7,7 +7,17 @@ void main() {
     test('plain numbers', () {
       expect(parseTokenShorthand('128000'), 128000);
       expect(parseTokenShorthand('4096'), 4096);
-      expect(parseTokenShorthand('0'), 0);
+    });
+
+    test('rejects zero, negative and non-finite inputs', () {
+      // 0 会产生 max_tokens=0 的非法请求;负数不符合语法。
+      expect(parseTokenShorthand('0'), isNull);
+      expect(parseTokenShorthand('0k'), isNull);
+      expect(parseTokenShorthand('0.0'), isNull);
+      expect(parseTokenShorthand('-5'), isNull);
+      // 超大数字串不能再抛 UnsupportedError(Infinity.round())。
+      expect(parseTokenShorthand('9' * 400), isNull);
+      expect(parseTokenShorthand('9999999999'), isNull);
     });
 
     test('k suffix', () {

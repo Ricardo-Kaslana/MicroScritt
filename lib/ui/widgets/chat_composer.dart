@@ -2,11 +2,17 @@
 ///
 /// 自上而下:
 /// - 命令行:输入 `/xx` 时的实时建议,或手动展开的常驻命令组,同一个
-///   [AnimatedSize] 负责显隐,展开/收起不跳变;
+///   [AnimatedSize] 负责显隐,展开/收起不跳变(移动端形态);
 /// - 输入卡:消息框(默认一行高、随输入增长到 [_kFieldMaxLines] 行)+ 底栏
-///   (命令入口、@ 技能、模型 chip、推理徽标、上下文圆环、发送/中断键);
+///   (命令入口、@ 技能、「模型 | 推理」合并胶囊、上下文圆环、发送/中断键);
 /// - 输入卡与消息列同宽收敛:宽窗左右缘对齐助手气泡左缘 / 用户气泡右缘,
 ///   窄窗吃满可用宽度;
+///
+/// 弹层形态按平台分流:移动端保持底部抽屉([showAppSheet])与内联命令行;
+/// 桌面端([isDesktopPlatformOf])一律改为锚定弹卡([showAppFlyout])——
+/// 斜杠命令建议与 `@` 技能建议都从输入卡上方原地长出(↑/↓ 选择、Enter
+/// 插入、Esc 关闭),命令、技能与推理等级也可从各自入口按钮上方弹出,
+/// 鼠标点选后无需移步屏幕底缘。
 ///
 /// 制卡等独立工作台复用本组件时把 [showCommands] 关掉:命令行与命令/技能
 /// 入口整组消失,只保留模型 chip、推理徽标、上下文圆环与发送/中断键 ——
@@ -23,18 +29,25 @@ library;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/app_settings.dart';
 import '../../models/skill.dart';
 import '../../state/providers.dart';
+import '../../state/skill_suggestions.dart';
 import '../../state/slash_commands.dart';
+import '../common/app_flyout.dart';
+import '../common/app_sheet.dart';
+import '../common/app_snack_bar.dart';
 import '../common/chat_layout.dart';
+import '../common/layout_breakpoints.dart';
 import '../common/motion.dart';
 import '../common/sheet_header.dart';
 import '../composer_span_builder.dart';
 import '../model_selector_bar.dart';
 import '../text_syntax.dart';
+import '../theme/app_theme.dart';
 import 'reasoning_slider.dart';
 
 /// 输入卡两侧留白:与消息气泡外框的 12px 边距同宽 —— 宽窗下输入卡左右缘
@@ -50,15 +63,36 @@ const int _kFieldMaxLines = 6;
 /// 描边/阴影/按钮切换共用的过渡时长;系统开启「减弱动态效果」时归零。
 const Duration _kMotion = Duration(milliseconds: 180);
 
-/// 底栏模型 chip 的最大宽度:超过按模型名省略,不挤占发送键。
-const double _kModelChipMaxWidth = 240;
+/// 底栏模型胶囊的最大宽度:桌面宽窗能放下更长的模型名,移动端优先把
+/// 宽度留给输入与发送键。
+const double _kModelCapsuleMaxWidthDesktop = 320;
+const double _kModelCapsuleMaxWidthMobile = 240;
+
+/// 桌面弹卡定宽:命令/建议卡按命令行文案适配,技能卡放下两行描述。
+const double _kCommandFlyoutWidth = 320;
+const double _kSkillFlyoutWidth = 360;
+const double _kReasoningFlyoutWidth = 320;
+
+/// 输入卡上方建议弹卡的内容类型:斜杠命令或 `@` 技能,二者共用同一张卡位。
+enum _SuggestionMode { command, skill }
+
+/// 斜杠建议是否与上一帧相同:宿主每次重建都带同一列表,相同就不重复同步,
+/// 避免用户 Esc/点卡外关掉后又被无关重建弹开。
+bool _sameSuggestions(List<SlashCommand> a, List<SlashCommand> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
 
 /// 聊天输入区。
 ///
-/// 底栏左侧是命令入口与 @ 技能,右侧依次是模型 chip、(推理徽标)、上下文
-/// 使用率圆环与发送/中断键;窄行(手机)与宽行(桌面/平板横屏)同一顺序,
-/// chip 按模型名收缩省略,不再定宽撑满。
-class ChatComposer extends ConsumerWidget {
+/// 底栏左侧是命令入口与 @ 技能,右侧依次是「模型 | 推理」合并胶囊、(桌面端
+/// 的)推理档位、上下文使用率圆环与发送/中断键;窄行(手机)与宽行(桌面/
+/// 平板横屏)的组件顺序一致,但间距与可见部件按平台各自排版。
+class ChatComposer extends ConsumerStatefulWidget {
   /// 流式或耗时命令进行中:发送键原位换成中断键。
   final bool interruptible;
 
@@ -71,7 +105,7 @@ class ChatComposer extends ConsumerWidget {
   /// 输入焦点(宿主持有,便于发送后保持键盘)。
   final FocusNode inputFocusNode;
 
-  /// 常驻命令按钮行是否展开(可折叠)。
+  /// 常驻命令按钮行是否展开(可折叠;移动端形态,桌面端由弹卡顶替)。
   final bool commandsExpanded;
 
   /// 上下文 token 口径(估算 + 可选真实锚点)。
@@ -106,6 +140,12 @@ class ChatComposer extends ConsumerWidget {
   /// 非空时键盘发送动作直接提交(Enter 不再换行),用于简报式输入。
   final VoidCallback? onSubmitted;
 
+  /// 桌面端按 Enter 直接发送、Shift+Enter 换行。
+  ///
+  /// 与 [onSubmitted] 互斥使用:后者改的是软键盘动作(移动端也生效),
+  /// 这里只在桌面键盘上拦截 Enter,移动端仍保持换行。
+  final bool submitOnEnter;
+
   const ChatComposer({
     super.key,
     required this.interruptible,
@@ -123,14 +163,88 @@ class ChatComposer extends ConsumerWidget {
     this.showCommands = true,
     this.enabled = true,
     this.onSubmitted,
+    this.submitOnEnter = false,
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ChatComposer> createState() => _ChatComposerState();
+}
+
+class _ChatComposerState extends ConsumerState<ChatComposer> {
+  /// 输入卡锚点:桌面端斜杠建议弹卡从这里原地向上展开。
+  final GlobalKey _cardAnchorKey = GlobalKey();
+
+  /// 键盘导航的高亮下标(建议弹卡与 [Focus.onKeyEvent] 共享)。
+  final ValueNotifier<int> _suggestionIndex = ValueNotifier(0);
+
+  /// 打开中的斜杠建议弹卡;null = 未打开。
+  FlyoutHandle? _suggestionFlyout;
+
+  /// 当前建议卡内容类型;命令与技能共用 [_suggestionFlyout]。
+  _SuggestionMode? _suggestionMode;
+
+  /// 光标所在的 `@` 提及;null = 当前不提供技能建议。
+  SkillMentionQuery? _skillMention;
+
+  /// 当前匹配的技能列表(键盘导航与弹卡内容共用)。
+  List<Skill> _skillSuggestions = const [];
+
+  /// didUpdateWidget 在 build 期触发,弹卡的开/关/热更新统一推迟到帧尾。
+  bool _suggestionSyncScheduled = false;
+
+  bool get _desktop => isDesktopPlatformOf(context);
+
+  @override
+  void initState() {
+    super.initState();
+    widget.inputController.addListener(_onInputValueChanged);
+  }
+
+  @override
+  void didUpdateWidget(ChatComposer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.inputController != widget.inputController) {
+      oldWidget.inputController.removeListener(_onInputValueChanged);
+      widget.inputController.addListener(_onInputValueChanged);
+    }
+    if (oldWidget.inputController != widget.inputController ||
+        oldWidget.showCommands != widget.showCommands ||
+        !_sameSuggestions(oldWidget.suggestions, widget.suggestions)) {
+      _syncSuggestionFlyout();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.inputController.removeListener(_onInputValueChanged);
+    _suggestionFlyout?.close();
+    _suggestionIndex.dispose();
+    super.dispose();
+  }
+
+  /// 文本或光标变化时重算 `@` 提及:斜杠命令正文优先,不在这里给技能建议。
+  /// 弹卡开合仍推迟到帧尾,与宿主 setState 驱动的建议刷新合并。
+  void _onInputValueChanged() {
+    final value = widget.inputController.value;
+    final cursor = value.selection.isValid
+        ? value.selection.extentOffset
+        : value.text.length;
+    final next = value.text.trimLeft().startsWith('/')
+        ? null
+        : skillMentionAt(value.text, cursor);
+    if (next == _skillMention) return;
+    _skillMention = next;
+    _syncSuggestionFlyout();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final motion = motionDurationOf(context, _kMotion);
     final reasoning = ref.watch(appSettingsProvider).reasoningLevel;
-    // 输入卡宽度 = 会话列内容宽(列宽 − 两侧与气泡同宽的边距):宽窗列宽
-    // 封顶 880,中等/移动宽度取满可用宽 —— 三种情形下输入卡左右缘都与
+    // 技能目录异步就绪后重算候选:先开卡显示加载圈,数据到达再收敛。
+    ref.listen(skillsProvider, (_, _) => _syncSuggestionFlyout());
+    // 输入卡宽度 = 会话列内容宽(列宽 − 两侧与气泡同宽的边距):列宽 880
+    // 封顶,输入卡最大 856;窄/中窗吃满可用宽 —— 输入卡左右缘始终与
     // 助手气泡左缘 / 用户气泡右缘对齐。
     final maxWidth =
         chatColumnMaxWidth(MediaQuery.sizeOf(context).width) -
@@ -158,27 +272,34 @@ class ChatComposer extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (showCommands) _commandRow(context, motion),
+                // 桌面端的命令组与斜杠建议都由弹卡呈现,不再占消息区高度。
+                if (widget.showCommands && !_desktop)
+                  _commandRow(context, motion),
                 // 聚焦态只驱动外描边与阴影,不重建整页:FocusNode 是
                 // Listenable,失焦/聚焦在这里就地重建这一小块。
                 ListenableBuilder(
-                  listenable: inputFocusNode,
-                  builder: (context, _) => AnimatedContainer(
-                    duration: motion,
-                    curve: Curves.easeOut,
-                    decoration: _cardDecoration(
-                      context,
-                      inputFocusNode.hasFocus,
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(_kCardRadius - 1),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _field(context),
-                          _footer(context, ref, reasoning, motion),
-                        ],
+                  listenable: widget.inputFocusNode,
+                  builder: (context, _) => KeyedSubtree(
+                    // 桌面端斜杠建议弹卡的锚点:弹卡底边贴输入卡顶缘。
+                    key: _cardAnchorKey,
+                    child: AnimatedContainer(
+                      duration: motion,
+                      curve: Curves.easeOut,
+                      decoration: _cardDecoration(
+                        context,
+                        widget.inputFocusNode.hasFocus,
+                      ),
+                      child: ClipRRect(
+                        key: const ValueKey('composer_card'),
+                        borderRadius: BorderRadius.circular(_kCardRadius - 1),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _field(context),
+                            _footer(context, reasoning, motion),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -218,20 +339,28 @@ class ChatComposer extends ConsumerWidget {
   /// 关掉,避免在输入卡里再叠一层灰底方块与内层蓝色描边 —— 焦点反馈统一
   /// 由外层输入卡承担。
   Widget _field(BuildContext context) {
-    return TextField(
-      controller: inputController,
-      focusNode: inputFocusNode,
-      enabled: enabled,
+    final platform = Theme.of(context).platform;
+    final desktop =
+        platform == TargetPlatform.windows ||
+        platform == TargetPlatform.macOS ||
+        platform == TargetPlatform.linux;
+    Widget field = TextField(
+      controller: widget.inputController,
+      focusNode: widget.inputFocusNode,
+      enabled: widget.enabled,
       minLines: 1,
       maxLines: _kFieldMaxLines,
       keyboardType: TextInputType.multiline,
-      textInputAction:
-          onSubmitted == null ? TextInputAction.newline : TextInputAction.send,
-      onChanged: onChanged,
-      onSubmitted: onSubmitted == null ? null : (_) => onSubmitted!(),
+      textInputAction: widget.onSubmitted == null
+          ? TextInputAction.newline
+          : TextInputAction.send,
+      onChanged: widget.onChanged,
+      onSubmitted: widget.onSubmitted == null
+          ? null
+          : (_) => widget.onSubmitted!(),
       style: Theme.of(context).textTheme.bodyLarge?.copyWith(height: 1.4),
       decoration: InputDecoration(
-        hintText: hintText,
+        hintText: widget.hintText,
         hintMaxLines: 1,
         filled: false,
         border: InputBorder.none,
@@ -243,24 +372,105 @@ class ChatComposer extends ConsumerWidget {
         contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
       ),
     );
+    if (desktop) {
+      // 桌面视觉密度比移动端紧一档,TextField 自身反而更矮;上下各垫 8px,
+      // 让桌面输入卡比移动端高 6,单行输入在宽卡里不再显得扁。
+      field = Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: field,
+      );
+    }
+    if (!widget.submitOnEnter) return field;
+    // 输入框自身是焦点后代,这里作为祖先 Focus 接收冒泡的按键:
+    // 建议弹卡打开时 ↑/↓ 移动高亮、Tab 补全高亮项(Shift+Tab 反向移动)、
+    // Enter 选中插入、Esc 关闭;否则 Enter 提交、Shift+Enter 放行给多行
+    // 输入;输入法组合中不提交,避免中文候选词的确认键被当成发送。
+    return Focus(
+      canRequestFocus: false,
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+          return KeyEventResult.ignored;
+        }
+        final key = event.logicalKey;
+        if (_suggestionFlyout?.isOpen ?? false) {
+          final count = _activeSuggestionCount;
+          if (key == LogicalKeyboardKey.escape) {
+            _suggestionFlyout?.close();
+            return KeyEventResult.handled;
+          }
+          if (count > 0 && key == LogicalKeyboardKey.arrowDown) {
+            _moveSuggestion(1);
+            return KeyEventResult.handled;
+          }
+          if (count > 0 && key == LogicalKeyboardKey.arrowUp) {
+            _moveSuggestion(-1);
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.tab) {
+            // Tab 是补全语义,不能放行给焦点遍历,否则卡片还开着焦点就跑了。
+            if (count > 0) {
+              if (HardwareKeyboard.instance.isShiftPressed) {
+                _moveSuggestion(-1);
+              } else {
+                final index = _suggestionIndex.value.clamp(0, count - 1);
+                _pickActiveSuggestion(index);
+              }
+            }
+            return KeyEventResult.handled;
+          }
+          if ((key == LogicalKeyboardKey.enter ||
+                  key == LogicalKeyboardKey.numpadEnter) &&
+              !HardwareKeyboard.instance.isShiftPressed) {
+            // 卡片已开但候选还在加载时也不能让 Enter 直接发出半截 @ 文本。
+            if (count > 0) {
+              final index = _suggestionIndex.value.clamp(0, count - 1);
+              _pickActiveSuggestion(index);
+            }
+            return KeyEventResult.handled;
+          }
+        }
+        if (key != LogicalKeyboardKey.enter &&
+            key != LogicalKeyboardKey.numpadEnter) {
+          return KeyEventResult.ignored;
+        }
+        if (HardwareKeyboard.instance.isShiftPressed) {
+          return KeyEventResult.ignored;
+        }
+        if (widget.inputController.value.composing.isValid) {
+          return KeyEventResult.ignored;
+        }
+        // 忙碌期发送键已换成中断键,Enter 不再触发发送。
+        if (!widget.enabled || widget.interruptible) {
+          return KeyEventResult.ignored;
+        }
+        widget.onSend();
+        return KeyEventResult.handled;
+      },
+      child: field,
+    );
   }
 
   /// 输入卡底栏:浅一档的 tonal 分区,与消息框用发丝线分开。
+  ///
+  /// 两端按平台各自排版:
+  /// - 桌面端:左侧命令/技能入口 32,右侧「模型 | 推理」合并胶囊 → 圆环 →
+  ///   发送键统一成 32/32/38,组件之间留 10,宽窗下节奏一致;
+  /// - 移动端:工具按钮收紧到 30 且零间距,合并胶囊只留模型段,组件之间
+  ///   留 4~6,把宽度优先让给模型名。
+  ///
+  /// 桌面端的命令/技能入口换成锚定弹卡触发件;移动端保持原交互,且不再
+  /// 单独显示推理档位(调整推理走模型选择底单里的滑块)。
   Widget _footer(
     BuildContext context,
-    WidgetRef ref,
     ReasoningLevel reasoning,
     Duration motion,
   ) {
     final scheme = Theme.of(context).colorScheme;
-    final badge = reasoning == ReasoningLevel.off
-        ? null
-        : _ReasoningBadge(
-            level: reasoning.label,
-            onTap: () => _pickReasoning(context, ref, reasoning),
-          );
+    final desktop = _desktop;
+    final showReasoning = desktop && reasoning != ReasoningLevel.off;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      // 移动端水平留白收到 6,给模型胶囊多腾几个像素;桌面维持 8。
+      padding: EdgeInsets.symmetric(horizontal: desktop ? 8 : 6, vertical: 6),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
         border: Border(
@@ -272,62 +482,166 @@ class ChatComposer extends ConsumerWidget {
       ),
       child: Row(
         children: [
-          if (showCommands) ...[
-            _toolButton(
-              context,
-              tooltip: commandsExpanded ? '收起命令按钮行' : '展开命令按钮行',
-              icon: commandsExpanded ? Icons.expand_less : Icons.terminal,
-              active: commandsExpanded,
-              onPressed: onToggleCommands,
-            ),
-            const SizedBox(width: 2),
-            if (onInsertCommand != null)
+          if (widget.showCommands) ...[
+            if (desktop)
+              AppFlyoutAnchor(
+                width: _kCommandFlyoutWidth,
+                alignment: AppFlyoutAlignment.start,
+                builder: (context, handle) => _toolButton(
+                  context,
+                  tooltip: '命令',
+                  icon: Icons.terminal,
+                  onPressed: handle.toggle,
+                ),
+                flyoutBuilder: (context, handle) =>
+                    _commandFlyoutContent(context, handle),
+              )
+            else
               _toolButton(
                 context,
-                tooltip: '插入技能(@)',
-                icon: Icons.alternate_email,
-                onPressed: () => _pickSkill(context, ref),
+                tooltip: widget.commandsExpanded ? '收起命令按钮行' : '展开命令按钮行',
+                icon: widget.commandsExpanded
+                    ? Icons.expand_less
+                    : Icons.terminal,
+                active: widget.commandsExpanded,
+                onPressed: widget.onToggleCommands,
+                size: 30,
               ),
+            // 桌面留 4 的呼吸;移动端两颗工具按钮零间距紧贴,挤压出更多
+            // 模型胶囊宽度。
+            if (desktop) const SizedBox(width: 4),
+            if (widget.onInsertCommand != null)
+              if (desktop)
+                AppFlyoutAnchor(
+                  width: _kSkillFlyoutWidth,
+                  alignment: AppFlyoutAlignment.start,
+                  builder: (context, handle) => _toolButton(
+                    context,
+                    tooltip: '调用技能(@)',
+                    icon: Icons.alternate_email,
+                    // 与命令按钮同一 toggle 语义;先校验有可用技能再开卡,
+                    // 避免弹出空卡(无技能时仍走 SnackBar 引导)。
+                    onPressed: () {
+                      if (handle.isOpen) {
+                        handle.close();
+                        return;
+                      }
+                      _pickSkill(handle);
+                    },
+                  ),
+                  flyoutBuilder: (context, handle) => _SkillFlyoutCard(
+                    onPick: (skill) {
+                      handle.close();
+                      _insertSkillToken(skill);
+                    },
+                  ),
+                )
+              else
+                _toolButton(
+                  context,
+                  tooltip: '插入技能(@)',
+                  icon: Icons.alternate_email,
+                  onPressed: _pickSkillSheet,
+                  size: 30,
+                ),
           ],
-          // 中段全部让给模型 chip:Align 松开紧约束后按模型名自适应收窄,
-          // 长名省略;聊天页继续贴右给固定组让位,精简模式(无命令/技能
-          // 入口的工作台)贴左,与输入框左缘对齐不再悬在中间。
+          // 中段让给「模型 | 推理」合并胶囊:Align 松开紧约束后按内容
+          // 自适应收窄,长模型名省略;聊天页继续贴右键组,精简模式(无
+          // 命令/技能入口的工作台)贴左,与输入框左缘对齐。
           Expanded(
             child: Align(
-              alignment:
-                  showCommands ? Alignment.centerRight : Alignment.centerLeft,
+              alignment: widget.showCommands
+                  ? Alignment.centerRight
+                  : Alignment.centerLeft,
               child: ConstrainedBox(
-                constraints: const BoxConstraints(
-                  maxWidth: _kModelChipMaxWidth,
+                constraints: BoxConstraints(
+                  maxWidth: desktop
+                      ? _kModelCapsuleMaxWidthDesktop
+                      : _kModelCapsuleMaxWidthMobile,
                 ),
-                child: const ModelSelectorChip(),
+                child: _modelCapsule(context, reasoning, showReasoning),
               ),
             ),
           ),
-          if (badge != null) ...[const SizedBox(width: 6), badge],
-          const SizedBox(width: 6),
-          ContextUsageRing(usage: usage),
-          const SizedBox(width: 8),
+          // 桌面宽窗给足呼吸(10);移动端收紧到 4/6,保持一行不挤。
+          SizedBox(width: desktop ? 10 : 4),
+          ContextUsageRing(usage: widget.usage),
+          SizedBox(width: desktop ? 10 : 6),
           _primaryAction(context, motion),
         ],
       ),
     );
   }
 
-  /// 底栏图标按钮:34 的命中外径比旧 28 更易点中,active 时主色高亮底。
+  /// 底栏「模型 | 推理」合并胶囊。
+  ///
+  /// 两段共用一层中立底色与整块圆角 Material:模型段占左半,推理段占右半,
+  /// 中间只隔一条短发丝线。悬停/按下的反馈落在各自段内,视觉上仍是一颗
+  /// 完整的胶囊 —— 不再由两段各自上色后硬拼,接缝处不会出现两种色块的直边。
+  /// 推理非 Off 时才拉出右段,且只在桌面出现(移动端走模型底单里的滑块)。
+  Widget _modelCapsule(
+    BuildContext context,
+    ReasoningLevel reasoning,
+    bool showReasoning,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      key: const ValueKey('model_reasoning_capsule'),
+      color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+      shape: StadiumBorder(
+        side: BorderSide(
+          color: scheme.outlineVariant.withValues(alpha: 0.35),
+          width: 0.5,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 两段都给弹性(模型 2 份、推理 1 份):极窄视口下推理文本先
+          // 省略,模型段吃到 2/3 剩余宽,整颗胶囊始终塞进底栏不溢出。
+          const Flexible(flex: 2, child: ModelSelectorChip(embedded: true)),
+          if (showReasoning) ...[
+            // 线高短于胶囊,上下留白,读作分区而不是把胶囊一分为二。
+            Container(
+              key: const ValueKey('model_reasoning_divider'),
+              width: 1,
+              height: 16,
+              color: scheme.outlineVariant.withValues(alpha: 0.7),
+            ),
+            Flexible(
+              flex: 1,
+              child: AppFlyoutAnchor(
+                width: _kReasoningFlyoutWidth,
+                builder: (context, handle) => _ReasoningBadge(
+                  level: reasoning.label,
+                  onTap: handle.toggle,
+                ),
+                flyoutBuilder: (context, handle) => _reasoningFlyoutContent(),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 底栏图标按钮:桌面 32 与合并胶囊/圆环同高;移动端收紧到 30,给模型
+  /// 胶囊让出宽度。active 时主色高亮底。
   Widget _toolButton(
     BuildContext context, {
     required String tooltip,
     required IconData icon,
     required VoidCallback? onPressed,
     bool active = false,
+    double size = 32,
   }) {
     final scheme = Theme.of(context).colorScheme;
     return IconButton(
       tooltip: tooltip,
       visualDensity: VisualDensity.compact,
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+      constraints: BoxConstraints.tightFor(width: size, height: size),
       iconSize: 19,
       style: IconButton.styleFrom(
         foregroundColor: active ? scheme.primary : scheme.onSurfaceVariant,
@@ -350,24 +664,30 @@ class ChatComposer extends ConsumerWidget {
   Widget _primaryAction(BuildContext context, Duration motion) {
     final scheme = Theme.of(context).colorScheme;
     return ValueListenableBuilder<TextEditingValue>(
-      valueListenable: inputController,
+      valueListenable: widget.inputController,
       builder: (context, value, _) {
-        final canSend = enabled && value.text.trim().isNotEmpty;
+        final canSend = widget.enabled && value.text.trim().isNotEmpty;
         return IconButton.filled(
-          tooltip: interruptible ? '中断生成' : '发送',
+          tooltip: widget.interruptible ? '中断生成' : '发送',
           constraints: const BoxConstraints.tightFor(width: 38, height: 38),
           padding: EdgeInsets.zero,
           iconSize: 20,
           style: IconButton.styleFrom(
-            backgroundColor: interruptible ? scheme.error : scheme.primary,
-            foregroundColor: interruptible ? scheme.onError : scheme.onPrimary,
+            backgroundColor: widget.interruptible
+                ? scheme.error
+                : scheme.primary,
+            foregroundColor: widget.interruptible
+                ? scheme.onError
+                : scheme.onPrimary,
             disabledBackgroundColor: scheme.surfaceContainerHighest,
             disabledForegroundColor: scheme.onSurfaceVariant.withValues(
               alpha: 0.45,
             ),
             shape: const CircleBorder(),
           ),
-          onPressed: interruptible ? onInterrupt : (canSend ? onSend : null),
+          onPressed: widget.interruptible
+              ? widget.onInterrupt
+              : (canSend ? widget.onSend : null),
           icon: AnimatedSwitcher(
             duration: motion,
             switchInCurve: Curves.easeOutCubic,
@@ -377,8 +697,10 @@ class ChatComposer extends ConsumerWidget {
               child: ScaleTransition(scale: animation, child: child),
             ),
             child: Icon(
-              interruptible ? Icons.stop_rounded : Icons.arrow_upward_rounded,
-              key: ValueKey(interruptible),
+              widget.interruptible
+                  ? Icons.stop_rounded
+                  : Icons.arrow_upward_rounded,
+              key: ValueKey(widget.interruptible),
             ),
           ),
         );
@@ -390,9 +712,12 @@ class ChatComposer extends ConsumerWidget {
   ///
   /// 显隐与内容切换都发生在 [AnimatedSize] 内:键盘弹出/收起旁边的输入卡
   /// 位置不动,命令行从底部对齐伸缩;ClipRect 防止收起过程的内容溢画。
+  /// 仅移动端渲染(桌面端由斜杠建议弹卡与命令弹卡顶替)。
   Widget _commandRow(BuildContext context, Duration motion) {
-    final show = suggestions.isNotEmpty || commandsExpanded;
-    final cmds = suggestions.isNotEmpty ? suggestions : allSlashCommands;
+    final show = widget.suggestions.isNotEmpty || widget.commandsExpanded;
+    final cmds = widget.suggestions.isNotEmpty
+        ? widget.suggestions
+        : allSlashCommands;
     return ClipRect(
       child: AnimatedSize(
         duration: motion,
@@ -441,7 +766,9 @@ class ChatComposer extends ConsumerWidget {
       backgroundColor: scheme.surface,
       side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.5)),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      onPressed: onInsertCommand == null ? null : () => onInsertCommand!(c),
+      onPressed: widget.onInsertCommand == null
+          ? null
+          : () => widget.onInsertCommand!(c),
     );
   }
 
@@ -449,39 +776,384 @@ class ChatComposer extends ConsumerWidget {
   static String _commandLabel(SlashCommand c) =>
       '${slashCommandSlash(c)} ${slashCommandLabel[c]}';
 
-  /// 推理等级快捷切换:点底栏徽标拖动滑块改档,不必打开模型选择器。
-  /// 写库成功后才更新内存(与模型选择器同一约定),失败保留原值并提示。
-  Future<void> _pickReasoning(
+  // ---------------------------------------------------------------------------
+  // 桌面弹卡:斜杠建议 / 全部命令 / 技能 / 推理等级
+  // ---------------------------------------------------------------------------
+
+  /// 建议弹卡同步:didUpdateWidget / 文本变化 / 技能目录就绪都在 build 期或
+  /// 监听回调里触发,Overlay 的插拔必须推迟到帧尾;一帧内的多次变化合并
+  /// 为一次判定。
+  void _syncSuggestionFlyout() {
+    if (_suggestionSyncScheduled) return;
+    _suggestionSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _suggestionSyncScheduled = false;
+      if (!mounted) return;
+      _applySuggestionSync();
+    });
+  }
+
+  void _applySuggestionSync() {
+    if (!widget.showCommands || !_desktop) {
+      _closeSuggestionFlyout();
+      return;
+    }
+    // 斜杠命令优先:命令正文里的 @ 不作为技能触发。
+    if (widget.suggestions.isNotEmpty) {
+      _openOrRefreshSuggestion(
+        mode: _SuggestionMode.command,
+        width: _kCommandFlyoutWidth,
+        builder: _suggestionCardContent,
+      );
+      return;
+    }
+    final mention = _skillMention;
+    if (mention == null) {
+      _closeSuggestionFlyout();
+      return;
+    }
+    final skillsAsync = ref.read(skillsProvider);
+    if (skillsAsync.hasError) {
+      _closeSuggestionFlyout();
+      return;
+    }
+    final matches = suggestedSkills(
+      skillsAsync.value ?? const <Skill>[],
+      mention.query,
+    );
+    // 技能目录未就绪时先开卡显示加载圈;就绪后无匹配再关闭。
+    if (skillsAsync.hasValue && matches.isEmpty) {
+      _closeSuggestionFlyout();
+      return;
+    }
+    _skillSuggestions = matches;
+    _openOrRefreshSuggestion(
+      mode: _SuggestionMode.skill,
+      width: _kSkillFlyoutWidth,
+      builder: _skillSuggestionCardContent,
+    );
+  }
+
+  /// 打开或热更新同一类型的建议卡;命令/技能切换时换一张卡(定宽不同)。
+  void _openOrRefreshSuggestion({
+    required _SuggestionMode mode,
+    required double width,
+    required WidgetBuilder builder,
+  }) {
+    _suggestionIndex.value = 0;
+    final handle = _suggestionFlyout;
+    if (handle != null && handle.isOpen && _suggestionMode == mode) {
+      // 建议列表随输入收缩:热更新已开弹卡的内容,不闪不跳。
+      handle.rebuild();
+      return;
+    }
+    handle?.close();
+    final anchor = _cardAnchorKey.currentContext;
+    if (anchor == null) return;
+    _suggestionMode = mode;
+    _suggestionFlyout = showAppFlyout(
+      anchorContext: anchor,
+      width: width,
+      alignment: AppFlyoutAlignment.start,
+      builder: builder,
+      onClose: () {
+        _suggestionFlyout = null;
+        _suggestionMode = null;
+        _skillSuggestions = const [];
+        _suggestionIndex.value = 0;
+      },
+    );
+  }
+
+  void _closeSuggestionFlyout() {
+    final handle = _suggestionFlyout;
+    _suggestionFlyout = null;
+    _suggestionMode = null;
+    _skillSuggestions = const [];
+    handle?.close();
+  }
+
+  /// 斜杠建议弹卡内容:匹配命令行,高亮项带 Enter 提示;高亮下标由
+  /// [_suggestionIndex] 驱动,键盘导航不经过宿主 setState。
+  Widget _suggestionCardContent(BuildContext context) {
+    final cmds = widget.suggestions;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Flexible(
+          child: ValueListenableBuilder<int>(
+            valueListenable: _suggestionIndex,
+            builder: (context, active, _) => ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+              children: [
+                for (final (i, c) in cmds.indexed)
+                  _commandCardRow(
+                    context,
+                    c,
+                    highlighted: i == active,
+                    onTap: () => _pickSuggestion(c),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// `@` 技能建议弹卡内容:按已输入前缀筛出的技能,高亮行同样支持 Enter 插入。
+  /// 技能目录未就绪时先显示加载圈,数据到达后由 [_applySuggestionSync] 收敛。
+  Widget _skillSuggestionCardContent(BuildContext context) {
+    if (!ref.read(skillsProvider).hasValue) {
+      return const SizedBox(
+        height: 56,
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    final skills = _skillSuggestions;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Flexible(
+          child: ValueListenableBuilder<int>(
+            valueListenable: _suggestionIndex,
+            builder: (context, active, _) => ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+              children: [
+                for (final (i, skill) in skills.indexed)
+                  _skillCardRow(
+                    context,
+                    skill,
+                    highlighted: i == active,
+                    onTap: () => _pickSkillSuggestion(skill),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 全部命令弹卡内容(命令按钮触发):完整命令清单,点选即插入输入框。
+  Widget _commandFlyoutContent(
     BuildContext context,
-    WidgetRef ref,
-    ReasoningLevel current,
-  ) async {
-    final picked = await showModalBottomSheet<ReasoningLevel>(
-      context: context,
-      showDragHandle: true,
-      useSafeArea: true,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+    FlyoutTriggerHandle handle,
+  ) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const AppFlyoutHeader(icon: Icons.terminal, title: '命令'),
+        Flexible(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
             children: [
-              const ChatSheetHeader(
-                icon: Icons.psychology_outlined,
-                title: '推理等级',
-              ),
-              const SizedBox(height: 4),
-              ReasoningSlider(
-                value: current,
-                onSelected: (level) => Navigator.pop(sheetContext, level),
-              ),
+              for (final c in allSlashCommands)
+                _commandCardRow(
+                  context,
+                  c,
+                  onTap: () {
+                    handle.close();
+                    widget.onInsertCommand?.call(c);
+                  },
+                ),
             ],
           ),
         ),
+      ],
+    );
+  }
+
+  /// 弹卡里的一行命令:图标 + 「/命令 标签」,高亮行垫主色底并补 Enter 提示。
+  Widget _commandCardRow(
+    BuildContext context,
+    SlashCommand c, {
+    required VoidCallback onTap,
+    bool highlighted = false,
+  }) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.sm + 2,
+        ),
+        color: highlighted ? scheme.primary.withValues(alpha: 0.08) : null,
+        child: Row(
+          children: [
+            Icon(Icons.terminal, size: 16, color: scheme.primary),
+            const SizedBox(width: AppSpacing.sm + 2),
+            Expanded(
+              child: Text(
+                _commandLabel(c),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (highlighted)
+              Text(
+                'Enter',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+        ),
       ),
     );
-    if (picked == null || picked == current) return;
+  }
+
+  /// `@` 技能建议里的一行:名称 + 可选描述,高亮行垫主色底并补 Enter 提示。
+  Widget _skillCardRow(
+    BuildContext context,
+    Skill skill, {
+    required VoidCallback onTap,
+    bool highlighted = false,
+  }) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final description = skill.description.trim();
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.sm + 2,
+        ),
+        color: highlighted ? scheme.primary.withValues(alpha: 0.08) : null,
+        child: Row(
+          children: [
+            Icon(Icons.extension_outlined, size: 16, color: scheme.primary),
+            const SizedBox(width: AppSpacing.sm + 2),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '@${skill.name.trim()}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (description.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      description,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (highlighted) ...[
+              const SizedBox(width: AppSpacing.sm),
+              Text(
+                'Enter',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 当前建议条数:命令与技能共用同一张弹卡,键盘导航按当前类型取长度。
+  int get _activeSuggestionCount => switch (_suggestionMode) {
+    _SuggestionMode.command => widget.suggestions.length,
+    _SuggestionMode.skill => _skillSuggestions.length,
+    null => 0,
+  };
+
+  /// 键盘导航:在当前建议范围内循环移动高亮。
+  void _moveSuggestion(int delta) {
+    final count = _activeSuggestionCount;
+    if (count == 0) return;
+    var next = (_suggestionIndex.value + delta) % count;
+    if (next < 0) next += count;
+    _suggestionIndex.value = next;
+  }
+
+  /// 选定当前类型的建议:命令交给宿主插入斜杠文本,技能直接写入 `@技能名`。
+  void _pickActiveSuggestion(int index) {
+    switch (_suggestionMode) {
+      case _SuggestionMode.command:
+        _pickSuggestion(widget.suggestions[index]);
+        return;
+      case _SuggestionMode.skill:
+        _pickSkillSuggestion(_skillSuggestions[index]);
+        return;
+      case null:
+        return;
+    }
+  }
+
+  /// 选定一条技能建议:关弹卡并把光标所在的 `@前缀` 整体替换为完整令牌。
+  void _pickSkillSuggestion(Skill skill) {
+    final mention = _skillMention;
+    _suggestionFlyout?.close();
+    _insertSkillToken(skill, mention: mention);
+  }
+
+  /// 选定一条命令建议:关弹卡并交给宿主写入输入框(宿主随后的建议清空会再
+  /// 触发一次同步,重复关闭是幂等的)。
+  void _pickSuggestion(SlashCommand command) {
+    _suggestionFlyout?.close();
+    widget.onInsertCommand?.call(command);
+  }
+
+  /// 推理等级桌面弹卡:滑块直接内嵌,当前档位实时从设置读 —— 落库成功后
+  /// 档位刷新,失败时滑块自动回弹,弹卡保持打开可重试。
+  Widget _reasoningFlyoutContent() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.sm,
+        0,
+        AppSpacing.sm,
+        AppSpacing.sm,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const AppFlyoutHeader(icon: Icons.psychology_outlined, title: '推理等级'),
+          Consumer(
+            builder: (context, ref, _) {
+              final level = ref.watch(appSettingsProvider).reasoningLevel;
+              return ReasoningSlider(
+                value: level,
+                onSelected: _persistReasoning,
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 推理等级快捷切换:点底栏徽标拖动滑块改档,不必打开模型选择器。
+  /// 写库成功后才更新内存(与模型选择器同一约定),失败保留原值并提示。
+  Future<void> _persistReasoning(ReasoningLevel picked) async {
     try {
       await persistReasoningLevel(
         level: picked,
@@ -491,106 +1163,169 @@ class ChatComposer extends ConsumerWidget {
         current: ref.read(appSettingsProvider),
       );
     } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('保存推理等级失败,请重试')));
-      }
+      if (mounted) showAppSnack(context, '保存推理等级失败,请重试');
     }
   }
 
-  /// @ 技能选择弹层:列出全部启用中的技能(name + description),点选即把
-  /// `@技能名 ` 插入输入框光标处 —— 与发送端的触发判据(文本含 @技能名)
-  /// 完全同构,选中即等价于主动调用该技能。无启用技能时给引导提示。
-  Future<void> _pickSkill(BuildContext context, WidgetRef ref) async {
+  /// @ 技能选择弹层(桌面):先校验有可用技能(无则提示,不弹空卡),
+  /// 再打开锚定弹卡;点选即把 `@技能名 ` 插入输入框光标处 —— 与发送端的
+  /// 触发判据(文本含 @技能名)完全同构,选中即等价于主动调用该技能。
+  Future<void> _pickSkill(FlyoutTriggerHandle handle) async {
     final skills = await ref.read(skillsProvider.future);
-    final usable = [
-      for (final s in skills)
-        if (s.enabled && s.name.trim().isNotEmpty) s,
-    ];
-    if (!context.mounted) return;
+    final usable = suggestedSkills(skills, '');
+    if (!mounted) return;
     if (usable.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('暂无启用的技能,可在 设置 → 全局技能 中创建')));
+      showAppSnack(context, '暂无启用的技能,可在 设置 → 全局技能 中创建');
       return;
     }
-    final scheme = Theme.of(context).colorScheme;
-    await showModalBottomSheet<void>(
-      context: context,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 8, 4),
-              child: Row(
-                children: [
-                  Icon(Icons.alternate_email, size: 18, color: scheme.primary),
-                  const SizedBox(width: 6),
-                  Text('调用技能', style: Theme.of(context).textTheme.titleMedium),
-                  const Spacer(),
-                  IconButton(
-                    tooltip: '关闭',
-                    icon: const Icon(Icons.close, size: 20),
-                    onPressed: () => Navigator.pop(sheetContext),
-                  ),
-                ],
-              ),
+    handle.open();
+  }
+
+  /// @ 技能选择弹层(移动端):底部抽屉列出全部启用中的技能。
+  Future<void> _pickSkillSheet() async {
+    final skills = await ref.read(skillsProvider.future);
+    final usable = suggestedSkills(skills, '');
+    if (!mounted) return;
+    if (usable.isEmpty) {
+      showAppSnack(context, '暂无启用的技能,可在 设置 → 全局技能 中创建');
+      return;
+    }
+    await showAppSheet<void>(
+      context,
+      isScrollControlled: false,
+      showDragHandle: true,
+      builder: (sheetContext) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 4, 20, 0),
+            child: ChatSheetHeader(icon: Icons.alternate_email, title: '调用技能'),
+          ),
+          Flexible(
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: const EdgeInsets.only(bottom: 12),
+              itemCount: usable.length,
+              itemBuilder: (context, index) {
+                final s = usable[index];
+                return ListTile(
+                  leading: const Icon(Icons.extension_outlined),
+                  title: Text('@${s.name.trim()}'),
+                  subtitle: s.description.trim().isEmpty
+                      ? null
+                      : Text(
+                          s.description.trim(),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _insertSkillToken(s);
+                  },
+                );
+              },
             ),
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                padding: const EdgeInsets.only(bottom: 12),
-                itemCount: usable.length,
-                itemBuilder: (context, index) {
-                  final s = usable[index];
-                  return ListTile(
-                    leading: const Icon(Icons.extension_outlined),
-                    title: Text('@${s.name.trim()}'),
-                    subtitle: s.description.trim().isEmpty
-                        ? null
-                        : Text(
-                            s.description.trim(),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      _insertSkillToken(s);
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
-  /// 把 `@技能名 ` 插入输入框光标处并聚焦;编程式赋值不会触发 TextField 的
-  /// onChanged,手动补一次以刷新斜杠建议等派生状态。
-  void _insertSkillToken(Skill s) {
-    final controller = inputController;
+  /// 把 `@技能名 ` 写入输入框并聚焦。[mention] 非空时先整体替换用户已输入的
+  /// `@前缀`,避免候选插入后留下 “@剑@剑术” 这样的重复令牌。
+  ///
+  /// 编程式赋值不会触发 TextField 的 onChanged,手动补一次以刷新宿主的
+  /// 斜杠建议等派生状态;本组件自己的 `@` 提及由控制器监听器同步。
+  void _insertSkillToken(Skill s, {SkillMentionQuery? mention}) {
+    final controller = widget.inputController;
     final token = '@${s.name.trim()} ';
     final selection = controller.selection;
-    final offset = selection.isValid && selection.baseOffset >= 0
-        ? selection.baseOffset
+    final offset = selection.isValid && selection.extentOffset >= 0
+        ? selection.extentOffset
         : controller.text.length;
-    final text = controller.text.replaceRange(offset, offset, token);
+    final from = (mention?.start ?? offset).clamp(0, offset);
+    final text = controller.text.replaceRange(from, offset, token);
     controller.value = TextEditingValue(
       text: text,
-      selection: TextSelection.collapsed(offset: offset + token.length),
+      selection: TextSelection.collapsed(offset: from + token.length),
     );
-    inputFocusNode.requestFocus();
-    onChanged?.call(controller.text);
+    widget.inputFocusNode.requestFocus();
+    widget.onChanged?.call(controller.text);
   }
 }
 
-/// 推理等级徽标:只显示等级单字(高/中/低),tooltip 补全语义。完整「推理 xx」
-/// 文案在窄屏输入框底栏会与模型 chip 抢宽互相省略,单字徽标恒定窄小。
+/// 技能弹卡内容:启用中的技能(name + description)逐行列出,点选交给
+/// 宿主插入输入框。技能目录经 provider 读取,弹卡打开期间不刷新目录
+/// (与移动端底单「打开即快照」同一语义)。
+class _SkillFlyoutCard extends ConsumerWidget {
+  final ValueChanged<Skill> onPick;
+  const _SkillFlyoutCard({required this.onPick});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final skillsAsync = ref.watch(skillsProvider);
+    return skillsAsync.when(
+      loading: () => const SizedBox(
+        height: 56,
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      ),
+      error: (_, _) => Padding(
+        padding: const EdgeInsets.all(AppSpacing.lg),
+        child: Text(
+          '技能加载失败,请重试',
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+      data: (skills) {
+        final usable = suggestedSkills(skills, '');
+        if (usable.isEmpty) {
+          return Padding(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            child: Text(
+              '暂无启用的技能',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          );
+        }
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const AppFlyoutHeader(icon: Icons.alternate_email, title: '调用技能'),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                children: [
+                  for (final s in usable)
+                    AppFlyoutRow(
+                      icon: Icons.extension_outlined,
+                      title: '@${s.name.trim()}',
+                      subtitle: s.description.trim().isEmpty
+                          ? null
+                          : s.description.trim(),
+                      onTap: () => onPick(s),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// 推理等级段:只显示英文档位(Off 不显示),tooltip 补全语义。
+///
+/// 与模型段同处一颗合并胶囊:底色由外层 Material 统一提供,本段只负责
+/// 右半的点击面。图标点明这是推理档位,不必再写「推理」二字挤占宽度;
+/// 文本保留强调色,与模型名区分开又不会形成第二块色底。
 class _ReasoningBadge extends StatelessWidget {
   final String level;
   final VoidCallback? onTap;
@@ -603,19 +1338,30 @@ class _ReasoningBadge extends StatelessWidget {
       message: '推理等级:$level',
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(999),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-          decoration: BoxDecoration(
-            color: scheme.tertiary.withValues(alpha: 0.14),
-            borderRadius: BorderRadius.circular(999),
-          ),
-          child: Text(
-            level,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: scheme.tertiary,
-              fontWeight: FontWeight.w700,
-            ),
+        borderRadius: const BorderRadius.horizontal(right: Radius.circular(26)),
+        hoverColor: scheme.primary.withValues(alpha: 0.06),
+        highlightColor: scheme.primary.withValues(alpha: 0.09),
+        child: Padding(
+          // 与模型段同厚:同字号 + 同纵向内边距,合并后整颗胶囊齐平。
+          padding: const EdgeInsets.fromLTRB(8, 6, 10, 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.psychology_outlined, size: 14, color: scheme.tertiary),
+              const SizedBox(width: 3),
+              // 极窄视口下文本可省略收缩,外层弹性分配才不会溢出。
+              Flexible(
+                child: Text(
+                  level,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: scheme.tertiary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -648,10 +1394,7 @@ class ComposerSyntaxController extends TextEditingController {
   ///
   /// 调用点在 ChatScreen.build 内,不能同步 notifyListeners(会触发布局期
   /// 重建);post-frame 通知只用于技能集合变化后的高亮兜底。
-  void updateSyntax(
-    CompiledSyntax syntax, {
-    required bool highlightDialogue,
-  }) {
+  void updateSyntax(CompiledSyntax syntax, {required bool highlightDialogue}) {
     final changed =
         syntax.signature != _syntax.signature ||
         highlightDialogue != _highlightDialogue;

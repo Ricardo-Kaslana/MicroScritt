@@ -11,7 +11,9 @@ import 'package:microscritt/state/chat_controller.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/chat_screen.dart';
 import 'package:microscritt/ui/sessions_screen.dart';
+import '../support/image_fixture.dart';
 import '../support/test_database.dart';
+import '../support/wait_until.dart';
 
 void main() {
   late AppDatabase db;
@@ -68,7 +70,7 @@ void main() {
         sessionId: withImages,
         role: 'assistant',
         content: '',
-        imageBase64: 'aGk=',
+        imageHash: await putTestImage(db),
       );
       await MessageRepository(
         db,
@@ -83,8 +85,8 @@ void main() {
     });
     await tester.pumpAndSettle();
 
-    // 带图会话:「x 条消息：y 条文本 + z 条图片」细分;纯文会话保持原样。
-    expect(find.textContaining('3 条消息：2 条文本 + 1 条图片'), findsOneWidget);
+    // 带图会话:「x 条消息:y 条文本 + z 条图片」细分;纯文会话保持原样。
+    expect(find.textContaining('3 条消息:2 条文本 + 1 条图片'), findsOneWidget);
     expect(find.textContaining('1 条消息'), findsOneWidget);
     await tester.runAsync(() => db.db.close());
   });
@@ -186,6 +188,58 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('多开场白角色新建会话留空,可另选一条开场白', (tester) async {
+    const multi = CharacterCard(
+      name: 'Alice',
+      firstMessage: '主开场白',
+      alternateGreetings: ['备用一', '备用二'],
+    );
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(db).insert(multi);
+    });
+    await tester.pumpWidget(harness(multi));
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('还没有会话'), findsOneWidget);
+
+    await tester.runAsync(() async {
+      await tester.tap(find.widgetWithText(FloatingActionButton, '新建会话'));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await tester.pumpAndSettle();
+    });
+    expect(find.byType(ChatScreen), findsOneWidget);
+    await waitUntilOrFail(
+      tester,
+      () => find.text('与 Alice 开始对话').evaluate().isNotEmpty,
+      reason: '多开场白的新会话应停留在空态供选择',
+    );
+    expect(find.text('主开场白'), findsOneWidget);
+    expect(find.text('备用一'), findsOneWidget);
+    expect(find.text('备用二'), findsOneWidget);
+    var rows = await tester.runAsync(() => db.db.query('messages'));
+    expect(rows, isEmpty, reason: '选择前不应自动写入任何开场白');
+
+    await tester.tap(find.text('备用二'));
+    await waitUntilOrFail(tester, () {
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ChatScreen)),
+      );
+      return container
+              .read(chatControllerProvider)
+              .lastContext
+              ?.messages
+              .any((m) => m.content == '备用二') ??
+          false;
+    }, reason: '选择备用开场白后未落库或未重算上下文');
+    rows = await tester.runAsync(() => db.db.query('messages'));
+    expect(rows, hasLength(1));
+    expect(rows!.single['content'], '备用二');
+    await tester.runAsync(() => db.db.close());
+  });
+
   testWidgets('新建无开场白会话后宽窗侧栏立即出现该会话', (tester) async {
     tester.view
       ..physicalSize = const Size(1600, 900)
@@ -223,9 +277,9 @@ void main() {
 
     var newSessionId = 0;
     await tester.runAsync(() async {
-      newSessionId = (await SessionRepository(db).byCharacter(charId))
-          .single
-          .id;
+      newSessionId = (await SessionRepository(
+        db,
+      ).byCharacter(charId)).single.id;
     });
     // 侧栏分组重查是真实 I/O:交替 runAsync + 推帧直到行渲染出来。
     final row = find.byKey(ValueKey('sidebar-session-$newSessionId'));

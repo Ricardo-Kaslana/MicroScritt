@@ -150,6 +150,46 @@ class ContextAssembler {
     return parts.join('\n');
   }
 
+  /// 变量注入附件的单值字符上限(压成单行后截断)。
+  static const int maxVariableInjectionValueChars = 200;
+
+  /// 变量注入附件的单键字符上限(异常长键的兜底截断)。
+  static const int maxVariableInjectionKeyChars = 80;
+
+  /// 变量注入附件的正文总字符上限(超出按顺序截断)。
+  static const int maxVariableInjectionNoticeChars = 2000;
+
+  /// Agentic 变量注入附件的线上形态:后台 agent 选中的键值,作为下一条
+  /// 用户消息前的 system-reminder 注入。值压成单行并做两级截断,
+  /// 防止超长变量撑爆请求。
+  static String variableInjectionNotice(Map<String, String> variables) {
+    final lines = <String>[];
+    var used = 0;
+    var truncated = false;
+    for (final entry in variables.entries) {
+      final key = entry.key.replaceAll(RegExp(r'\s+'), ' ').trim();
+      final clippedKey = key.length <= maxVariableInjectionKeyChars
+          ? key
+          : '${key.substring(0, maxVariableInjectionKeyChars)}…';
+      final value = entry.value.replaceAll(RegExp(r'\s+'), ' ').trim();
+      final clipped = value.length <= maxVariableInjectionValueChars
+          ? value
+          : '${value.substring(0, maxVariableInjectionValueChars)}…';
+      final line = '- $clippedKey: $clipped';
+      if (lines.isNotEmpty &&
+          used + line.length + 1 > maxVariableInjectionNoticeChars) {
+        truncated = true;
+        break;
+      }
+      lines.add(line);
+      used += line.length + 1;
+    }
+    if (truncated) lines.add('…(更多变量已省略)');
+    return '<system-reminder>以下是根据最近剧情更新并选定的会话状态变量,'
+        '作为接下来写作的状态参考;非对话内容,回复时请与这些事实保持一致,'
+        '勿提及或复述本段。\n${lines.join('\n')}</system-reminder>';
+  }
+
   /// 历史后指令的线上形态:角色卡该字段的语义是「历史之后、生成之前的最后
   /// 一段指令」,因此作为 messages 尾部的合成提醒发出,不留在 system 稳定段。
   /// 与记忆第 0 条同款 `<system-reminder>` 包裹:模型把它当作系统注入而非
@@ -182,9 +222,10 @@ class ContextAssembler {
   /// 经 [_correctNoticePositions] 校正到最新用户行之前,线上字节与通知
   /// 应处的位置一致。
   ///
-  /// 注意:变量(variables)**有意不参与**主写组装 —— 只存在于后台 agent
-  /// 的上下文(`BackgroundEngine._buildPrompt` 按功能块注入),本方法不
-  /// 接受也不产出任何变量内容。
+  /// 注意:变量默认**不参与**主写组装 —— 只存在于后台 agent 的上下文
+  /// (`BackgroundEngine._buildPrompt` 按功能块注入)。唯一例外是后台 Agentic
+  /// 经 `setVariableInjection` 选中的键:提交后以 `notice:varinj` 附件行
+  /// 注入,由调用方在用户消息前落库;本方法不直接读取变量表。
   ContextSnapshot assemble({
     required CharacterCard character,
     required List<PromptItem> items,
@@ -495,7 +536,9 @@ class ContextAssembler {
             ? '压缩通知'
             : ref.startsWith('notice:memdiff:')
                 ? '记忆差异'
-                : '附件';
+                : ref.startsWith('notice:varinj:')
+                    ? '变量注入'
+                    : '附件';
     return '$kindLabel · ${m.content.length} 字符';
   }
 

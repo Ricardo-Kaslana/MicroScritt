@@ -121,16 +121,26 @@ class LlmProbe {
           idleTimeout: idleTimeout,
         );
     }
+    // Anthropic 的 max_tokens 必填且 system 不接受空串:探测请求按正式请求
+    // 的口径带模型配置的最大输出(未配置时给一个够用的最小值),system 给
+    // 非空最小内容 —— 否则「测试连接」100% 误报配置缺失。
+    final probeMaxTokens =
+        (config.maxTokens != null && config.maxTokens! > 0)
+            ? config.maxTokens
+            : 256;
     final completer = Completer<LlmProbeStage>();
     int? inputTokens;
     late final StreamSubscription<LlmEvent> sub;
     sub = backend
         .generate(LlmRequest(
           model: config.model,
-          systemPrompt: '',
+          systemPrompt: config.provider == BackendProvider.anthropic
+              ? 'You are a connectivity probe. Reply with a single short word.'
+              : '',
           messages: const [ChatMessage(ChatRole.user, 'ping')],
           // 探测与正式请求同口径:只透传模型配置的温度。
           temperature: config.temperature,
+          maxTokens: probeMaxTokens,
         ))
         .listen(
           (event) {
@@ -146,7 +156,7 @@ class LlmProbe {
                   completer.complete(LlmProbeStage.failure(
                     kind: kind ?? UpstreamErrorKind.transient,
                     statusCode: statusCode,
-                    detail: _redact(message),
+                    detail: redactSecrets(message, apiKey: config.apiKey),
                   ));
                 }
               case ToolCallsEvent():
@@ -162,7 +172,7 @@ class LlmProbe {
             if (!completer.isCompleted) {
               completer.complete(LlmProbeStage.failure(
                 kind: UpstreamErrorKind.transient,
-                detail: _redact('网络错误:$e'),
+                detail: redactSecrets('网络错误:$e', apiKey: config.apiKey),
               ));
             }
           },
@@ -185,14 +195,10 @@ class LlmProbe {
       // 断链中止:无论哪条路径出栈,订阅都要收掉;后端 onCancel 会同步 close
       // 尚未收尾的连接,独享 client 随后由 finally 兜底释放。
       await sub.cancel();
+      // 成功路径同样必须关闭自建 client:探测每次都新建,不关就泄漏连接池
+      // (取消订阅只中止请求,不释放 client 本身)。
+      client.close();
     }
     return stage;
-  }
-
-  /// 服务端报错有时会回显请求里的密钥:凡展示的摘要一律先脱敏。
-  String _redact(String text) {
-    final key = config.apiKey;
-    if (key.length < 4) return text;
-    return text.replaceAll(key, '***');
   }
 }

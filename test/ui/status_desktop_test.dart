@@ -1,5 +1,6 @@
 // 桌面状态工作台 widget 测试:分区导航、概览、变量表格行内编辑、记忆/生图
 // 编辑与后台设置落库。宽窗断点以上由 StatusScreen 分发到桌面页。
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -37,8 +38,11 @@ void main() {
     addTearDown(tester.view.reset);
   }
 
-  Future<void> openDesktop(WidgetTester tester) async {
-    await tester.pumpWidget(harness());
+  Future<void> openDesktop(
+    WidgetTester tester, {
+    AppSettings settings = const AppSettings(),
+  }) async {
+    await tester.pumpWidget(harness(settings: settings));
     await waitUntil(
       tester,
       () => find
@@ -168,7 +172,14 @@ void main() {
     expect(find.byKey(const ValueKey('image_guide_info_rail')), findsOneWidget);
     expect(find.text('保存即生效'), findsOneWidget);
     expect(find.textContaining('old guide'), findsOneWidget);
-    expect(find.byKey(const ValueKey('image_guide_edit_button')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('image_guide_regenerate_button')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('image_guide_edit_button')),
+      findsOneWidget,
+    );
     expect(find.byTooltip('更多操作'), findsOneWidget);
 
     await closeDb(tester);
@@ -523,9 +534,7 @@ void main() {
     expect(find.text('hp'), findsOneWidget);
     // 条目少时对话框按内容收缩,不再固定 70% 屏高。
     expect(
-      tester
-          .getSize(find.byKey(const ValueKey('status_dialog_frame')))
-          .height,
+      tester.getSize(find.byKey(const ValueKey('status_dialog_frame'))).height,
       lessThan(600),
     );
     await tester.tap(find.byTooltip('恢复变量'));
@@ -536,6 +545,121 @@ void main() {
       expect(rows.single.key, 'hp');
       expect(rows.single.agentAccess.name, 'protected');
     });
+    await closeDb(tester);
+  });
+
+  testWidgets('Agentic 增强在桌面等高设置卡内不溢出', (tester) async {
+    tester.view.physicalSize = const Size(1000, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's');
+    });
+    await openDesktop(
+      tester,
+      settings: const AppSettings(
+        backgroundMode: BackgroundMode.agentic,
+        backgroundVariableInjection: true,
+        backgroundNextSuggestions: true,
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.byTooltip('查看说明'), findsNWidgets(2));
+    final injection = tester.widget<SwitchListTile>(
+      find.widgetWithText(SwitchListTile, '变量注入主写'),
+    );
+    expect(injection.onChanged, isNotNull);
+    expect(injection.subtitle, isNull);
+    expect(
+      tester
+          .widget<SwitchListTile>(find.widgetWithText(SwitchListTile, '下一步建议'))
+          .onChanged,
+      isNotNull,
+    );
+    // 三列等高布局在断点附近最容易因文字换行低估固有高度:多宽度扫一遍。
+    for (final width in [1000.0, 1100.0, 1280.0, 1366.0, 1600.0]) {
+      tester.view.physicalSize = Size(width, 1000);
+      await tester.pump();
+      expect(tester.takeException(), isNull, reason: 'width $width');
+    }
+
+    // Legacy 下两开关置灰,同样不能溢出。
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await openDesktop(tester, settings: const AppSettings());
+    await waitUntil(
+      tester,
+      () => find
+          .widgetWithText(SwitchListTile, '变量注入主写')
+          .evaluate()
+          .isNotEmpty,
+    );
+    expect(tester.takeException(), isNull);
+    expect(
+      tester
+          .widget<SwitchListTile>(
+            find.widgetWithText(SwitchListTile, '变量注入主写'),
+          )
+          .onChanged,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<SwitchListTile>(find.widgetWithText(SwitchListTile, '下一步建议'))
+          .onChanged,
+      isNull,
+    );
+    for (final width in [1000.0, 1100.0, 1280.0, 1366.0, 1600.0]) {
+      tester.view.physicalSize = Size(width, 1000);
+      await tester.pump();
+      expect(tester.takeException(), isNull, reason: 'legacy width $width');
+    }
+    await closeDb(tester);
+  });
+
+  testWidgets('桌面 compact 密度下维护设置卡等高不溢出', (tester) async {
+    // 桌面平台默认 VisualDensity.compact;ListTile 的固有高度不含
+    // minVerticalPadding,带 InfoButton 的行实际 46、固有只报 40,
+    // 双列/三列等高卡会少算 6px。
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    tester.view.physicalSize = const Size(1120, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's');
+    });
+    await openDesktop(
+      tester,
+      settings: const AppSettings(
+        backgroundMode: BackgroundMode.agentic,
+        backgroundVariableInjection: true,
+        backgroundNextSuggestions: true,
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    for (final scale in [1.0, 1.25, 1.5]) {
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      for (final width in [1000.0, 1120.0, 1280.0, 1345.0, 1360.0, 1600.0]) {
+        tester.view.physicalSize = Size(width, 1000);
+        await tester.pump();
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: 'scale $scale width $width',
+        );
+      }
+    }
+    debugDefaultTargetPlatformOverride = null;
     await closeDb(tester);
   });
 }

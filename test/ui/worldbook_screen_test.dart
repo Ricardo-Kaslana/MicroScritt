@@ -418,4 +418,83 @@ void main() {
     );
     await tester.runAsync(() => db.db.close());
   });
+
+  testWidgets('entry editor asks before discarding unsaved input', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+    });
+    await tester.pumpWidget(harness());
+    await waitUntil(
+      tester,
+      () => find.text('暂无世界书条目').evaluate().isNotEmpty,
+    );
+
+    await tester.tap(find.widgetWithText(FloatingActionButton, '新建条目'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('field_内容 *')),
+      '尚未保存的条目',
+    );
+    await tester.pump();
+
+    // 有输入时返回先确认;取消留在编辑页,确认放弃后才回列表。
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('放弃未保存的修改?'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.byType(WorldbookEntryEditScreen), findsOneWidget);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('放弃修改'));
+    await tester.pumpAndSettle();
+    expect(find.text('暂无世界书条目'), findsOneWidget);
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('entry editor reports write failures and keeps input', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+    });
+    await tester.pumpWidget(harness());
+    await waitUntil(
+      tester,
+      () => find.text('暂无世界书条目').evaluate().isNotEmpty,
+    );
+
+    await tester.tap(find.widgetWithText(FloatingActionButton, '新建条目'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('field_关键词(逗号分隔)')),
+      '龙',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('field_内容 *')),
+      '会失败的内容',
+    );
+    await tester.pump();
+    // 关库让保存写库失败:页面必须留在原地提示,而不是抛未捕获异步错误。
+    await tester.runAsync(() => db.db.close());
+
+    await tester.runAsync(() async {
+      await tester.tap(find.widgetWithText(TextButton, '保存'));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+
+    expect(find.textContaining('保存失败'), findsOneWidget);
+    expect(find.byType(WorldbookEntryEditScreen), findsOneWidget);
+    expect(find.text('会失败的内容'), findsOneWidget);
+  });
 }

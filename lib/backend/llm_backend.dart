@@ -26,8 +26,9 @@ class LlmRequest {
   final double temperature;
   final int? maxTokens;
 
-  /// 推理等级。openai 后端映射为 `reasoning_effort`(off 时不发送),
-  /// anthropic 后端映射为 thinking budget(off 时不启用)。默认关闭保持既有行为。
+  /// 推理等级。openai 后端映射为 `reasoning_effort`(off 时不发送);
+  /// anthropic 后端按模型代际映射为 thinking budget 或 adaptive +
+  /// `output_config.effort`(off 时不启用或按模型关闭)。默认关闭保持既有行为。
   final ReasoningLevel reasoningLevel;
 
   /// 请求 provider 对"稳定前缀"(system + 历史)做提示缓存。

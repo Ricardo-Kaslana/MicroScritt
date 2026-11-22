@@ -27,6 +27,8 @@ void main() {
     Map<String, String> vars = variables,
     Map<String, VariableAccess> acc = access,
     List<Message> hist = const [],
+    HistorySearch? searchHistory,
+    Future<Set<String>> Function()? pendingDeletions,
     double temperature = 1,
   }) => AuditProfile.build(
     backend: ScriptedLlmBackend([[const DoneEvent()]]),
@@ -34,7 +36,9 @@ void main() {
     variables: vars,
     access: acc,
     history: hist,
-    readHistory: ({int? beforeSeq, required int limit}) async => [],
+    readHistory: ({int? beforeSeq, int? afterSeq, required int limit}) async => [],
+    searchHistory: searchHistory ?? (query, {int limit = 5}) async => const [],
+    pendingDeletions: pendingDeletions,
     temperature: temperature,
   );
 
@@ -42,12 +46,14 @@ void main() {
       spec.registry.lookup(name)!.execute(args);
 
   group('tool surface', () {
-    test('registers read/set/remove/readHistory, never setImagePrompts', () {
+    test('registers read/set/remove/search/validate, never setImagePrompts', () {
       final b = build();
       expect(b.spec.registry.lookup('readVariables'), isNotNull);
       expect(b.spec.registry.lookup('setVariables'), isNotNull);
       expect(b.spec.registry.lookup('removeVariables'), isNotNull);
       expect(b.spec.registry.lookup('readHistory'), isNotNull);
+      expect(b.spec.registry.lookup('searchHistory'), isNotNull);
+      expect(b.spec.registry.lookup('validateStaged'), isNotNull);
       expect(b.spec.registry.lookup('setImagePrompts'), isNull);
       // finish 由内核 runner 追加,不在注册表(保留名拒收)。
       expect(b.spec.registry.lookup('finish'), isNull);
@@ -74,7 +80,9 @@ void main() {
         access: access,
         history: const [],
         features: const BackgroundFeatures(variables: true),
-        readHistory: ({int? beforeSeq, required int limit}) async => [],
+        imageTools: false,
+        readHistory: ({int? beforeSeq, int? afterSeq, required int limit}) async => [],
+        searchHistory: (query, {int limit = 5}) async => const [],
       );
       expect(
         m.spec.registry.lookup('setVariables')!.tool.description,
@@ -180,6 +188,24 @@ void main() {
       final b = build();
       await exec(b.spec, 'setVariables', {'variables': {'hp': '8'}});
       expect(b.staging.imagePrompts, isNull);
+    });
+
+    test('validateStaged surfaces near-duplicate keys for consolidation', () async {
+      final b = build(
+        vars: {
+          'current location': 'inn',
+          'current_location': 'inn',
+          'hp': '10',
+        },
+        acc: {
+          'current location': VariableAccess.full,
+          'current_location': VariableAccess.full,
+          'hp': VariableAccess.full,
+        },
+      );
+      final out = await exec(b.spec, 'validateStaged');
+      expect(out, contains('near-duplicate keys'));
+      expect(out, contains('"current location" / "current_location"'));
     });
   });
 

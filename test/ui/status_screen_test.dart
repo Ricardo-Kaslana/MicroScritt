@@ -612,7 +612,7 @@ void main() {
       findsOneWidget,
     );
     final statusCard = find
-        .ancestor(of: find.text('后台引擎'), matching: find.byType(Card))
+        .ancestor(of: find.text('后台引擎'), matching: find.byType(SurfaceCard))
         .first;
     expect(
       find.descendant(of: statusCard, matching: find.byType(Switch)),
@@ -649,15 +649,16 @@ void main() {
     expect(find.widgetWithText(SwitchListTile, '变量'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '生图'), findsOneWidget);
 
-    // 2 项维护功能 + 1 项变量删除前确认 + 2 项上下文锚定:除变量删除前确认外
-    // 默认全开(变量删除前确认默认关,删除直接执行并进回收站,可恢复)。
+    // 2 项维护功能 + 1 项变量删除前确认 + 2 项 Agentic 增强 + 2 项上下文锚定:
+    // 除变量删除前确认与两项 Agentic 增强外默认全开。
     final switches = tester.widgetList<SwitchListTile>(
       find.byType(SwitchListTile),
     );
-    expect(switches.length, 5);
-    // 严格模式只作用于变量删除:标题点明对象,细节收进「查看说明」弹层。
+    expect(switches.length, 7);
+    // 严格模式只作用于变量删除:标题点明对象,细节收进「查看说明」弹层;
+    // Agentic 增强小节也有自己的说明入口。
     expect(find.widgetWithText(SwitchListTile, '变量删除前确认'), findsOneWidget);
-    expect(find.byTooltip('查看说明'), findsOneWidget);
+    expect(find.byTooltip('查看说明'), findsNWidgets(2));
     expect(
       tester
           .widget<SwitchListTile>(
@@ -668,6 +669,29 @@ void main() {
     );
     expect(switches.where((s) => s.value).length, 4);
 
+    // Agentic 增强:默认关闭;默认模式是 legacy,两开关置灰并提示原因。
+    expect(find.text('Agentic 增强'), findsOneWidget);
+    final injectionSwitch = tester.widget<SwitchListTile>(
+      find.widgetWithText(SwitchListTile, '变量注入主写'),
+    );
+    final suggestionSwitch = tester.widget<SwitchListTile>(
+      find.widgetWithText(SwitchListTile, '下一步建议'),
+    );
+    expect(injectionSwitch.value, isFalse);
+    expect(suggestionSwitch.value, isFalse);
+    expect(injectionSwitch.onChanged, isNull);
+    expect(suggestionSwitch.onChanged, isNull);
+
+    // 依赖说明不再占副标题,统一收进「查看说明」弹层。
+    expect(injectionSwitch.subtitle, isNull);
+    expect(suggestionSwitch.subtitle, isNull);
+    await tester.tap(find.byTooltip('查看说明').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('需先开启变量维护'), findsOneWidget);
+    expect(find.textContaining('关闭或忽略则丢弃本批'), findsOneWidget);
+    await tester.tap(find.text('知道了'));
+    await tester.pumpAndSettle();
+
     // 上下文锚定小节:角色卡/记忆进入后台上下文开关,默认开。
     expect(find.text('上下文锚定'), findsOneWidget);
     expect(find.widgetWithText(SwitchListTile, '角色卡进入上下文'), findsOneWidget);
@@ -677,10 +701,10 @@ void main() {
     expect(find.text('专用模型'), findsOneWidget);
     expect(find.text('跟随主写引擎'), findsOneWidget);
 
-    // v48:推理强度下拉默认"关闭"(独立于主对话的推理等级设置);
+    // v48:推理强度下拉默认 Off(独立于主对话的推理等级设置);
     // 说明用一句白话点明作用范围与独立性。
     expect(find.text('推理强度'), findsOneWidget);
-    expect(find.text('关闭'), findsOneWidget);
+    expect(find.text('Off'), findsOneWidget);
     expect(find.textContaining('与主对话的推理等级互相独立'), findsOneWidget);
 
     await tester.runAsync(() => db.db.close());
@@ -752,7 +776,7 @@ void main() {
     expect(find.text('运行模式'), findsNothing);
     expect(find.textContaining('需端点与模型支持工具调用'), findsNothing);
     final statusCard = find
-        .ancestor(of: find.text('后台引擎'), matching: find.byType(Card))
+        .ancestor(of: find.text('后台引擎'), matching: find.byType(SurfaceCard))
         .first;
     expect(
       find.descendant(of: statusCard, matching: find.byType(Switch)),
@@ -1123,7 +1147,7 @@ void main() {
 
     // 即使摘要很长,状态卡顶部的图标、标题、合并按钮仍保持同一行(垂直居中)。
     final statusCard = find
-        .ancestor(of: find.text('后台引擎'), matching: find.byType(Card))
+        .ancestor(of: find.text('后台引擎'), matching: find.byType(SurfaceCard))
         .first;
     final titleY = tester.getCenter(find.text('后台引擎')).dy;
     final iconY = tester
@@ -1493,7 +1517,7 @@ void main() {
     // 开关行只保留点明对象的标题与说明入口,副标题与细节全部收进弹层。
     final confirmTile = find.widgetWithText(SwitchListTile, '变量删除前确认');
     expect(tester.widget<SwitchListTile>(confirmTile).subtitle, isNull);
-    await tester.tap(find.byTooltip('查看说明'));
+    await tester.tap(find.byTooltip('查看说明').first);
     await tester.pumpAndSettle();
     expect(find.textContaining('单轮至多 5 个'), findsOneWidget);
     expect(find.textContaining('可在回收站逐条恢复'), findsOneWidget);
@@ -1806,6 +1830,69 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('Agentic 增强开关依赖模式与变量维护并落库', (tester) async {
+    useTallSurface(tester);
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's');
+    });
+    await tester.pumpWidget(
+      harness(
+        settings: const AppSettings(backgroundMode: BackgroundMode.agentic),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 150)),
+    );
+    await tester.pump();
+
+    SwitchListTile tileOf(String title) => tester.widget<SwitchListTile>(
+      find.widgetWithText(SwitchListTile, title),
+    );
+
+    // Agentic 模式 + 变量维护默认开启:两个开关可切换。
+    expect(tileOf('变量注入主写').onChanged, isNotNull);
+    expect(tileOf('下一步建议').onChanged, isNotNull);
+
+    // 打开变量注入并落库。
+    await tester.runAsync(() async {
+      await tester.tap(find.widgetWithText(SwitchListTile, '变量注入主写'));
+      for (var i = 0; i < 60; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await tester.pump();
+        if ((await AppSettingsRepository(
+          db,
+        ).load()).backgroundVariableInjection) {
+          break;
+        }
+      }
+      await tester.pumpAndSettle();
+      expect(
+        (await AppSettingsRepository(db).load()).backgroundVariableInjection,
+        isTrue,
+      );
+    });
+
+    // 关掉变量维护:注入开关置灰,建议开关不受影响。
+    await tester.runAsync(() async {
+      await tester.tap(find.widgetWithText(SwitchListTile, '变量'));
+      for (var i = 0; i < 60; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await tester.pump();
+        if (!(await AppSettingsRepository(db).load()).features.variables) {
+          break;
+        }
+      }
+      await tester.pumpAndSettle();
+    });
+    expect(tileOf('变量注入主写').onChanged, isNull);
+    expect(tileOf('下一步建议').onChanged, isNotNull);
+
+    await tester.runAsync(() => db.db.close());
+  });
 }
 
 /// 固定后台失败状态的 ChatController 替身:只供状态面板读取 backgroundStatus

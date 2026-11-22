@@ -1,7 +1,8 @@
 /// 桌面状态工作台:变量表格与行内编辑。
 ///
-/// 变量只供后台引擎维护,不进主写上下文;本工作区的人工增删改沿用仓库
-/// 语义(删除进回收站、权限在仓库事务内复核),只失效变量相关 provider。
+/// 变量由后台引擎维护,默认不进主写上下文(Agentic 可把选中键注入为附件);
+/// 本工作区的人工增删改沿用仓库语义(删除进回收站、权限在仓库事务内复核),
+/// 只失效变量相关 provider。
 library;
 
 import 'package:flutter/material.dart';
@@ -11,8 +12,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/variable.dart';
 import '../../state/providers.dart';
 import '../common/app_search_field.dart';
+import '../common/async_section.dart';
 import '../common/confirm_dialog.dart';
+import '../common/section_header.dart';
 import '../common/empty_state.dart';
+import '../common/form_field.dart';
 import 'status_dialogs.dart';
 import 'status_widgets.dart';
 
@@ -177,6 +181,17 @@ class _StatusVariablesWorkspaceState
       orElse: () => false,
     );
     final rows = rowsAsync.value ?? const <Variable>[];
+    // 编辑目标被后台维护/其它页面删除或改名后,编辑行不再渲染,但 _isEditing
+    // 仍会锁住搜索/新增/清空。数据就绪后若目标已不存在,自动退出编辑态。
+    if (!_adding && rowsAsync.hasValue && _editingVariable != null) {
+      final editKey = _editingVariable!.key;
+      if (!rows.any((v) => v.key == editKey)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _adding || _editingVariable?.key != editKey) return;
+          _cancelEdit();
+        });
+      }
+    }
     final countLabel = rowsAsync.maybeWhen(
       data: (list) => '${list.length} 项',
       orElse: () => null,
@@ -305,16 +320,9 @@ class _VariablesTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
+    return SurfaceCard(
       key: const ValueKey('variable_table'),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: scheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: scheme.outlineVariant.withValues(alpha: 0.45),
-        ),
-      ),
+      padding: EdgeInsets.zero,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -411,22 +419,10 @@ class _VariablesTable extends StatelessWidget {
 
   Widget _tableBody(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return rowsAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('$e', style: TextStyle(color: scheme.error)),
-              const SizedBox(height: 8),
-              TextButton(onPressed: onRetry, child: const Text('重试')),
-            ],
-          ),
-        ),
-      ),
-      data: (_) {
+    return AsyncSection<List<Variable>>(
+      value: rowsAsync,
+      onRetry: onRetry,
+      builder: (context, _) {
         if (rows.isEmpty && !adding) {
           return EmptyState(
             compact: true,
@@ -726,7 +722,6 @@ class _VariablesTable extends StatelessWidget {
     int maxLines = 1,
     bool autofocus = false,
   }) {
-    final scheme = Theme.of(context).colorScheme;
     return TextField(
       key: key,
       controller: controller,
@@ -734,24 +729,14 @@ class _VariablesTable extends StatelessWidget {
       maxLines: maxLines,
       minLines: 1,
       style: const TextStyle(fontSize: 13),
-      decoration: InputDecoration(
+      decoration: appInputDecoration(
+        context,
         hintText: hint,
         isDense: true,
-        filled: true,
-        fillColor: scheme.surface,
+        fillColor: Theme.of(context).colorScheme.surface,
+        borderAlpha: 0.6,
+        radius: 10,
         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(
-            color: scheme.outlineVariant.withValues(alpha: 0.6),
-          ),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(
-            color: scheme.outlineVariant.withValues(alpha: 0.6),
-          ),
-        ),
       ),
     );
   }

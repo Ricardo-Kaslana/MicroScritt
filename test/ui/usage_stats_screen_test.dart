@@ -148,7 +148,10 @@ void main() {
     );
 
     // 桌面宽屏下趋势图高度随卡片放大(手机为 180)。
-    expect(tester.getSize(find.byType(UsageLineChart)).height, greaterThan(250));
+    expect(
+      tester.getSize(find.byType(UsageLineChart)).height,
+      greaterThan(250),
+    );
     expect(tester.takeException(), isNull, reason: '宽屏布局不应溢出');
   });
 
@@ -168,10 +171,8 @@ void main() {
       reason: '统计聚合未加载完成',
     );
 
-    expect(
-      find.text('暂无用量记录。完成一次对话后,这里会累计 Token、请求次数与缓存命中率。'),
-      findsOneWidget,
-    );
+    expect(find.text('暂无用量记录'), findsOneWidget);
+    expect(find.text('完成一次对话后,这里会累计 Token、请求次数与缓存命中率。'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('该范围内暂无模型用量'),
       300,

@@ -24,16 +24,25 @@ class CompiledRegexScript {
 List<RegexScript>? _lastInput;
 List<CompiledRegexScript>? _lastCompiled;
 
-/// 编译显示层脚本:只取启用项,按 position/id 应用序;非法正则丢弃。
+/// 常见灾难性回溯形态:被量词修饰的分组再叠加量词(如 `(a+)+`)。Dart
+/// RegExp 无超时/中断,同步替换长文本时会卡死 UI isolate;编译期直接拒绝。
+final _nestedQuantifier = RegExp(
+  r'\([^)]*(?:[+*]|\{\d+,?\d*\})[^)]*\)\s*(?:[+*]|\{\d+,?\d*\})',
+);
+
+bool _looksCatastrophic(String pattern) => _nestedQuantifier.hasMatch(pattern);
+
+/// 编译显示层脚本:只取启用项,按 position/id 应用序;非法或高风险正则丢弃。
 List<CompiledRegexScript> compileDisplayScripts(List<RegexScript> scripts) {
   if (identical(scripts, _lastInput)) return _lastCompiled!;
-  final sorted = [...scripts]..sort((a, b) {
+  final sorted = [...scripts]
+    ..sort((a, b) {
       final byPos = a.position.compareTo(b.position);
       return byPos != 0 ? byPos : (a.id ?? 0).compareTo(b.id ?? 0);
     });
   final compiled = <CompiledRegexScript>[];
   for (final s in sorted) {
-    if (!s.enabled) continue;
+    if (!s.enabled || _looksCatastrophic(s.findRegex)) continue;
     try {
       compiled.add(CompiledRegexScript(s, RegExp(s.findRegex)));
     } on FormatException {
@@ -51,13 +60,19 @@ List<CompiledRegexScript> compileDisplayScripts(List<RegexScript> scripts) {
 String applyDisplayScripts(String text, List<CompiledRegexScript> scripts) {
   var out = text;
   for (final s in scripts) {
-    out = out.replaceAllMapped(s.regex, (m) => _expandReplacement(s.source.replace, m));
+    out = out.replaceAllMapped(
+      s.regex,
+      (m) => _expandReplacement(s.source.replace, m),
+    );
   }
   return out;
 }
 
-/// 校验正则可编译;返回错误信息或 null(合法)。编辑页实时校验用。
+/// 校验正则可编译且不含常见灾难性回溯形态;返回错误信息或 null(合法)。
 String? validateRegexPattern(String pattern) {
+  if (_looksCatastrophic(pattern)) {
+    return '该正则含嵌套量词(如 (a+)+),可能卡死界面;请改写为等价但无歧义的表达式';
+  }
   try {
     RegExp(pattern);
     return null;

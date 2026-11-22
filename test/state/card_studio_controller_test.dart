@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/image_backend.dart';
@@ -25,6 +26,7 @@ import 'package:microscritt/state/card_studio_controller.dart';
 import 'package:microscritt/state/card_studio_draft_codec.dart';
 import 'package:microscritt/state/card_studio_state.dart';
 import 'package:microscritt/state/providers.dart';
+import '../support/image_fixtures.dart';
 import '../support/scripted_llm_backend.dart';
 import '../support/test_database.dart';
 
@@ -79,35 +81,42 @@ void main() {
 
   tearDown(() => db.db.close());
 
-  const fakeImageBase64 = 'QUJD';
+  TestWidgetsFlutterBinding.ensureInitialized();
+  const fakeImageBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA'
+      'hKmMIQAAAABJRU5ErkJggg==';
+  final fakeImageHash = sha256
+      .convert(base64Decode(fakeImageBase64))
+      .toString();
 
   ProviderContainer makeContainer({
     required LlmBackend backend,
     ImageBackend? imageBackend,
     CardStudioDraftFile? draftFile,
-  }) =>
-      ProviderContainer(
-        overrides: [
-          databaseProvider.overrideWithValue(db),
-          backendConfigProvider.overrideWith(
-            (ref) => const BackendConfig(
-              provider: BackendProvider.openai,
-              baseUrl: 'https://api.example.com/v1',
-              apiKey: 'sk-test',
-              model: 'test-model',
-              temperature: 0.8,
-            ),
-          ),
-          backendProvider.overrideWith((ref) => backend),
-          imageBackendProvider.overrideWith((ref) => imageBackend),
-          appSettingsProvider.overrideWith((ref) => const AppSettings()),
-          if (draftFile != null)
-            cardStudioDraftFileProvider.overrideWithValue(draftFile),
-        ],
-      );
+  }) => ProviderContainer(
+    overrides: [
+      databaseProvider.overrideWithValue(db),
+      backendConfigProvider.overrideWith(
+        (ref) => const BackendConfig(
+          provider: BackendProvider.openai,
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          model: 'test-model',
+          temperature: 0.8,
+        ),
+      ),
+      backendProvider.overrideWith((ref) => backend),
+      imageBackendProvider.overrideWith((ref) => imageBackend),
+      appSettingsProvider.overrideWith((ref) => const AppSettings()),
+      if (draftFile != null)
+        cardStudioDraftFileProvider.overrideWithValue(draftFile),
+    ],
+  );
 
   Future<CardStudioDraftFile> openDraftFile() async {
-    final dir = await Directory.systemTemp.createTemp('card-studio-controller-');
+    final dir = await Directory.systemTemp.createTemp(
+      'card-studio-controller-',
+    );
     final file = CardStudioDraftFile(dir.path);
     addTearDown(() async {
       // 控制器 dispose/apply 里的草稿写删可能是 unawaited 的排队任务;先读一次
@@ -127,14 +136,15 @@ void main() {
       ToolCall(id: 'c_$name', name: name, arguments: jsonEncode(args));
 
   List<LlmEvent> step(List<ToolCall> calls, {String text = ''}) => [
-        if (text.isNotEmpty) TextDelta(text),
-        ToolCallsEvent(calls),
-        const UsageEvent(TokenUsage(inputTokens: 10, outputTokens: 5)),
-        const DoneEvent(),
-      ];
+    if (text.isNotEmpty) TextDelta(text),
+    ToolCallsEvent(calls),
+    const UsageEvent(TokenUsage(inputTokens: 10, outputTokens: 5)),
+    const DoneEvent(),
+  ];
 
-  List<LlmEvent> finishStep([String summary = 'done']) =>
-      step([call('finish', {'summary': summary})]);
+  List<LlmEvent> finishStep([String summary = 'done']) => step([
+    call('finish', {'summary': summary}),
+  ]);
 
   Future<void> waitFor(bool Function() condition, {String? message}) async {
     final deadline = DateTime.now().add(const Duration(seconds: 10));
@@ -157,78 +167,107 @@ void main() {
     }
   }
 
-  test('new card: agent stages card/worldbook/avatar, apply writes once', () async {
-    final image = _CountingImageBackend(fakeImageBase64);
-    final backend = ScriptedLlmBackend([
-      step([
-        call('setCardFields', {
-          'fields': {
-            'name': '艾莉',
-            'description': '机械师',
-            'firstMessage': '你好，旅行者。',
-          },
-        }),
-        call('upsertWorldbookEntries', {
-          'entries': [
-            {'name': '蒸汽城', 'keys': ['蒸汽'], 'content': '城市设定'},
-          ],
-        }),
-        call('setAvatarPrompt', {'prompt': '1girl, red hair'}),
-      ], text: '我先写人设'),
-      finishStep('完成'),
-    ]);
-    final container = makeContainer(backend: backend, imageBackend: image);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
+  test(
+    'new card: agent stages card/worldbook/avatar, apply writes once',
+    () async {
+      final image = _CountingImageBackend(fakeImageBase64);
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {
+              'name': '艾莉',
+              'description': '机械师',
+              'firstMessage': '你好，旅行者。',
+            },
+          }),
+          call('upsertWorldbookEntries', {
+            'entries': [
+              {
+                'name': '蒸汽城',
+                'keys': ['蒸汽'],
+                'content': '城市设定',
+              },
+            ],
+          }),
+          call('setAvatarPrompt', {'prompt': '1girl, red hair'}),
+        ], text: '我先写人设'),
+        finishStep('完成'),
+      ]);
+      final container = makeContainer(backend: backend, imageBackend: image);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
 
-    await controller.start(null);
-    expect(container.read(cardStudioControllerProvider).phase, CardStudioPhase.idle);
-    await controller.run('写一个机械师');
+      await controller.start(null);
+      expect(
+        container.read(cardStudioControllerProvider).phase,
+        CardStudioPhase.idle,
+      );
+      await controller.run('写一个机械师');
 
-    final state = container.read(cardStudioControllerProvider);
-    expect(state.phase, CardStudioPhase.review);
-    expect(state.draftCard!.name, '艾莉');
-    expect(state.draftEntries!.single.content, '城市设定');
-    expect(state.diff!.fields.any((f) => f.key == 'name'), isTrue);
-    expect(state.avatarStatus, CardStudioAvatarStatus.ready);
-    expect(state.draftCard!.avatarBase64, fakeImageBase64);
-    expect(image.calls, 1);
-    expect(
-      state.entries.any((e) =>
-          e.kind == CardStudioEntryKind.agent && e.text == '我先写人设'),
-      isTrue,
-    );
-    expect(state.entries.any((e) => e.kind == CardStudioEntryKind.toolStep), isTrue);
-    expect(state.canApply, isTrue);
+      final state = container.read(cardStudioControllerProvider);
+      expect(state.phase, CardStudioPhase.review);
+      expect(state.draftCard!.name, '艾莉');
+      expect(state.draftEntries!.single.content, '城市设定');
+      expect(state.diff!.fields.any((f) => f.key == 'name'), isTrue);
+      expect(state.avatarStatus, CardStudioAvatarStatus.ready);
+      expect(state.draftCard!.avatarHash, fakeImageHash);
+      expect(image.calls, 1);
+      expect(
+        state.entries.any(
+          (e) => e.kind == CardStudioEntryKind.agent && e.text == '我先写人设',
+        ),
+        isTrue,
+      );
+      expect(
+        state.entries.any((e) => e.kind == CardStudioEntryKind.toolStep),
+        isTrue,
+      );
+      expect(state.canApply, isTrue);
 
-    expect(await controller.apply(), isTrue);
-    final after = container.read(cardStudioControllerProvider);
-    expect(after.phase, CardStudioPhase.done);
-    final id = after.appliedCharacterId!;
+      expect(await controller.apply(), isTrue);
+      final after = container.read(cardStudioControllerProvider);
+      expect(after.phase, CardStudioPhase.done);
+      final id = after.appliedCharacterId!;
 
-    final repo = CharacterRepository(db);
-    final saved = await repo.get(id);
-    expect(saved!.name, '艾莉');
-    expect(saved.description, '机械师');
-    expect(saved.firstMessage, '你好，旅行者。');
-    expect(saved.avatarBase64, fakeImageBase64);
-    final entries = await WorldbookRepository(db).byCharacter(id);
-    expect(entries.single.content, '城市设定');
-  });
+      final repo = CharacterRepository(db);
+      final saved = await repo.get(id);
+      expect(saved!.name, '艾莉');
+      expect(saved.description, '机械师');
+      expect(saved.firstMessage, '你好，旅行者。');
+      expect(saved.avatarHash, fakeImageHash);
+      expect((await db.db.query('image_assets')).single['ref_count'], 1);
+      final entries = await WorldbookRepository(db).byCharacter(id);
+      expect(entries.single.content, '城市设定');
+    },
+  );
 
   test('step usage anchors the context ring and cache hit rate', () async {
     final backend = ScriptedLlmBackend([
       [
-        ToolCallsEvent([call('setCardFields', {'fields': {'name': '用量角色'}})]),
+        ToolCallsEvent([
+          call('setCardFields', {
+            'fields': {'name': '用量角色'},
+          }),
+        ]),
         const UsageEvent(
-          TokenUsage(inputTokens: 1200, outputTokens: 30, cachedInputTokens: 900),
+          TokenUsage(
+            inputTokens: 1200,
+            outputTokens: 30,
+            cachedInputTokens: 900,
+          ),
         ),
         const DoneEvent(),
       ],
       [
-        ToolCallsEvent([call('finish', {'summary': 'ok'})]),
+        ToolCallsEvent([
+          call('finish', {'summary': 'ok'}),
+        ]),
         const UsageEvent(
-          TokenUsage(inputTokens: 1800, outputTokens: 20, cachedInputTokens: 1500),
+          TokenUsage(
+            inputTokens: 1800,
+            outputTokens: 20,
+            cachedInputTokens: 1500,
+          ),
         ),
         const DoneEvent(),
       ],
@@ -248,56 +287,70 @@ void main() {
     expect(state.contextEstimateTokens, greaterThan(0));
   });
 
-  test('existing card: diff is against baseline and raw survives apply', () async {
-    final repo = CharacterRepository(db);
-    final charId = await repo.insert(const CharacterCard(
-      name: '旧名',
-      description: '旧描述',
-      raw: {
-        'spec': 'chara_card_v2',
-        'data': {'name': '旧名', 'character_book': {'entries': []}},
-      },
-    ));
-    await WorldbookRepository(db).replaceForCharacter(charId, const [
-      WorldbookEntry(
-        characterId: 0,
-        name: '条目',
-        keys: ['k'],
-        content: '旧内容',
-        position: 0,
-      ),
-    ]);
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': '新描述'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
+  test(
+    'existing card: diff is against baseline and raw survives apply',
+    () async {
+      final repo = CharacterRepository(db);
+      final charId = await repo.insert(
+        const CharacterCard(
+          name: '旧名',
+          description: '旧描述',
+          raw: {
+            'spec': 'chara_card_v2',
+            'data': {
+              'name': '旧名',
+              'character_book': {'entries': []},
+            },
+          },
+        ),
+      );
+      await WorldbookRepository(db).replaceForCharacter(charId, const [
+        WorldbookEntry(
+          characterId: 0,
+          name: '条目',
+          keys: ['k'],
+          content: '旧内容',
+          position: 0,
+        ),
+      ]);
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'description': '新描述'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
 
-    await controller.start(charId);
-    await controller.run('优化描述');
+      await controller.start(charId);
+      await controller.run('优化描述');
 
-    final state = container.read(cardStudioControllerProvider);
-    expect(state.diff!.fields.single.key, 'description');
-    expect(state.diff!.entries, isEmpty);
-    // 新一轮提示词里带既有卡内容。
-    expect(backend.requests.first.variableSystemPart, contains('旧名'));
+      final state = container.read(cardStudioControllerProvider);
+      expect(state.diff!.fields.single.key, 'description');
+      expect(state.diff!.entries, isEmpty);
+      // 新一轮提示词里带既有卡内容。
+      expect(backend.requests.first.variableSystemPart, contains('旧名'));
 
-    expect(await controller.apply(), isTrue);
-    final saved = await repo.get(charId);
-    expect(saved!.name, '旧名');
-    expect(saved.description, '新描述');
-    expect(saved.raw['spec'], 'chara_card_v2');
-    expect(saved.raw['data']['character_book'], isNotNull);
-    final entries = await WorldbookRepository(db).byCharacter(charId);
-    expect(entries.single.content, '旧内容', reason: '未改动条目原样保留');
-  });
+      expect(await controller.apply(), isTrue);
+      final saved = await repo.get(charId);
+      expect(saved!.name, '旧名');
+      expect(saved.description, '新描述');
+      expect(saved.raw['spec'], 'chara_card_v2');
+      expect(saved.raw['data']['character_book'], isNotNull);
+      final entries = await WorldbookRepository(db).byCharacter(charId);
+      expect(entries.single.content, '旧内容', reason: '未改动条目原样保留');
+    },
+  );
 
   test('avatar failure degrades to review and does not block apply', () async {
     final backend = ScriptedLlmBackend([
       step([
-        call('setCardFields', {'fields': {'name': '无头图'}}),
+        call('setCardFields', {
+          'fields': {'name': '无头图'},
+        }),
         call('setAvatarPrompt', {'prompt': '1girl'}),
       ]),
       finishStep(),
@@ -318,7 +371,7 @@ void main() {
     expect(state.canApply, isTrue);
     expect(await controller.apply(), isTrue);
     final id = container.read(cardStudioControllerProvider).appliedCharacterId!;
-    expect((await CharacterRepository(db).get(id))!.avatarBase64, isNull);
+    expect((await CharacterRepository(db).get(id))!.avatarHash, isNull);
   });
 
   test('missing LLM backend fails fast without calling the model', () async {
@@ -345,7 +398,9 @@ void main() {
   test('cancel returns to idle without a proposal', () async {
     final gate = Completer<void>();
     final backend = ScriptedLlmBackend(
-      [[const TextDelta('partial'), const DoneEvent()]],
+      [
+        [const TextDelta('partial'), const DoneEvent()],
+      ],
       gates: {0: gate},
     );
     final container = makeContainer(backend: backend);
@@ -365,37 +420,58 @@ void main() {
     expect(state.entries.last.text, contains('已取消'));
   });
 
-  test('continueAdjust seeds the next run with accepted changes only', () async {
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
-      finishStep(),
-      step([call('setCardFields', {'fields': {'name': 'B'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
+  test(
+    'continueAdjust seeds the next run with accepted changes only',
+    () async {
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'A'},
+          }),
+        ]),
+        finishStep(),
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'B'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
 
-    await controller.run('第一轮');
-    expect(container.read(cardStudioControllerProvider).draftCard!.name, 'A');
+      await controller.run('第一轮');
+      expect(container.read(cardStudioControllerProvider).draftCard!.name, 'A');
 
-    await controller.continueAdjust('改成 B');
-    final state = container.read(cardStudioControllerProvider);
-    expect(state.draftCard!.name, 'B');
-    // 第二轮请求的 current_draft 是上一轮已接受的种子。
-    expect(backend.requests[2].variableSystemPart, contains('A'));
+      await controller.continueAdjust('改成 B');
+      final state = container.read(cardStudioControllerProvider);
+      expect(state.draftCard!.name, 'B');
+      // 第二轮请求的 current_draft 是上一轮已接受的种子。
+      expect(backend.requests[2].variableSystemPart, contains('A'));
 
-    expect(await controller.apply(), isTrue);
-    final id = container.read(cardStudioControllerProvider).appliedCharacterId!;
-    expect((await CharacterRepository(db).get(id))!.name, 'B');
-  });
+      expect(await controller.apply(), isTrue);
+      final id = container
+          .read(cardStudioControllerProvider)
+          .appliedCharacterId!;
+      expect((await CharacterRepository(db).get(id))!.name, 'B');
+    },
+  );
 
   test('rejected decisions are dropped from the refinement seed', () async {
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'name': 'A'},
+        }),
+      ]),
       finishStep(),
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'description': 'D'},
+        }),
+      ]),
       finishStep(),
     ]);
     final container = makeContainer(backend: backend);
@@ -413,81 +489,103 @@ void main() {
     );
   });
 
-  test('unchanged avatar prompt reuses the generated image (no double billing)', () async {
-    final image = _CountingImageBackend(fakeImageBase64);
-    final backend = ScriptedLlmBackend([
-      step([
-        call('setCardFields', {'fields': {'name': 'A'}}),
-        call('setAvatarPrompt', {'prompt': '1girl, red hair'}),
-      ]),
-      finishStep(),
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend, imageBackend: image);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('第一轮');
-    expect(image.calls, 1);
+  test(
+    'unchanged avatar prompt reuses the generated image (no double billing)',
+    () async {
+      final image = _CountingImageBackend(fakeImageBase64);
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'A'},
+          }),
+          call('setAvatarPrompt', {'prompt': '1girl, red hair'}),
+        ]),
+        finishStep(),
+        step([
+          call('setCardFields', {
+            'fields': {'description': 'D'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend, imageBackend: image);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('第一轮');
+      expect(image.calls, 1);
 
-    await controller.continueAdjust('继续');
-    expect(image.calls, 1);
-    expect(
-      container.read(cardStudioControllerProvider).avatarStatus,
-      CardStudioAvatarStatus.ready,
-    );
-  });
+      await controller.continueAdjust('继续');
+      expect(image.calls, 1);
+      expect(
+        container.read(cardStudioControllerProvider).avatarStatus,
+        CardStudioAvatarStatus.ready,
+      );
+    },
+  );
 
-  test('apply rejects invalid edited entries; conflict requires force', () async {
-    final repo = CharacterRepository(db);
-    final charId = await repo.insert(const CharacterCard(name: '原名'));
-    final backend = ScriptedLlmBackend([
-      step([
-        call('setCardFields', {'fields': {'description': '新描述'}}),
-        call('upsertWorldbookEntries', {
-          'entries': [
-            {'name': 'W', 'keys': ['w'], 'content': '内容'},
-          ],
-        }),
-      ]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(charId);
-    await controller.run('改');
-    final state = container.read(cardStudioControllerProvider);
-    final entryDiff = state.diff!.entries.first;
+  test(
+    'apply rejects invalid edited entries; conflict requires force',
+    () async {
+      final repo = CharacterRepository(db);
+      final charId = await repo.insert(const CharacterCard(name: '原名'));
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'description': '新描述'},
+          }),
+          call('upsertWorldbookEntries', {
+            'entries': [
+              {
+                'name': 'W',
+                'keys': ['w'],
+                'content': '内容',
+              },
+            ],
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(charId);
+      await controller.run('改');
+      final state = container.read(cardStudioControllerProvider);
+      final entryDiff = state.diff!.entries.first;
 
-    controller.editEntry(
-      entryDiff.reviewKey,
-      entryDiff.newEntry!.copyWith(content: ''),
-    );
-    expect(await controller.apply(), isFalse);
-    expect(
-      container.read(cardStudioControllerProvider).applyErrors.join(),
-      contains('内容不能为空'),
-    );
+      controller.editEntry(
+        entryDiff.reviewKey,
+        entryDiff.newEntry!.copyWith(content: ''),
+      );
+      expect(await controller.apply(), isFalse);
+      expect(
+        container.read(cardStudioControllerProvider).applyErrors.join(),
+        contains('内容不能为空'),
+      );
 
-    // 恢复后,模拟其他页面改了角色名 → 冲突,需 force 覆盖。
-    controller.editEntry(entryDiff.reviewKey, entryDiff.newEntry!);
-    await repo.update(charId, const CharacterCard(name: '被改名'));
-    expect(await controller.apply(), isFalse);
-    expect(
-      container.read(cardStudioControllerProvider).conflictWarning,
-      isNotNull,
-    );
-    expect(await controller.apply(force: true), isTrue);
-    final saved = await repo.get(charId);
-    expect(saved!.name, '原名', reason: '强制覆盖使用制卡基线的名字');
-    expect(saved.description, '新描述');
-  });
+      // 恢复后,模拟其他页面改了角色名 → 冲突,需 force 覆盖。
+      controller.editEntry(entryDiff.reviewKey, entryDiff.newEntry!);
+      await repo.update(charId, const CharacterCard(name: '被改名'));
+      expect(await controller.apply(), isFalse);
+      expect(
+        container.read(cardStudioControllerProvider).conflictWarning,
+        isNotNull,
+      );
+      expect(await controller.apply(force: true), isTrue);
+      final saved = await repo.get(charId);
+      expect(saved!.name, '原名', reason: '强制覆盖使用制卡基线的名字');
+      expect(saved.description, '新描述');
+    },
+  );
 
   test('records per-step usage as card kind without a session', () async {
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'name': 'A'},
+        }),
+      ]),
       finishStep(),
     ]);
     final container = makeContainer(backend: backend);
@@ -524,7 +622,9 @@ void main() {
   test('rejecting every change blocks apply until one is accepted', () async {
     final backend = ScriptedLlmBackend([
       step([
-        call('setCardFields', {'fields': {'name': 'A', 'description': 'D'}}),
+        call('setCardFields', {
+          'fields': {'name': 'A', 'description': 'D'},
+        }),
       ]),
       finishStep(),
     ]);
@@ -550,88 +650,115 @@ void main() {
     expect(state.canApply, isTrue);
   });
 
-  test('editing a field back to baseline drops it from the accepted count',
-      () async {
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('brief');
+  test(
+    'editing a field back to baseline drops it from the accepted count',
+    () async {
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'A'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('brief');
 
-    final field = container.read(cardStudioControllerProvider).diff!.fields.single;
-    controller.editField(field.key, field.oldText);
-    final state = container.read(cardStudioControllerProvider);
-    expect(state.acceptedChangeCount, 0);
-    expect(state.canApply, isFalse);
-  });
+      final field = container
+          .read(cardStudioControllerProvider)
+          .diff!
+          .fields
+          .single;
+      controller.editField(field.key, field.oldText);
+      final state = container.read(cardStudioControllerProvider);
+      expect(state.acceptedChangeCount, 0);
+      expect(state.canApply, isFalse);
+    },
+  );
 
-  test('continueAfterApply keeps the applied card as the next baseline',
-      () async {
-    final backend = ScriptedLlmBackend([
-      step([
-        call('setCardFields', {'fields': {'name': 'A', 'description': 'D'}}),
-      ]),
-      finishStep(),
-      step([call('setCardFields', {'fields': {'description': 'D2'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('first');
-    expect(await controller.apply(), isTrue);
+  test(
+    'continueAfterApply keeps the applied card as the next baseline',
+    () async {
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'A', 'description': 'D'},
+          }),
+        ]),
+        finishStep(),
+        step([
+          call('setCardFields', {
+            'fields': {'description': 'D2'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('first');
+      expect(await controller.apply(), isTrue);
 
-    controller.continueAfterApply();
-    var state = container.read(cardStudioControllerProvider);
-    expect(state.phase, CardStudioPhase.idle);
-    expect(state.draftCard, isNull);
-    expect(state.baseCard.name, 'A');
-    expect(state.baseCard.description, 'D');
-    expect(state.entries, isNotEmpty);
+      controller.continueAfterApply();
+      var state = container.read(cardStudioControllerProvider);
+      expect(state.phase, CardStudioPhase.idle);
+      expect(state.draftCard, isNull);
+      expect(state.baseCard.name, 'A');
+      expect(state.baseCard.description, 'D');
+      expect(state.entries, isNotEmpty);
 
-    await controller.run('second');
-    state = container.read(cardStudioControllerProvider);
-    final field = state.diff!.fields.single;
-    expect(field.key, 'description');
-    expect(field.oldText, 'D');
-    expect(await controller.apply(), isTrue);
+      await controller.run('second');
+      state = container.read(cardStudioControllerProvider);
+      final field = state.diff!.fields.single;
+      expect(field.key, 'description');
+      expect(field.oldText, 'D');
+      expect(await controller.apply(), isTrue);
 
-    final doneState = container.read(cardStudioControllerProvider);
-    final saved =
-        await CharacterRepository(db).get(doneState.appliedCharacterId!);
-    expect(saved!.name, 'A');
-    expect(saved.description, 'D2');
-  });
+      final doneState = container.read(cardStudioControllerProvider);
+      final saved = await CharacterRepository(
+        db,
+      ).get(doneState.appliedCharacterId!);
+      expect(saved!.name, 'A');
+      expect(saved.description, 'D2');
+    },
+  );
 
-  test('applied avatar prompt is reused after continue (no double billing)',
-      () async {
-    final image = _CountingImageBackend(fakeImageBase64);
-    final backend = ScriptedLlmBackend([
-      step([
-        call('setCardFields', {'fields': {'name': 'A'}}),
-        call('setAvatarPrompt', {'prompt': '1girl, red hair'}),
-      ]),
-      finishStep(),
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend, imageBackend: image);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('first');
-    expect(image.calls, 1);
-    expect(await controller.apply(), isTrue);
+  test(
+    'applied avatar prompt is reused after continue (no double billing)',
+    () async {
+      final image = _CountingImageBackend(fakeImageBase64);
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'A'},
+          }),
+          call('setAvatarPrompt', {'prompt': '1girl, red hair'}),
+        ]),
+        finishStep(),
+        step([
+          call('setCardFields', {
+            'fields': {'description': 'D'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend, imageBackend: image);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('first');
+      expect(image.calls, 1);
+      expect(await controller.apply(), isTrue);
 
-    controller.continueAfterApply();
-    await controller.run('second');
-    expect(image.calls, 1);
-  });
+      controller.continueAfterApply();
+      await controller.run('second');
+      expect(image.calls, 1);
+    },
+  );
 
   test('card conflict covers non-description fields', () async {
     final repo = CharacterRepository(db);
@@ -639,7 +766,11 @@ void main() {
       const CharacterCard(name: 'A', personality: 'P'),
     );
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'description': 'D'},
+        }),
+      ]),
       finishStep(),
     ]);
     final container = makeContainer(backend: backend);
@@ -670,7 +801,11 @@ void main() {
     );
     final stored = await wbRepo.byCharacter(charId);
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'description': 'D'},
+        }),
+      ]),
       finishStep(),
     ]);
     final container = makeContainer(backend: backend);
@@ -692,142 +827,192 @@ void main() {
     expect(saved.single.content, 'old');
   });
 
-  test('draft saves on detach, restores in a new controller, apply clears it',
-      () async {
-    final draftFile = await openDraftFile();
-    final backend = ScriptedLlmBackend([
-      step([
-        call('setCardFields', {
-          'fields': {'name': '草稿名', 'description': '草稿描述'},
-        }),
-      ]),
-      finishStep(),
-    ]);
-    final c1 = makeContainer(backend: backend, draftFile: draftFile);
-    final controller1 = c1.read(cardStudioControllerProvider.notifier);
-    await controller1.start(null);
-    await controller1.run('写一个草稿');
-    final field = c1.read(cardStudioControllerProvider).diff!.fields.first;
-    controller1.editField(field.key, '草稿编辑');
-    controller1.detach();
-    c1.dispose();
+  test(
+    'draft saves on detach, restores in a new controller, apply clears it',
+    () async {
+      final draftFile = await openDraftFile();
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': '草稿名', 'description': '草稿描述'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final c1 = makeContainer(backend: backend, draftFile: draftFile);
+      final controller1 = c1.read(cardStudioControllerProvider.notifier);
+      await controller1.start(null);
+      await controller1.run('写一个草稿');
+      final field = c1.read(cardStudioControllerProvider).diff!.fields.first;
+      controller1.editField(field.key, '草稿编辑');
+      controller1.detach();
+      c1.dispose();
 
-    CardStudioDraftSnapshot? saved;
-    for (var i = 0; i < 100 && saved == null; i++) {
-      final payload = await draftFile.read(null);
-      if (payload != null) saved = decodeCardStudioDraft(payload);
-      if (saved == null) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
+      CardStudioDraftSnapshot? saved;
+      for (var i = 0; i < 100 && saved == null; i++) {
+        final payload = await draftFile.read(null);
+        if (payload != null) saved = decodeCardStudioDraft(payload);
+        if (saved == null) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
       }
-    }
-    expect(saved, isNotNull);
-    expect(saved!.decisions.field(field.key).editedText, '草稿编辑');
+      expect(saved, isNotNull);
+      expect(saved!.decisions.field(field.key).editedText, '草稿编辑');
 
-    final c2 = makeContainer(
-      backend: ScriptedLlmBackend([[const DoneEvent()]]),
-      draftFile: draftFile,
-    );
-    addTearDown(c2.dispose);
-    final controller2 = c2.read(cardStudioControllerProvider.notifier);
-    await controller2.start(null);
-    final restored = c2.read(cardStudioControllerProvider);
-    expect(restored.phase, CardStudioPhase.review);
-    expect(restored.draftCard?.name, '草稿名');
-    expect(restored.draftCard?.description, '草稿描述');
-    expect(restored.decisions.field(field.key).editedText, '草稿编辑');
-    expect(
-      restored.entries.any(
-        (e) =>
-            e.kind == CardStudioEntryKind.notice && e.text.contains('已恢复'),
-      ),
-      isTrue,
-    );
+      final c2 = makeContainer(
+        backend: ScriptedLlmBackend([
+          [const DoneEvent()],
+        ]),
+        draftFile: draftFile,
+      );
+      addTearDown(c2.dispose);
+      final controller2 = c2.read(cardStudioControllerProvider.notifier);
+      await controller2.start(null);
+      final restored = c2.read(cardStudioControllerProvider);
+      expect(restored.phase, CardStudioPhase.review);
+      expect(restored.draftCard?.name, '草稿名');
+      expect(restored.draftCard?.description, '草稿描述');
+      expect(restored.decisions.field(field.key).editedText, '草稿编辑');
+      expect(
+        restored.entries.any(
+          (e) => e.kind == CardStudioEntryKind.notice && e.text.contains('已恢复'),
+        ),
+        isTrue,
+      );
 
-    expect(await controller2.apply(), isTrue);
-    expect(await draftFile.read(null), isNull);
-  });
+      expect(await controller2.apply(), isTrue);
+      expect(await draftFile.read(null), isNull);
+    },
+  );
 
-  test('multi-round new entries get distinct temp ids and both apply',
-      () async {
-    final backend = ScriptedLlmBackend([
-      step([
-        call('setCardFields', {'fields': {'name': '多轮卡'}}),
-        call('upsertWorldbookEntries', {
-          'entries': [
-            {'name': 'A', 'keys': ['a'], 'content': 'A'},
-          ],
-        }),
-      ]),
-      finishStep(),
-      step([
-        call('upsertWorldbookEntries', {
-          'entries': [
-            {'name': 'B', 'keys': ['b'], 'content': 'B'},
-          ],
-        }),
-      ]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('第一轮');
-    await controller.continueAdjust('第二轮');
+  test(
+    'multi-round new entries get distinct temp ids and both apply',
+    () async {
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': '多轮卡'},
+          }),
+          call('upsertWorldbookEntries', {
+            'entries': [
+              {
+                'name': 'A',
+                'keys': ['a'],
+                'content': 'A',
+              },
+            ],
+          }),
+        ]),
+        finishStep(),
+        step([
+          call('upsertWorldbookEntries', {
+            'entries': [
+              {
+                'name': 'B',
+                'keys': ['b'],
+                'content': 'B',
+              },
+            ],
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('第一轮');
+      await controller.continueAdjust('第二轮');
 
-    final diff = container.read(cardStudioControllerProvider).diff!;
-    expect(diff.entries.map((e) => e.reviewKey), containsAll(['new:-1', 'new:-2']));
-    expect(diff.entries, hasLength(2));
-    expect(await controller.apply(), isTrue);
+      final diff = container.read(cardStudioControllerProvider).diff!;
+      expect(
+        diff.entries.map((e) => e.reviewKey),
+        containsAll(['new:-1', 'new:-2']),
+      );
+      expect(diff.entries, hasLength(2));
+      expect(await controller.apply(), isTrue);
 
-    final state = container.read(cardStudioControllerProvider);
-    final entries = await WorldbookRepository(db)
-        .byCharacter(state.appliedCharacterId!);
-    expect(entries.map((e) => e.name), containsAll(['A', 'B']));
-  });
+      final state = container.read(cardStudioControllerProvider);
+      final entries = await WorldbookRepository(
+        db,
+      ).byCharacter(state.appliedCharacterId!);
+      expect(entries.map((e) => e.name), containsAll(['A', 'B']));
+    },
+  );
 
-  test('discard clears the draft and a late debounce cannot resurrect it',
-      () async {
-    final draftFile = await openDraftFile();
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': '丢弃卡'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend, draftFile: draftFile);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('brief');
+  test(
+    'discard clears the draft and a late debounce cannot resurrect it',
+    () async {
+      final draftFile = await openDraftFile();
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': '丢弃卡'},
+          }),
+          call('setAvatarPrompt', {'prompt': '1girl'}),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(
+        backend: backend,
+        imageBackend: _CountingImageBackend(fakeImageBase64),
+        draftFile: draftFile,
+      );
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('brief');
 
-    await Future<void>.delayed(const Duration(milliseconds: 500));
-    expect(await draftFile.read(null), isNotNull);
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      expect(await draftFile.read(null), isNotNull);
+      expect(await testImageRefCount(db, fakeImageHash), 1);
 
-    final field = container.read(cardStudioControllerProvider).diff!.fields.first;
-    controller.editField(field.key, '迟到编辑');
-    controller.discardDraft();
-    await Future<void>.delayed(const Duration(milliseconds: 600));
+      final field = container
+          .read(cardStudioControllerProvider)
+          .diff!
+          .fields
+          .first;
+      controller.editField(field.key, '迟到编辑');
+      controller.discardDraft();
+      await Future<void>.delayed(const Duration(milliseconds: 600));
 
-    expect(await draftFile.read(null), isNull);
-    final state = container.read(cardStudioControllerProvider);
-    expect(state.phase, CardStudioPhase.idle);
-    expect(state.draftCard, isNull);
-    expect(state.entries.single.text, contains('已丢弃'));
-  });
+      expect(await draftFile.read(null), isNull);
+      expect(await testImageRefCount(db, fakeImageHash), 0);
+      final state = container.read(cardStudioControllerProvider);
+      expect(state.phase, CardStudioPhase.idle);
+      expect(state.draftCard, isNull);
+      expect(state.entries.single.text, contains('已丢弃'));
+    },
+  );
 
   test('context usage anchors survive draft detach and restore', () async {
     final draftFile = await openDraftFile();
     final backend = ScriptedLlmBackend([
       [
-        ToolCallsEvent([call('setCardFields', {'fields': {'name': '用量卡'}})]),
+        ToolCallsEvent([
+          call('setCardFields', {
+            'fields': {'name': '用量卡'},
+          }),
+        ]),
         const UsageEvent(
-          TokenUsage(inputTokens: 1200, outputTokens: 20, cachedInputTokens: 900),
+          TokenUsage(
+            inputTokens: 1200,
+            outputTokens: 20,
+            cachedInputTokens: 900,
+          ),
         ),
         const DoneEvent(),
       ],
       [
-        ToolCallsEvent([call('finish', {'summary': '完成'})]),
+        ToolCallsEvent([
+          call('finish', {'summary': '完成'}),
+        ]),
         const UsageEvent(
-          TokenUsage(inputTokens: 1800, outputTokens: 10, cachedInputTokens: 1500),
+          TokenUsage(
+            inputTokens: 1800,
+            outputTokens: 10,
+            cachedInputTokens: 1500,
+          ),
         ),
         const DoneEvent(),
       ],
@@ -858,7 +1043,9 @@ void main() {
     expect(saved.contextEstimateTokens, before.contextEstimateTokens);
 
     final c2 = makeContainer(
-      backend: ScriptedLlmBackend([[const DoneEvent()]]),
+      backend: ScriptedLlmBackend([
+        [const DoneEvent()],
+      ]),
       draftFile: draftFile,
     );
     addTearDown(c2.dispose);
@@ -874,11 +1061,17 @@ void main() {
     final image = _CountingImageBackend(fakeImageBase64);
     final backend = ScriptedLlmBackend([
       step([
-        call('setCardFields', {'fields': {'name': '头像卡'}}),
+        call('setCardFields', {
+          'fields': {'name': '头像卡'},
+        }),
         call('setAvatarPrompt', {'prompt': '1girl'}),
       ]),
       finishStep(),
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'description': 'D'},
+        }),
+      ]),
       finishStep(),
     ]);
     final c1 = makeContainer(
@@ -902,8 +1095,8 @@ void main() {
     final controller2 = c2.read(cardStudioControllerProvider.notifier);
     await controller2.start(null);
     expect(
-      c2.read(cardStudioControllerProvider).draftCard?.avatarBase64,
-      fakeImageBase64,
+      c2.read(cardStudioControllerProvider).draftCard?.avatarHash,
+      fakeImageHash,
     );
 
     await controller2.run('第二轮');
@@ -917,7 +1110,11 @@ void main() {
     );
     final draftFile = await openDraftFile();
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': '新描述'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'description': '新描述'},
+        }),
+      ]),
       finishStep(),
     ]);
     final c1 = makeContainer(backend: backend, draftFile: draftFile);
@@ -933,16 +1130,19 @@ void main() {
     );
 
     final c2 = makeContainer(
-      backend: ScriptedLlmBackend([[const DoneEvent()]]),
+      backend: ScriptedLlmBackend([
+        [const DoneEvent()],
+      ]),
       draftFile: draftFile,
     );
     addTearDown(c2.dispose);
     final controller2 = c2.read(cardStudioControllerProvider.notifier);
     await controller2.start(charId);
     expect(
-      c2.read(cardStudioControllerProvider).entries.any(
-            (e) => e.text.contains('应用时会提示冲突'),
-          ),
+      c2
+          .read(cardStudioControllerProvider)
+          .entries
+          .any((e) => e.text.contains('应用时会提示冲突')),
       isTrue,
     );
 
@@ -964,7 +1164,11 @@ void main() {
     );
     final draftFile = await openDraftFile();
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': '新描述'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'description': '新描述'},
+        }),
+      ]),
       finishStep(),
     ]);
     final c1 = makeContainer(backend: backend, draftFile: draftFile);
@@ -980,7 +1184,9 @@ void main() {
     expect(payload, isNotNull, reason: '继续打磨的会话也要落盘');
 
     final c2 = makeContainer(
-      backend: ScriptedLlmBackend([[const DoneEvent()]]),
+      backend: ScriptedLlmBackend([
+        [const DoneEvent()],
+      ]),
       draftFile: draftFile,
     );
     addTearDown(c2.dispose);
@@ -993,16 +1199,12 @@ void main() {
     expect(restored.baseCard.description, '新描述');
     expect(
       restored.entries.any(
-        (e) =>
-            e.kind == CardStudioEntryKind.user && e.text == '第一轮',
+        (e) => e.kind == CardStudioEntryKind.user && e.text == '第一轮',
       ),
       isTrue,
       reason: '恢复制卡对话',
     );
-    expect(
-      restored.entries.any((e) => e.text.contains('已恢复上次制卡对话')),
-      isTrue,
-    );
+    expect(restored.entries.any((e) => e.text.contains('已恢复上次制卡对话')), isTrue);
     expect(
       restored.entries.any((e) => e.text.contains('应用时会提示冲突')),
       isFalse,
@@ -1010,60 +1212,74 @@ void main() {
     );
   });
 
-  test('restored session adopts the current DB baseline after external edits',
-      () async {
-    final repo = CharacterRepository(db);
-    final charId = await repo.insert(
-      const CharacterCard(name: '原名', description: '旧描述'),
-    );
-    final draftFile = await openDraftFile();
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': '新描述'}})]),
-      finishStep(),
-    ]);
-    final c1 = makeContainer(backend: backend, draftFile: draftFile);
-    final controller1 = c1.read(cardStudioControllerProvider.notifier);
-    await controller1.start(charId);
-    await controller1.run('第一轮');
-    expect(await controller1.apply(), isTrue);
-    controller1.continueAfterApply();
-    controller1.detach();
-    c1.dispose();
-
-    await repo.update(
-      charId,
-      const CharacterCard(name: '原名', description: '新描述', personality: '外部改'),
-    );
-
-    final c2 = makeContainer(
-      backend: ScriptedLlmBackend([
-        step([call('setCardFields', {'fields': {'scenario': 'S'}})]),
+  test(
+    'restored session adopts the current DB baseline after external edits',
+    () async {
+      final repo = CharacterRepository(db);
+      final charId = await repo.insert(
+        const CharacterCard(name: '原名', description: '旧描述'),
+      );
+      final draftFile = await openDraftFile();
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'description': '新描述'},
+          }),
+        ]),
         finishStep(),
-      ]),
-      draftFile: draftFile,
-    );
-    addTearDown(c2.dispose);
-    final controller2 = c2.read(cardStudioControllerProvider.notifier);
-    await controller2.start(charId);
-    expect(
-      c2.read(cardStudioControllerProvider).baseCard.personality,
-      '外部改',
-      reason: '会话恢复以当前库为基线',
-    );
+      ]);
+      final c1 = makeContainer(backend: backend, draftFile: draftFile);
+      final controller1 = c1.read(cardStudioControllerProvider.notifier);
+      await controller1.start(charId);
+      await controller1.run('第一轮');
+      expect(await controller1.apply(), isTrue);
+      controller1.continueAfterApply();
+      controller1.detach();
+      c1.dispose();
 
-    await controller2.run('第二轮');
-    expect(await controller2.apply(), isTrue);
-    final saved = await repo.get(charId);
-    expect(saved!.personality, '外部改');
-    expect(saved.scenario, 'S');
-  });
+      await repo.update(
+        charId,
+        const CharacterCard(name: '原名', description: '新描述', personality: '外部改'),
+      );
+
+      final c2 = makeContainer(
+        backend: ScriptedLlmBackend([
+          step([
+            call('setCardFields', {
+              'fields': {'scenario': 'S'},
+            }),
+          ]),
+          finishStep(),
+        ]),
+        draftFile: draftFile,
+      );
+      addTearDown(c2.dispose);
+      final controller2 = c2.read(cardStudioControllerProvider.notifier);
+      await controller2.start(charId);
+      expect(
+        c2.read(cardStudioControllerProvider).baseCard.personality,
+        '外部改',
+        reason: '会话恢复以当前库为基线',
+      );
+
+      await controller2.run('第二轮');
+      expect(await controller2.apply(), isTrue);
+      final saved = await repo.get(charId);
+      expect(saved!.personality, '外部改');
+      expect(saved.scenario, 'S');
+    },
+  );
 
   test('discard clears a restored session-only draft', () async {
     final repo = CharacterRepository(db);
     final charId = await repo.insert(const CharacterCard(name: 'A'));
     final draftFile = await openDraftFile();
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'description': 'D'},
+        }),
+      ]),
       finishStep(),
     ]);
     final c1 = makeContainer(backend: backend, draftFile: draftFile);
@@ -1076,7 +1292,9 @@ void main() {
     c1.dispose();
 
     final c2 = makeContainer(
-      backend: ScriptedLlmBackend([[const DoneEvent()]]),
+      backend: ScriptedLlmBackend([
+        [const DoneEvent()],
+      ]),
       draftFile: draftFile,
     );
     addTearDown(c2.dispose);
@@ -1092,163 +1310,215 @@ void main() {
     expect(state.entries.single.text, contains('已丢弃'));
   });
 
-  test('applied entries adopt DB ids so the next round has no phantom diff',
+  test(
+    'applied entries adopt DB ids so the next round has no phantom diff',
+    () async {
+      final repo = CharacterRepository(db);
+      final wbRepo = WorldbookRepository(db);
+      final charId = await repo.insert(
+        const CharacterCard(name: '原名', description: '旧描述'),
+      );
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'description': '新描述'},
+          }),
+          call('upsertWorldbookEntries', {
+            'entries': [
+              {
+                'name': 'W1',
+                'keys': ['w1'],
+                'content': '内容一',
+              },
+            ],
+          }),
+        ]),
+        finishStep(),
+        step([
+          call('setCardFields', {
+            'fields': {'scenario': '场景'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(charId);
+      await controller.run('第一轮');
+      expect(await controller.apply(), isTrue);
+      final stored = await wbRepo.byCharacter(charId);
+      expect(stored.single.id, greaterThan(0));
+
+      controller.continueAfterApply();
+      var state = container.read(cardStudioControllerProvider);
+      expect(
+        state.baseEntries.single.id,
+        stored.single.id,
+        reason: '应用后基线应换成库里的真实 id,而不是负临时 id',
+      );
+
+      await controller.run('第二轮');
+      state = container.read(cardStudioControllerProvider);
+      expect(state.diff!.entries, isEmpty, reason: '已应用条目不应再次以删除+新增出现');
+      expect(state.diff!.fields.map((f) => f.key), ['scenario']);
+      expect(await controller.apply(), isTrue);
+      final after = await wbRepo.byCharacter(charId);
+      expect(after.single.id, stored.single.id, reason: '再次应用不应让条目 id 漂移');
+      expect(after.single.content, '内容一');
+    },
+  );
+
+  test(
+    'legacy session draft with temp entry ids restores without phantom diff',
+    () async {
+      final repo = CharacterRepository(db);
+      final wbRepo = WorldbookRepository(db);
+      final charId = await repo.insertWithWorldbook(
+        const CharacterCard(name: '旧卡'),
+        const [
+          WorldbookEntry(characterId: 0, name: 'W', keys: ['w'], content: 'c'),
+        ],
+      );
+      final stored = (await wbRepo.byCharacter(charId)).single;
+      final legacy = stored.copyWith(id: -1);
+      final card = (await repo.get(charId))!;
+      final draftFile = await openDraftFile();
+      await draftFile.write(
+        charId,
+        encodeCardStudioDraft(
+          CardStudioDraftSnapshot(
+            targetCharacterId: charId,
+            baseCard: card,
+            baseEntries: [legacy],
+            draftCard: card,
+            draftEntries: [legacy],
+            decisions: ReviewDecisions.acceptAll,
+            entries: const [
+              CardStudioEntry.user('上次的调整'),
+              CardStudioEntry.notice('已应用，可继续描述要调整的内容。'),
+            ],
+            sessionLog: const ['用户：上次的调整'],
+          ),
+        ),
+      );
+
+      final c = makeContainer(
+        backend: ScriptedLlmBackend([
+          [const DoneEvent()],
+        ]),
+        draftFile: draftFile,
+      );
+      addTearDown(c.dispose);
+      final controller = c.read(cardStudioControllerProvider.notifier);
+      await controller.start(charId);
+      final restored = c.read(cardStudioControllerProvider);
+      expect(restored.phase, CardStudioPhase.idle);
+      expect(restored.hasProposal, isFalse);
+      expect(restored.diff, isNull);
+      expect(restored.baseEntries.single.id, stored.id);
+    },
+  );
+
+  test(
+    'legacy proposal with temp entry ids remaps to DB ids on apply',
+    () async {
+      final repo = CharacterRepository(db);
+      final wbRepo = WorldbookRepository(db);
+      final charId = await repo.insertWithWorldbook(
+        const CharacterCard(name: '旧卡'),
+        const [
+          WorldbookEntry(
+            characterId: 0,
+            name: 'W',
+            keys: ['w'],
+            content: 'old',
+          ),
+        ],
+      );
+      final stored = (await wbRepo.byCharacter(charId)).single;
+      final base = stored.copyWith(id: -1);
+      final draft = stored.copyWith(id: -1, content: 'new');
+      final card = (await repo.get(charId))!;
+      final draftFile = await openDraftFile();
+      await draftFile.write(
+        charId,
+        encodeCardStudioDraft(
+          CardStudioDraftSnapshot(
+            targetCharacterId: charId,
+            baseCard: card,
+            baseEntries: [base],
+            draftCard: card,
+            draftEntries: [draft],
+            decisions: ReviewDecisions.acceptAll,
+            entries: const [CardStudioEntry.user('改条目')],
+            sessionLog: const ['用户：改条目'],
+          ),
+        ),
+      );
+
+      final c = makeContainer(
+        backend: ScriptedLlmBackend([
+          [const DoneEvent()],
+        ]),
+        draftFile: draftFile,
+      );
+      addTearDown(c.dispose);
+      final controller = c.read(cardStudioControllerProvider.notifier);
+      await controller.start(charId);
+      final restored = c.read(cardStudioControllerProvider);
+      expect(restored.phase, CardStudioPhase.review);
+      final entryDiff = restored.diff!.entries.single;
+      expect(entryDiff.kind, WorldbookChangeKind.modified);
+      expect(entryDiff.baseId, stored.id);
+      expect(entryDiff.oldEntry!.content, 'old');
+      expect(entryDiff.newEntry!.content, 'new');
+      expect(restored.conflictWarning, isNull);
+
+      expect(await controller.apply(), isTrue);
+      final saved = await wbRepo.byCharacter(charId);
+      expect(saved.single.id, stored.id, reason: '旧草稿的临时 id 不应导致重新插入');
+      expect(saved.single.content, 'new');
+    },
+  );
+
+  test('re-entering after leaving mid-run recovers from the stale busy phase',
       () async {
     final repo = CharacterRepository(db);
-    final wbRepo = WorldbookRepository(db);
-    final charId = await repo.insert(
-      const CharacterCard(name: '原名', description: '旧描述'),
-    );
+    final charId = await repo.insert(const CharacterCard(name: 'A'));
     final backend = ScriptedLlmBackend([
       step([
-        call('setCardFields', {'fields': {'description': '新描述'}}),
-        call('upsertWorldbookEntries', {
-          'entries': [
-            {'name': 'W1', 'keys': ['w1'], 'content': '内容一'},
-          ],
+        call('setCardFields', {
+          'fields': {'description': 'D'},
         }),
       ]),
       finishStep(),
-      step([call('setCardFields', {'fields': {'scenario': '场景'}})]),
-      finishStep(),
     ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(charId);
-    await controller.run('第一轮');
-    expect(await controller.apply(), isTrue);
-    final stored = await wbRepo.byCharacter(charId);
-    expect(stored.single.id, greaterThan(0));
-
-    controller.continueAfterApply();
-    var state = container.read(cardStudioControllerProvider);
-    expect(
-      state.baseEntries.single.id,
-      stored.single.id,
-      reason: '应用后基线应换成库里的真实 id,而不是负临时 id',
-    );
-
-    await controller.run('第二轮');
-    state = container.read(cardStudioControllerProvider);
-    expect(
-      state.diff!.entries,
-      isEmpty,
-      reason: '已应用条目不应再次以删除+新增出现',
-    );
-    expect(state.diff!.fields.map((f) => f.key), ['scenario']);
-    expect(await controller.apply(), isTrue);
-    final after = await wbRepo.byCharacter(charId);
-    expect(after.single.id, stored.single.id, reason: '再次应用不应让条目 id 漂移');
-    expect(after.single.content, '内容一');
-  });
-
-  test('legacy session draft with temp entry ids restores without phantom diff',
-      () async {
-    final repo = CharacterRepository(db);
-    final wbRepo = WorldbookRepository(db);
-    final charId = await repo.insertWithWorldbook(
-      const CharacterCard(name: '旧卡'),
-      const [
-        WorldbookEntry(characterId: 0, name: 'W', keys: ['w'], content: 'c'),
-      ],
-    );
-    final stored = (await wbRepo.byCharacter(charId)).single;
-    final legacy = stored.copyWith(id: -1);
-    final card = (await repo.get(charId))!;
-    final draftFile = await openDraftFile();
-    await draftFile.write(
-      charId,
-      encodeCardStudioDraft(
-        CardStudioDraftSnapshot(
-          targetCharacterId: charId,
-          baseCard: card,
-          baseEntries: [legacy],
-          draftCard: card,
-          draftEntries: [legacy],
-          decisions: ReviewDecisions.acceptAll,
-          entries: const [
-            CardStudioEntry.user('上次的调整'),
-            CardStudioEntry.notice('已应用，可继续描述要调整的内容。'),
-          ],
-          sessionLog: const ['用户：上次的调整'],
-        ),
-      ),
-    );
-
-    final c = makeContainer(
-      backend: ScriptedLlmBackend([[const DoneEvent()]]),
-      draftFile: draftFile,
-    );
+    final c = makeContainer(backend: backend);
     addTearDown(c.dispose);
     final controller = c.read(cardStudioControllerProvider.notifier);
     await controller.start(charId);
-    final restored = c.read(cardStudioControllerProvider);
-    expect(restored.phase, CardStudioPhase.idle);
-    expect(restored.hasProposal, isFalse);
-    expect(restored.diff, isNull);
-    expect(restored.baseEntries.single.id, stored.id);
-  });
 
-  test('legacy proposal with temp entry ids remaps to DB ids on apply',
-      () async {
-    final repo = CharacterRepository(db);
-    final wbRepo = WorldbookRepository(db);
-    final charId = await repo.insertWithWorldbook(
-      const CharacterCard(name: '旧卡'),
-      const [
-        WorldbookEntry(characterId: 0, name: 'W', keys: ['w'], content: 'old'),
-      ],
-    );
-    final stored = (await wbRepo.byCharacter(charId)).single;
-    final base = stored.copyWith(id: -1);
-    final draft = stored.copyWith(id: -1, content: 'new');
-    final card = (await repo.get(charId))!;
-    final draftFile = await openDraftFile();
-    await draftFile.write(
-      charId,
-      encodeCardStudioDraft(
-        CardStudioDraftSnapshot(
-          targetCharacterId: charId,
-          baseCard: card,
-          baseEntries: [base],
-          draftCard: card,
-          draftEntries: [draft],
-          decisions: ReviewDecisions.acceptAll,
-          entries: const [CardStudioEntry.user('改条目')],
-          sessionLog: const ['用户：改条目'],
-        ),
-      ),
-    );
-
-    final c = makeContainer(
-      backend: ScriptedLlmBackend([[const DoneEvent()]]),
-      draftFile: draftFile,
-    );
-    addTearDown(c.dispose);
-    final controller = c.read(cardStudioControllerProvider.notifier);
+    final running = controller.run('改');
+    controller.detach();
+    await running;
+    // 旧页面退出时 phase 可能停在 running/preparing;再次进入必须能接管。
     await controller.start(charId);
-    final restored = c.read(cardStudioControllerProvider);
-    expect(restored.phase, CardStudioPhase.review);
-    final entryDiff = restored.diff!.entries.single;
-    expect(entryDiff.kind, WorldbookChangeKind.modified);
-    expect(entryDiff.baseId, stored.id);
-    expect(entryDiff.oldEntry!.content, 'old');
-    expect(entryDiff.newEntry!.content, 'new');
-    expect(restored.conflictWarning, isNull);
-
-    expect(await controller.apply(), isTrue);
-    final saved = await wbRepo.byCharacter(charId);
-    expect(saved.single.id, stored.id, reason: '旧草稿的临时 id 不应导致重新插入');
-    expect(saved.single.content, 'new');
+    final state = c.read(cardStudioControllerProvider);
+    expect(state.busy, isFalse);
+    expect(state.loaded, isTrue);
+    expect(state.phase, CardStudioPhase.idle);
   });
 
-  test('leaving during apply still clears the persisted proposal', () async {
-    final repo = CharacterRepository(db);
+  test('leaving during apply still clears the persisted proposal', () async {    final repo = CharacterRepository(db);
     final charId = await repo.insert(const CharacterCard(name: 'A'));
     final draftFile = await openDraftFile();
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'description': 'D'},
+        }),
+      ]),
       finishStep(),
     ]);
     final c1 = makeContainer(backend: backend, draftFile: draftFile);
@@ -1265,14 +1535,12 @@ void main() {
     final applying = controller1.apply();
     controller1.detach();
     expect(await applying, isTrue);
-    expect(
-      await draftFile.read(charId),
-      isNull,
-      reason: '应用成功后必须清理已捕获的草稿文件',
-    );
+    expect(await draftFile.read(charId), isNull, reason: '应用成功后必须清理已捕获的草稿文件');
 
     final c2 = makeContainer(
-      backend: ScriptedLlmBackend([[const DoneEvent()]]),
+      backend: ScriptedLlmBackend([
+        [const DoneEvent()],
+      ]),
       draftFile: draftFile,
     );
     addTearDown(c2.dispose);
@@ -1285,7 +1553,11 @@ void main() {
 
   test('disposeStudio resets conversation and draft', () async {
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'name': 'A'},
+        }),
+      ]),
       finishStep(),
     ]);
     final container = makeContainer(backend: backend);
@@ -1302,138 +1574,180 @@ void main() {
     expect(state.draftCard, isNull);
   });
 
-  test('editing the latest instruction rewinds and reruns from the pre-turn seed',
-      () async {
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': '旧轮描述'}})]),
-      finishStep('第一轮完成'),
-      step([call('setCardFields', {'fields': {'name': '新名'}})]),
-      finishStep('重跑完成'),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('第一轮指令');
+  test(
+    'editing the latest instruction rewinds and reruns from the pre-turn seed',
+    () async {
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'description': '旧轮描述'},
+          }),
+        ]),
+        finishStep('第一轮完成'),
+        step([
+          call('setCardFields', {
+            'fields': {'name': '新名'},
+          }),
+        ]),
+        finishStep('重跑完成'),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('第一轮指令');
 
-    var state = container.read(cardStudioControllerProvider);
-    expect(state.draftCard!.description, '旧轮描述');
-    expect(controller.latestUserInstructionIndex, 0);
-    expect(controller.instructionEditBlockedReasonFor(0), isNull);
-    expect(
-      controller.latestTurnProducedChanges,
-      isTrue,
-      reason: '成功轮有实际修改,编辑需提示撤回',
-    );
+      var state = container.read(cardStudioControllerProvider);
+      expect(state.draftCard!.description, '旧轮描述');
+      expect(controller.latestUserInstructionIndex, 0);
+      expect(controller.instructionEditBlockedReasonFor(0), isNull);
+      expect(
+        controller.latestTurnProducedChanges,
+        isTrue,
+        reason: '成功轮有实际修改,编辑需提示撤回',
+      );
 
-    expect(await controller.editLastInstruction('修改后的指令'), isNull);
+      expect(await controller.editLastInstruction('修改后的指令'), isNull);
 
-    state = container.read(cardStudioControllerProvider);
-    expect(state.phase, CardStudioPhase.review);
-    expect(state.draftCard!.description, isEmpty, reason: '撤回后种子回到轮前基线');
-    expect(state.draftCard!.name, '新名');
-    expect(
-      state.entries
-          .where((e) => e.kind == CardStudioEntryKind.user)
-          .map((e) => e.text),
-      ['修改后的指令'],
-    );
-    expect(state.entries.any((e) => e.text.contains('第一轮完成')), isFalse);
-    final rerunRequest = backend.requests[2];
-    expect(rerunRequest.messages.first.content, contains('修改后的指令'));
-    expect(rerunRequest.variableSystemPart, isNot(contains('第一轮指令')));
-    expect(rerunRequest.variableSystemPart, isNot(contains('第一轮完成')));
-    expect(await CharacterRepository(db).all(), isEmpty, reason: '编辑重跑不触碰库');
-  });
+      state = container.read(cardStudioControllerProvider);
+      expect(state.phase, CardStudioPhase.review);
+      expect(state.draftCard!.description, isEmpty, reason: '撤回后种子回到轮前基线');
+      expect(state.draftCard!.name, '新名');
+      expect(
+        state.entries
+            .where((e) => e.kind == CardStudioEntryKind.user)
+            .map((e) => e.text),
+        ['修改后的指令'],
+      );
+      expect(state.entries.any((e) => e.text.contains('第一轮完成')), isFalse);
+      final rerunRequest = backend.requests[2];
+      expect(rerunRequest.messages.first.content, contains('修改后的指令'));
+      expect(rerunRequest.variableSystemPart, isNot(contains('第一轮指令')));
+      expect(rerunRequest.variableSystemPart, isNot(contains('第一轮完成')));
+      expect(await CharacterRepository(db).all(), isEmpty, reason: '编辑重跑不触碰库');
+    },
+  );
 
-  test('editing only withdraws the latest turn; earlier accepted changes stay',
-      () async {
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': '第一轮描述'}})]),
-      finishStep(),
-      step([call('setCardFields', {'fields': {'name': 'B名'}})]),
-      finishStep(),
-      step([call('setCardFields', {'fields': {'personality': '新性格'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('第一轮');
-    await controller.continueAdjust('第二轮');
+  test(
+    'editing only withdraws the latest turn; earlier accepted changes stay',
+    () async {
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'description': '第一轮描述'},
+          }),
+        ]),
+        finishStep(),
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'B名'},
+          }),
+        ]),
+        finishStep(),
+        step([
+          call('setCardFields', {
+            'fields': {'personality': '新性格'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('第一轮');
+      await controller.continueAdjust('第二轮');
 
-    final latest = controller.latestUserInstructionIndex!;
-    expect(controller.instructionEditBlockedReasonFor(0), '仅最近一条指令可修改');
-    expect(controller.instructionEditBlockedReasonFor(latest), isNull);
+      final latest = controller.latestUserInstructionIndex!;
+      expect(controller.instructionEditBlockedReasonFor(0), '仅最近一条指令可修改');
+      expect(controller.instructionEditBlockedReasonFor(latest), isNull);
 
-    expect(await controller.editLastInstruction('第二轮改'), isNull);
+      expect(await controller.editLastInstruction('第二轮改'), isNull);
 
-    final state = container.read(cardStudioControllerProvider);
-    expect(state.draftCard!.description, '第一轮描述', reason: '第一轮已接纳内容保留在种子');
-    expect(state.draftCard!.name, isEmpty, reason: '第二轮结果被撤回');
-    expect(state.draftCard!.personality, '新性格');
-    expect(
-      state.entries
-          .where((e) => e.kind == CardStudioEntryKind.user)
-          .map((e) => e.text),
-      ['第一轮', '第二轮改'],
-    );
-    final rerun = backend.requests[4];
-    expect(rerun.variableSystemPart, contains('第一轮描述'));
-    expect(rerun.variableSystemPart, isNot(contains('B名')));
-  });
+      final state = container.read(cardStudioControllerProvider);
+      expect(state.draftCard!.description, '第一轮描述', reason: '第一轮已接纳内容保留在种子');
+      expect(state.draftCard!.name, isEmpty, reason: '第二轮结果被撤回');
+      expect(state.draftCard!.personality, '新性格');
+      expect(
+        state.entries
+            .where((e) => e.kind == CardStudioEntryKind.user)
+            .map((e) => e.text),
+        ['第一轮', '第二轮改'],
+      );
+      final rerun = backend.requests[4];
+      expect(rerun.variableSystemPart, contains('第一轮描述'));
+      expect(rerun.variableSystemPart, isNot(contains('B名')));
+    },
+  );
 
-  test('a failed turn can be edited and its stale error entries are removed',
-      () async {
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
-      finishStep(),
-      const [
-        ErrorEvent('boom', kind: UpstreamErrorKind.contractViolation),
-      ],
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('第一轮');
-    await controller.continueAdjust('第二轮');
+  test(
+    'a failed turn can be edited and its stale error entries are removed',
+    () async {
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'A'},
+          }),
+        ]),
+        finishStep(),
+        const [ErrorEvent('boom', kind: UpstreamErrorKind.contractViolation)],
+        step([
+          call('setCardFields', {
+            'fields': {'description': 'D'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('第一轮');
+      await controller.continueAdjust('第二轮');
 
-    var state = container.read(cardStudioControllerProvider);
-    expect(state.phase, CardStudioPhase.failed);
-    final latest = controller.latestUserInstructionIndex!;
-    expect(controller.instructionEditBlockedReasonFor(latest), isNull);
-    expect(state.entries.any((e) => e.kind == CardStudioEntryKind.error), isTrue);
-    expect(
-      controller.latestTurnProducedChanges,
-      isFalse,
-      reason: '失败轮没有实际修改,编辑不应提示撤回',
-    );
+      var state = container.read(cardStudioControllerProvider);
+      expect(state.phase, CardStudioPhase.failed);
+      final latest = controller.latestUserInstructionIndex!;
+      expect(controller.instructionEditBlockedReasonFor(latest), isNull);
+      expect(
+        state.entries.any((e) => e.kind == CardStudioEntryKind.error),
+        isTrue,
+      );
+      expect(
+        controller.latestTurnProducedChanges,
+        isFalse,
+        reason: '失败轮没有实际修改,编辑不应提示撤回',
+      );
 
-    expect(await controller.editLastInstruction('第二轮改'), isNull);
+      expect(await controller.editLastInstruction('第二轮改'), isNull);
 
-    state = container.read(cardStudioControllerProvider);
-    expect(state.phase, CardStudioPhase.review);
-    expect(state.entries.any((e) => e.kind == CardStudioEntryKind.error), isFalse);
-    expect(
-      state.entries
-          .where((e) => e.kind == CardStudioEntryKind.user)
-          .map((e) => e.text),
-      ['第一轮', '第二轮改'],
-    );
-    expect(state.draftCard!.name, 'A');
-    expect(state.draftCard!.description, 'D');
-  });
+      state = container.read(cardStudioControllerProvider);
+      expect(state.phase, CardStudioPhase.review);
+      expect(
+        state.entries.any((e) => e.kind == CardStudioEntryKind.error),
+        isFalse,
+      );
+      expect(
+        state.entries
+            .where((e) => e.kind == CardStudioEntryKind.user)
+            .map((e) => e.text),
+        ['第一轮', '第二轮改'],
+      );
+      expect(state.draftCard!.name, 'A');
+      expect(state.draftCard!.description, 'D');
+    },
+  );
 
   test('a cancelled turn is consequence-free to edit', () async {
     final gate = Completer<void>();
     final backend = ScriptedLlmBackend(
       [
         [const TextDelta('partial'), const DoneEvent()],
-        step([call('setCardFields', {'fields': {'name': '重跑名'}})]),
+        step([
+          call('setCardFields', {
+            'fields': {'name': '重跑名'},
+          }),
+        ]),
         finishStep(),
       ],
       gates: {0: gate},
@@ -1476,17 +1790,18 @@ void main() {
           .map((e) => e.text),
       ['改后的指令'],
     );
-    expect(
-      backend.requests.last.messages.first.content,
-      contains('改后的指令'),
-    );
+    expect(backend.requests.last.messages.first.content, contains('改后的指令'));
     expect(await CharacterRepository(db).all(), isEmpty, reason: '全程不触碰库');
   });
 
   test('a turn producing no changes is consequence-free to edit', () async {
     final backend = ScriptedLlmBackend([
       finishStep('无需修改'),
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'name': 'A'},
+        }),
+      ]),
       finishStep(),
     ]);
     final container = makeContainer(backend: backend);
@@ -1498,11 +1813,7 @@ void main() {
     var state = container.read(cardStudioControllerProvider);
     expect(state.phase, CardStudioPhase.review);
     expect(state.diff!.hasChanges, isFalse);
-    expect(
-      controller.latestTurnProducedChanges,
-      isFalse,
-      reason: '空结果轮编辑没有后果',
-    );
+    expect(controller.latestTurnProducedChanges, isFalse, reason: '空结果轮编辑没有后果');
 
     expect(await controller.editLastInstruction('真的改一下'), isNull);
     state = container.read(cardStudioControllerProvider);
@@ -1518,7 +1829,9 @@ void main() {
   test('a generated avatar counts as turn results for edit warnings', () async {
     final image = _CountingImageBackend(fakeImageBase64);
     final backend = ScriptedLlmBackend([
-      step([call('setAvatarPrompt', {'prompt': '1girl, silver hair'})]),
+      step([
+        call('setAvatarPrompt', {'prompt': '1girl, silver hair'}),
+      ]),
       finishStep(),
     ]);
     final container = makeContainer(backend: backend, imageBackend: image);
@@ -1528,7 +1841,7 @@ void main() {
 
     await controller.run('只换头像');
     final state = container.read(cardStudioControllerProvider);
-    expect(state.draftCard!.avatarBase64, fakeImageBase64);
+    expect(state.draftCard!.avatarHash, fakeImageHash);
     expect(image.calls, 1);
     expect(
       controller.latestTurnProducedChanges,
@@ -1540,7 +1853,9 @@ void main() {
   test('editing is rejected while a run is in flight', () async {
     final gate = Completer<void>();
     final backend = ScriptedLlmBackend(
-      [[const TextDelta('partial'), const DoneEvent()]],
+      [
+        [const TextDelta('partial'), const DoneEvent()],
+      ],
       gates: {0: gate},
     );
     final container = makeContainer(backend: backend);
@@ -1558,167 +1873,296 @@ void main() {
     controller.cancel();
     await running;
     gate.complete();
-    expect(container.read(cardStudioControllerProvider).phase, CardStudioPhase.idle);
-  });
-
-  test('applied instructions stay read-only until a new instruction is sent',
-      () async {
-    final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
-      finishStep(),
-      step([call('setCardFields', {'fields': {'description': 'D'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('第一轮');
-    expect(await controller.apply(), isTrue);
-    controller.continueAfterApply();
-
-    var state = container.read(cardStudioControllerProvider);
-    final oldIndex = controller.latestUserInstructionIndex!;
-    expect(state.phase, CardStudioPhase.idle);
     expect(
-      controller.instructionEditBlockedReasonFor(oldIndex),
-      '该指令已应用或会话已恢复，仅可复制',
+      container.read(cardStudioControllerProvider).phase,
+      CardStudioPhase.idle,
     );
-    expect(await controller.editLastInstruction('改第一轮'), isNotNull);
-
-    await controller.run('新指令');
-    final newIndex = controller.latestUserInstructionIndex!;
-    expect(newIndex, greaterThan(oldIndex));
-    expect(controller.instructionEditBlockedReasonFor(oldIndex), '仅最近一条指令可修改');
-    expect(controller.instructionEditBlockedReasonFor(newIndex), isNull);
-    state = container.read(cardStudioControllerProvider);
-    expect(state.draftCard!.name, 'A');
-    expect(state.draftCard!.description, 'D');
   });
 
-  test('a restored draft is read-only until a new instruction is sent', () async {
-    final draftFile = await openDraftFile();
-    final backend1 = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': '草稿名'}})]),
-      finishStep(),
-    ]);
-    final c1 = makeContainer(backend: backend1, draftFile: draftFile);
-    final controller1 = c1.read(cardStudioControllerProvider.notifier);
-    await controller1.start(null);
-    await controller1.run('草稿指令');
-    controller1.detach();
-    c1.dispose();
-    for (var i = 0; i < 100 && await draftFile.read(null) == null; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-    }
-    expect(await draftFile.read(null), isNotNull);
-
-    final backend2 = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'description': '续写'}})]),
-      finishStep(),
-    ]);
-    final c2 = makeContainer(backend: backend2, draftFile: draftFile);
-    addTearDown(c2.dispose);
-    final controller2 = c2.read(cardStudioControllerProvider.notifier);
-    await controller2.start(null);
-    final restored = c2.read(cardStudioControllerProvider);
-    expect(restored.phase, CardStudioPhase.review);
-    final index = controller2.latestUserInstructionIndex!;
-    expect(
-      controller2.instructionEditBlockedReasonFor(index),
-      '该指令已应用或会话已恢复，仅可复制',
-    );
-    expect(await controller2.editLastInstruction('改'), isNotNull);
-
-    await controller2.continueAdjust('继续调整');
-    final newIndex = controller2.latestUserInstructionIndex!;
-    expect(controller2.instructionEditBlockedReasonFor(newIndex), isNull);
-  });
-
-  test('rewinding invalidates the persisted draft before the rerun completes',
-      () async {
-    final draftFile = await openDraftFile();
-    final gate = Completer<void>();
-    final backend = ScriptedLlmBackend(
-      [
-        step([call('setCardFields', {'fields': {'name': '旧名'}})]),
+  test(
+    'applied instructions stay read-only until a new instruction is sent',
+    () async {
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': 'A'},
+          }),
+        ]),
         finishStep(),
-        step([call('setCardFields', {'fields': {'name': '新名'}})]),
+        step([
+          call('setCardFields', {
+            'fields': {'description': 'D'},
+          }),
+        ]),
         finishStep(),
-      ],
-      gates: {2: gate},
-    );
-    final container = makeContainer(backend: backend, draftFile: draftFile);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    await controller.run('第一轮');
-    for (var i = 0; i < 100 && await draftFile.read(null) == null; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-    }
-    expect(await draftFile.read(null), isNotNull);
+      ]);
+      final container = makeContainer(backend: backend);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('第一轮');
+      expect(await controller.apply(), isTrue);
+      controller.continueAfterApply();
 
-    final editing = controller.editLastInstruction('改');
-    await waitFor(() => backend.calls == 3);
-    expect(await draftFile.read(null), isNull, reason: '撤回后旧提案不得复活');
-    gate.complete();
-    expect(await editing, isNull);
-    for (var i = 0; i < 100 && await draftFile.read(null) == null; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-    }
-    expect(await draftFile.read(null), isNotNull, reason: '重跑结果重新落盘');
-  });
+      var state = container.read(cardStudioControllerProvider);
+      final oldIndex = controller.latestUserInstructionIndex!;
+      expect(state.phase, CardStudioPhase.idle);
+      expect(
+        controller.instructionEditBlockedReasonFor(oldIndex),
+        '该指令已应用或会话已恢复，仅可复制',
+      );
+      expect(await controller.editLastInstruction('改第一轮'), isNotNull);
 
-  test('editing while the old avatar is generating drops the late image',
-      () async {
-    final image = _GatedImageBackend('QUJD');
-    final backend = ScriptedLlmBackend([
-      step([
-        call('setCardFields', {'fields': {'name': '旧名'}}),
-        call('setAvatarPrompt', {'prompt': '1girl'}),
-      ]),
-      finishStep(),
-      step([call('setCardFields', {'fields': {'name': '新名'}})]),
-      finishStep(),
-    ]);
-    final container = makeContainer(backend: backend, imageBackend: image);
-    addTearDown(container.dispose);
-    final controller = container.read(cardStudioControllerProvider.notifier);
-    await controller.start(null);
-    final firstRun = controller.run('第一轮');
-    await waitFor(
-      () =>
-          container.read(cardStudioControllerProvider).avatarStatus ==
-          CardStudioAvatarStatus.generating,
-    );
-    expect(
-      controller.instructionEditBlockedReasonFor(
-        controller.latestUserInstructionIndex!,
-      ),
-      isNull,
-      reason: '生图在飞不影响编辑(忙态只看阶段)',
-    );
+      await controller.run('新指令');
+      final newIndex = controller.latestUserInstructionIndex!;
+      expect(newIndex, greaterThan(oldIndex));
+      expect(
+        controller.instructionEditBlockedReasonFor(oldIndex),
+        '仅最近一条指令可修改',
+      );
+      expect(controller.instructionEditBlockedReasonFor(newIndex), isNull);
+      state = container.read(cardStudioControllerProvider);
+      expect(state.draftCard!.name, 'A');
+      expect(state.draftCard!.description, 'D');
+    },
+  );
 
-    final editing = controller.editLastInstruction('改');
-    await waitFor(
-      () =>
-          container.read(cardStudioControllerProvider).phase ==
-              CardStudioPhase.review &&
-          container.read(cardStudioControllerProvider).draftCard?.name == '新名',
-    );
-    await editing;
+  test(
+    'a restored draft is read-only until a new instruction is sent',
+    () async {
+      final draftFile = await openDraftFile();
+      final backend1 = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': '草稿名'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final c1 = makeContainer(backend: backend1, draftFile: draftFile);
+      final controller1 = c1.read(cardStudioControllerProvider.notifier);
+      await controller1.start(null);
+      await controller1.run('草稿指令');
+      controller1.detach();
+      c1.dispose();
+      for (var i = 0; i < 100 && await draftFile.read(null) == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(await draftFile.read(null), isNotNull);
 
-    // 旧一轮的生图此刻才返回:不得覆盖撤回后的头像状态。
-    image.gate.complete();
-    await firstRun;
-    final state = container.read(cardStudioControllerProvider);
-    expect(state.avatarStatus, CardStudioAvatarStatus.idle);
-    expect(state.draftCard!.avatarBase64, isNull);
-  });
+      final backend2 = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'description': '续写'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final c2 = makeContainer(backend: backend2, draftFile: draftFile);
+      addTearDown(c2.dispose);
+      final controller2 = c2.read(cardStudioControllerProvider.notifier);
+      await controller2.start(null);
+      final restored = c2.read(cardStudioControllerProvider);
+      expect(restored.phase, CardStudioPhase.review);
+      final index = controller2.latestUserInstructionIndex!;
+      expect(
+        controller2.instructionEditBlockedReasonFor(index),
+        '该指令已应用或会话已恢复，仅可复制',
+      );
+      expect(await controller2.editLastInstruction('改'), isNotNull);
+
+      await controller2.continueAdjust('继续调整');
+      final newIndex = controller2.latestUserInstructionIndex!;
+      expect(controller2.instructionEditBlockedReasonFor(newIndex), isNull);
+    },
+  );
+
+  test(
+    'rewinding invalidates the persisted draft before the rerun completes',
+    () async {
+      final draftFile = await openDraftFile();
+      final gate = Completer<void>();
+      final backend = ScriptedLlmBackend(
+        [
+          step([
+            call('setCardFields', {
+              'fields': {'name': '旧名'},
+            }),
+          ]),
+          finishStep(),
+          step([
+            call('setCardFields', {
+              'fields': {'name': '新名'},
+            }),
+          ]),
+          finishStep(),
+        ],
+        gates: {2: gate},
+      );
+      final container = makeContainer(backend: backend, draftFile: draftFile);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      await controller.run('第一轮');
+      for (var i = 0; i < 100 && await draftFile.read(null) == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(await draftFile.read(null), isNotNull);
+
+      final editing = controller.editLastInstruction('改');
+      await waitFor(() => backend.calls == 3);
+      expect(await draftFile.read(null), isNull, reason: '撤回后旧提案不得复活');
+      gate.complete();
+      expect(await editing, isNull);
+      for (var i = 0; i < 100 && await draftFile.read(null) == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(await draftFile.read(null), isNotNull, reason: '重跑结果重新落盘');
+    },
+  );
+
+  test(
+    'editing while the old avatar is generating drops the late image',
+    () async {
+      final image = _GatedImageBackend('QUJD');
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': '旧名'},
+          }),
+          call('setAvatarPrompt', {'prompt': '1girl'}),
+        ]),
+        finishStep(),
+        step([
+          call('setCardFields', {
+            'fields': {'name': '新名'},
+          }),
+        ]),
+        finishStep(),
+      ]);
+      final container = makeContainer(backend: backend, imageBackend: image);
+      addTearDown(container.dispose);
+      final controller = container.read(cardStudioControllerProvider.notifier);
+      await controller.start(null);
+      final firstRun = controller.run('第一轮');
+      await waitFor(
+        () =>
+            container.read(cardStudioControllerProvider).avatarStatus ==
+            CardStudioAvatarStatus.generating,
+      );
+      expect(
+        controller.instructionEditBlockedReasonFor(
+          controller.latestUserInstructionIndex!,
+        ),
+        isNull,
+        reason: '生图在飞不影响编辑(忙态只看阶段)',
+      );
+
+      final editing = controller.editLastInstruction('改');
+      await waitFor(
+        () =>
+            container.read(cardStudioControllerProvider).phase ==
+                CardStudioPhase.review &&
+            container.read(cardStudioControllerProvider).draftCard?.name ==
+                '新名',
+      );
+      await editing;
+
+      // 旧一轮的生图此刻才返回:不得覆盖撤回后的头像状态。
+      image.gate.complete();
+      await firstRun;
+      final state = container.read(cardStudioControllerProvider);
+      expect(state.avatarStatus, CardStudioAvatarStatus.idle);
+      expect(state.draftCard!.avatarHash, isNull);
+    },
+  );
+
+  test(
+    'draft avatar survives grace period and restart without duplicate refs',
+    () async {
+      final draftFile = await openDraftFile();
+      final image = _CountingImageBackend(fakeImageBase64);
+      final backend = ScriptedLlmBackend([
+        step([
+          call('setCardFields', {
+            'fields': {'name': '长期草稿'},
+          }),
+          call('setAvatarPrompt', {'prompt': '1girl'}),
+        ]),
+        finishStep(),
+      ]);
+      final c1 = makeContainer(
+        backend: backend,
+        imageBackend: image,
+        draftFile: draftFile,
+      );
+      final controller1 = c1.read(cardStudioControllerProvider.notifier);
+      await controller1.start(null);
+      await controller1.run('生成长期草稿');
+      for (var i = 0; i < 100 && await draftFile.read(null) == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(await draftFile.read(null), isNotNull);
+      expect(await testImageRefCount(db, fakeImageHash), 1);
+
+      final field = c1.read(cardStudioControllerProvider).diff!.fields.first;
+      controller1.editField(field.key, '再次保存');
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      await draftFile.read(null);
+      expect(
+        await testImageRefCount(db, fakeImageHash),
+        1,
+        reason: '重写同一份草稿不得重复 acquire',
+      );
+      expect(
+        await db.images.deleteIfUnreferenced(
+          now: DateTime.now().add(const Duration(hours: 25)),
+        ),
+        0,
+      );
+      expect(await db.images.exists(fakeImageHash), isTrue);
+      controller1.detach();
+      c1.dispose();
+
+      final c2 = makeContainer(
+        backend: ScriptedLlmBackend([
+          [const DoneEvent()],
+        ]),
+        draftFile: draftFile,
+      );
+      addTearDown(c2.dispose);
+      final controller2 = c2.read(cardStudioControllerProvider.notifier);
+      await controller2.start(null);
+      expect(
+        await testImageRefCount(db, fakeImageHash),
+        1,
+        reason: '恢复直接接管草稿清单,不能重复增加持久化引用',
+      );
+      expect(
+        await db.images.deleteIfUnreferenced(
+          now: DateTime.now().add(const Duration(hours: 72)),
+        ),
+        0,
+      );
+
+      expect(await controller2.apply(), isTrue);
+      expect(await draftFile.read(null), isNull);
+      expect(
+        await testImageRefCount(db, fakeImageHash),
+        1,
+        reason: '应用后只剩角色业务引用,草稿引用已释放',
+      );
+      expect(await db.images.exists(fakeImageHash), isTrue);
+    },
+  );
 
   test('editing with unchanged text is a no-op', () async {
     final backend = ScriptedLlmBackend([
-      step([call('setCardFields', {'fields': {'name': 'A'}})]),
+      step([
+        call('setCardFields', {
+          'fields': {'name': 'A'},
+        }),
+      ]),
       finishStep(),
     ]);
     final container = makeContainer(backend: backend);

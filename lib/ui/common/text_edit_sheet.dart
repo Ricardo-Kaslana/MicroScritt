@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'app_sheet.dart';
 import 'copy_button.dart';
 import 'sheet_header.dart';
 import 'unsaved_changes_guard.dart';
@@ -29,10 +30,8 @@ Future<String?> showTextEditSheet(
   // 允许保存空白文本:显式清空字段(删掉不需要的内容)时传 true。
   bool allowEmpty = false,
 }) {
-  return showModalBottomSheet<String>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
+  return showAppSheet<String>(
+    context,
     builder: (_) => _TextEditSheet(
       title: title,
       initialText: initialText,
@@ -217,8 +216,7 @@ class _TextEditSheetState extends State<_TextEditSheet> {
                         ),
                         const Expanded(child: SizedBox.shrink()),
                         FilledButton.icon(
-                          onPressed: !widget.allowEmpty &&
-                                  _text.trim().isEmpty
+                          onPressed: !widget.allowEmpty && _text.trim().isEmpty
                               ? null
                               : _submit,
                           icon: const Icon(Icons.check, size: 18),

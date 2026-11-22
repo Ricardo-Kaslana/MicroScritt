@@ -26,13 +26,18 @@ class CharacterCardPngExporter {
   static Future<Uint8List> export(
     CharacterCard card, {
     List<WorldbookEntry>? worldbook,
+    String? avatarBase64,
   }) async {
     final payload = _stripAvatar(
-      CharacterCardExporter.exportJson(card, worldbook: worldbook),
+      CharacterCardExporter.exportJson(
+        card,
+        worldbook: worldbook,
+        avatarBase64: avatarBase64,
+      ),
     );
     final encoded = base64Encode(utf8.encode(jsonEncode(payload)));
     final image =
-        await _normalizeToPng(_decodeAvatar(card.avatarBase64)) ??
+        await _normalizeToPng(_decodeAvatar(avatarBase64)) ??
         await _placeholderPng(card.name);
     return _insertTextChunks(image, [
       ('chara', encoded),
@@ -175,20 +180,72 @@ class CharacterCardPngExporter {
   }
 
   /// 在 IEND 前插入文本块(必须位于 IDAT 之后,IEND 之前)。
+  ///
+  /// 复用的头像 PNG 可能本身就是一张角色卡(带 chara/ccv3 文本块);先移除
+  /// 两种卡载荷块 —— 导入端按 V3 规范拼接同名块,新旧的 chara 连在一起会
+  /// 变成两段 JSON;V2 导出只写 chara 时,残留的旧 ccv3 又会被优先读中。
   static Uint8List _insertTextChunks(
     Uint8List png,
     List<(String, String)> chunks,
   ) {
-    final insertAt = _findIend(png);
+    const cardKeywords = {'chara', 'ccv3'};
+    final cleaned = _stripTextChunks(png, cardKeywords);
+    final insertAt = _findIend(cleaned);
     if (insertAt == null) throw const FormatException('PNG 缺少 IEND 块');
     // 用视图代替 sublist 的大块复制:20MB 头像整图导出时避免再翻倍一次峰值。
     final builder = BytesBuilder(copy: false)
-      ..add(Uint8List.sublistView(png, 0, insertAt));
+      ..add(Uint8List.sublistView(cleaned, 0, insertAt));
     for (final (keyword, text) in chunks) {
       builder.add(_textChunk(keyword, text));
     }
-    builder.add(Uint8List.sublistView(png, insertAt));
+    builder.add(Uint8List.sublistView(cleaned, insertAt));
     return builder.takeBytes();
+  }
+
+  /// 移除 tEXt / iTXt / zTXt 中关键字命中 [keywords](小写)的整块(含 CRC)。
+  ///
+  /// 未命中时直接返回原字节,保留"PNG 原样复用、不重编码"的零复制路径;
+  /// 命中时也只按块拼接未删除部分,不触碰图片数据与其它文本块。
+  static Uint8List _stripTextChunks(Uint8List png, Set<String> keywords) {
+    var offset = 8;
+    var stripped = false;
+    final builder = BytesBuilder(copy: false)
+      ..add(Uint8List.sublistView(png, 0, 8));
+    while (offset + 8 <= png.length) {
+      final length = _readUint32(png, offset);
+      final dataEnd = offset + 8 + length;
+      if (dataEnd + 4 > png.length) {
+        // 结构越界:剩余字节原样保留,由 _findIend 的既有校验决定是否报错。
+        builder.add(Uint8List.sublistView(png, offset));
+        break;
+      }
+      final blockEnd = dataEnd + 4;
+      final keyword = _textChunkKeyword(png, offset, dataEnd);
+      if (keyword != null && keywords.contains(keyword.toLowerCase())) {
+        stripped = true;
+      } else {
+        builder.add(Uint8List.sublistView(png, offset, blockEnd));
+      }
+      offset = blockEnd;
+    }
+    return stripped ? builder.takeBytes() : png;
+  }
+
+  /// 读取文本块关键字;非 tEXt/iTXt/zTXt 或缺少 0 分隔符时返回 null。
+  static String? _textChunkKeyword(Uint8List png, int offset, int dataEnd) {
+    const t = 0x74, e = 0x45, x = 0x58, i = 0x69, z = 0x7A;
+    final isText =
+        (png[offset + 4] == t && png[offset + 5] == e &&
+            png[offset + 6] == x && png[offset + 7] == t) ||
+        (png[offset + 4] == i && png[offset + 5] == t &&
+            png[offset + 6] == x && png[offset + 7] == t) ||
+        (png[offset + 4] == z && png[offset + 5] == t &&
+            png[offset + 6] == x && png[offset + 7] == t);
+    if (!isText) return null;
+    final dataStart = offset + 8;
+    final nul = png.indexOf(0, dataStart);
+    if (nul == -1 || nul >= dataEnd) return null;
+    return String.fromCharCodes(png.sublist(dataStart, nul));
   }
 
   /// tEXt 块直接写进目标缓冲区。把 27MB 级 base64 展开成 `List<int>` 再

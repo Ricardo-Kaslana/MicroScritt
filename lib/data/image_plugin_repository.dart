@@ -92,6 +92,54 @@ class ImagePluginRepository {
     );
   }
 
+  /// 在调用方事务内按配置文件整体合并插件目录。
+  ///
+  /// - [builtinEnabled] 里列出的内置插件只更新启用状态(代码/manifest 恒由
+  ///   仓库种子维护,配置文件不覆盖)。
+  /// - [customPlugins] 逐条 upsert(含 code/manifest/enabled)。
+  /// - 库中存在、本次既不是内置也未被列出的自定义插件一律删除;内置 id
+  ///   永久保留,即使配置文件没有列出。
+  Future<void> replaceConfigInTransaction(
+    DatabaseExecutor executor, {
+    required List<ImagePlugin> customPlugins,
+    required Map<String, bool> builtinEnabled,
+  }) async {
+    for (final entry in builtinEnabled.entries) {
+      await executor.update(
+        'image_plugins',
+        {'enabled': entry.value ? 1 : 0},
+        where: 'id = ?',
+        whereArgs: [entry.key],
+      );
+    }
+    for (final plugin in customPlugins) {
+      await executor.insert('image_plugins', {
+        'id': plugin.id,
+        'name': plugin.name,
+        'version': plugin.version,
+        'manifest_json': plugin.toManifestJson(),
+        'js_code': plugin.code,
+        'enabled': plugin.enabled ? 1 : 0,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+    final keep = <String>{
+      ...kBuiltinImagePluginIds,
+      ...builtinEnabled.keys,
+      ...customPlugins.map((plugin) => plugin.id),
+    };
+    final rows = await executor.query('image_plugins', columns: const ['id']);
+    for (final row in rows) {
+      final id = row['id'] as String;
+      if (!keep.contains(id)) {
+        await executor.delete(
+          'image_plugins',
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+      }
+    }
+  }
+
   Future<bool> isInUse(String id) async {
     final rows = await db.db.query(
       'image_providers',
@@ -104,9 +152,23 @@ class ImagePluginRepository {
   }
 
   /// 删除插件;仍被生图配置引用时抛 [StateError](UI 据文案提示先改配置)。
+  ///
+  /// 检查与删除放在同一事务:并发的 provider 保存/配置导入无法在两步之间
+  /// 插入引用,避免留下指向不存在插件的生图配置。
   Future<void> delete(String id) async {
-    if (await isInUse(id)) throw StateError('该插件仍被生图配置使用，请先删除或更改相关配置');
-    await db.db.delete('image_plugins', where: 'id = ?', whereArgs: [id]);
+    await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'image_providers',
+        columns: const ['id'],
+        where: 'plugin_id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        throw StateError('该插件仍被生图配置使用，请先删除或更改相关配置');
+      }
+      await txn.delete('image_plugins', where: 'id = ?', whereArgs: [id]);
+    });
   }
 
   static ImagePlugin _fromRow(Map<String, Object?> row) =>

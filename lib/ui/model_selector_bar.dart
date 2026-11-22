@@ -2,6 +2,10 @@
 ///
 /// 聊天页把 chip + 圆环内嵌在输入框右下角;独立条布局目前仅测试使用。
 /// 用量口径优先服务端上报的真实 token,字符估算(÷3.2)只作兜底。
+///
+/// 弹层形态按平台分流:移动端走底部抽屉(`showAppSheet`),桌面端走锚定
+/// 弹卡(`AppFlyoutAnchor`,原地向上展开、点卡外/Esc 关闭)。两条路径共用
+/// 同一份内容件([_ModelPickerBody]/[_UsagePanel]),选择与落库语义一致。
 library;
 
 import 'package:flutter/material.dart';
@@ -11,12 +15,23 @@ import '../models/llm_provider.dart';
 import '../models/llm_units.dart';
 import '../state/app_config_sync.dart';
 import '../state/providers.dart';
+import 'common/app_flyout.dart';
+import 'common/app_sheet.dart';
+import 'common/app_snack_bar.dart';
+import 'common/empty_state.dart';
+import 'common/layout_breakpoints.dart';
 import 'common/sheet_header.dart';
 import 'settings_screen.dart';
+import 'theme/app_theme.dart';
 import 'widgets/reasoning_slider.dart';
 
 /// 模型选择底单的最大高度占比:内容超出时列表在内部滚动,不占满屏高。
 const double _kPickerMaxHeightFactor = 0.6;
+
+/// 桌面弹卡定宽:模型卡放宽到能放下「上下文 · 输出」副标题,
+/// 用量卡放下「已用/容量(百分比)」整行。
+const double _kModelFlyoutWidth = 380;
+const double _kUsageFlyoutWidth = 320;
 
 /// 输入区上方的"模型选择条":左侧是当前模型 chip(点击弹出模型选择器 +
 /// 推理等级),右侧是当前上下文使用率的圆环(点击/悬停显示具体数值)。
@@ -55,7 +70,20 @@ class ModelSelectorBar extends ConsumerWidget {
 /// 当前模型选择 chip:点击弹出模型选择器 + 推理等级设置。聊天页内嵌在
 /// 输入框右下角时与独立条共用,保证交互与外观一致。
 class ModelSelectorChip extends ConsumerWidget {
-  const ModelSelectorChip({super.key});
+  const ModelSelectorChip({super.key, this.embedded = false});
+
+  /// 是否作为底栏「模型 | 推理」合并胶囊的一段嵌入。
+  ///
+  /// 嵌入时不自带底色与圆角:整颗胶囊由外层 Material 统一上色并裁切,
+  /// 模型段只画内容与左半的点击涟漪。两段各自铺色会在接缝处留下一条
+  /// 生硬的分界,合并成一层底色后再用发丝线分区更干净。
+  final bool embedded;
+
+  /// 胶囊内水平内边距:模型段与推理段共用,整颗胶囊左右留白对称。
+  static const EdgeInsets _facePadding = EdgeInsets.symmetric(
+    horizontal: 9,
+    vertical: 6,
+  );
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -68,53 +96,122 @@ class ModelSelectorChip extends ConsumerWidget {
     );
     final activeProvider = providers.where((p) => p.isActive).firstOrNull;
     final activeModel = activeProvider?.activeModel;
-    return InkWell(
-      key: const ValueKey('model_selector'),
-      borderRadius: BorderRadius.circular(14),
-      onTap: () => _openPicker(context, ref, providers, reasoning),
-      child: Container(
-        // 紧凑内边距、去掉尾部下拉箭头:窄屏上 chip 被压到很窄时也不会因
-        // 固定宽度图标溢出,文本横向省略。
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
-          borderRadius: BorderRadius.circular(26),
+    // 胶囊是整颗 pill:嵌入时只保留左半圆角,右缘由推理段补齐。
+    final borderRadius = embedded
+        ? const BorderRadius.horizontal(left: Radius.circular(26))
+        : BorderRadius.circular(26);
+    Widget chipFace() => _chipFace(context, scheme, activeModel);
+    final Widget face = embedded
+        ? Padding(padding: _facePadding, child: chipFace())
+        : Container(
+            padding: _facePadding,
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+              borderRadius: borderRadius,
+            ),
+            child: chipFace(),
+          );
+    // 独立 chip 的底色画在自己的 Container 上,涟漪会被盖住;只有嵌入
+    // 合并胶囊(Material 提供底色)时才需要悬停/按下的反馈。
+    final hoverColor = embedded ? scheme.primary.withValues(alpha: 0.06) : null;
+    final highlightColor = embedded
+        ? scheme.primary.withValues(alpha: 0.09)
+        : null;
+    if (isDesktopPlatformOf(context)) {
+      // 桌面端:锚定弹卡,chip 即锚点;选中模型后由内容件回调关闭并落库。
+      // 再次点击 chip 是 toggle(触发件与卡片同 TapRegion 组,点外关闭
+      // 不会先吃掉这次点击,需要手动关)。
+      return AppFlyoutAnchor(
+        width: _kModelFlyoutWidth,
+        builder: (context, handle) => InkWell(
+          key: const ValueKey('model_selector'),
+          borderRadius: borderRadius,
+          hoverColor: hoverColor,
+          highlightColor: highlightColor,
+          onTap: () {
+            if (handle.isOpen) {
+              handle.close();
+              return;
+            }
+            _openPicker(context, ref, providers, openFlyout: handle.open);
+          },
+          child: face,
         ),
-        child: Row(
+        flyoutBuilder: (context, handle) => Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Icon(Icons.smart_toy_outlined, size: 15, color: scheme.primary),
-            const SizedBox(width: 5),
+            const AppFlyoutHeader(
+              icon: Icons.smart_toy_outlined,
+              title: '选择模型',
+            ),
             Flexible(
-              child: Text(
-                activeModel?.displayName ?? '未选择模型',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: scheme.onSurfaceVariant,
+              // 内容件与移动端底单共用,自身不带外边距(底单外壳负责);
+              // 桌面弹卡这里补上与标题/其它弹卡行一致的水平留白。
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.lg,
+                  0,
+                  AppSpacing.lg,
+                  AppSpacing.sm,
+                ),
+                child: _ModelPickerBody(
+                  providers: providers,
+                  reasoning: reasoning,
+                  onPicked: (provider, model) {
+                    handle.close();
+                    _applyModelChoice(context, ref, provider, model);
+                  },
                 ),
               ),
             ),
           ],
         ),
-      ),
+      );
+    }
+    return InkWell(
+      key: const ValueKey('model_selector'),
+      borderRadius: borderRadius,
+      hoverColor: hoverColor,
+      highlightColor: highlightColor,
+      onTap: () => _openPicker(context, ref, providers),
+      child: face,
     );
   }
 
-  /// 弹出模型选择器;选中后落库 active 标记、重载运行链路配置(`BackendConfig`
-  /// 写入 `backendConfigProvider`)、刷新 provider 列表并回写文本配置文件。
-  /// 关闭底单或未选中时不写入任何状态。
-  ///
-  /// 落库与重载分两步:重载失败(`loadBackendConfig` 返回 null)时保留当前
-  /// backendConfigProvider 旧值,用户可再选一次,不会把运行链路置空。
+  /// chip 的视觉本体:图标 + 模型名,窄屏按模型名收缩省略。
+  Widget _chipFace(
+    BuildContext context,
+    ColorScheme scheme,
+    LlmModelEntry? activeModel,
+  ) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.smart_toy_outlined, size: 15, color: scheme.primary),
+        const SizedBox(width: 5),
+        Flexible(
+          child: Text(
+            activeModel?.displayName ?? '未选择模型',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 还没有任何 provider:选择器里没有可选项,直接把用户送到设置页,
+  /// 比打开一个只能看空列表的弹层少一步。
   Future<void> _openPicker(
     BuildContext context,
     WidgetRef ref,
-    List<LlmProviderConfig> providers,
-    ReasoningLevel reasoning,
-  ) async {
-    // 还没有任何 provider:选择器里没有可选项,直接把用户送到设置页,
-    // 比打开一个只能看空列表的底单少一步。
+    List<LlmProviderConfig> providers, {
+    void Function()? openFlyout,
+  }) async {
     if (providers.isEmpty) {
       await Navigator.push<void>(
         context,
@@ -122,17 +219,33 @@ class ModelSelectorChip extends ConsumerWidget {
       );
       return;
     }
-    final picked =
-        await showModalBottomSheet<(LlmProviderConfig, LlmModelEntry)>(
-          context: context,
-          isScrollControlled: true,
-          showDragHandle: true,
-          useSafeArea: true,
-          builder: (_) =>
-              ModelPickerSheet(providers: providers, reasoning: reasoning),
-        );
+    if (openFlyout != null) {
+      openFlyout();
+      return;
+    }
+    final reasoning = ref.read(appSettingsProvider).reasoningLevel;
+    final picked = await showAppSheet<(LlmProviderConfig, LlmModelEntry)>(
+      context,
+      showDragHandle: true,
+      builder: (_) =>
+          ModelPickerSheet(providers: providers, reasoning: reasoning),
+    );
     if (picked == null || !context.mounted) return;
-    final (provider, model) = picked;
+    await _applyModelChoice(context, ref, picked.$1, picked.$2);
+  }
+
+  /// 选中模型后的落库链:落 active 标记、重载运行链路配置(`BackendConfig`
+  /// 写入 `backendConfigProvider`)、刷新 provider 列表并回写文本配置文件。
+  ///
+  /// 落库与重载分两步:重载失败(`loadBackendConfig` 返回 null)时保留当前
+  /// backendConfigProvider 旧值,用户可再选一次,不会把运行链路置空。
+  Future<void> _applyModelChoice(
+    BuildContext context,
+    WidgetRef ref,
+    LlmProviderConfig provider,
+    LlmModelEntry model,
+  ) async {
+    await markAppConfigDirty(ref);
     await ref
         .read(llmProviderRepositoryProvider)
         .setActive(providerId: provider.id, modelId: model.id);
@@ -168,7 +281,7 @@ class ContextLink {
 
 /// 上下文使用率圆环:显示当前上下文 token 占模型上下文容量的比例。
 /// 有上轮真实计数时一律用真实值,只有拿不到锚点才退回字符估算。
-/// 悬停提示只显示已用百分比;点击底单展示容量用量与缓存命中率。
+/// 悬停提示只显示已用百分比;点击弹层展示容量用量与缓存命中率。
 /// 从当前 active model 读取容量,聊天页内嵌进输入框时与独立条共用。
 class ContextUsageRing extends ConsumerWidget {
   /// 上下文 token 口径(估算值 + 可选真实锚点)。
@@ -194,7 +307,9 @@ class ContextUsageRing extends ConsumerWidget {
     final used = real ?? usage.estimateTokens;
     final capacity = activeModel?.contextCapacity ?? 0;
     final usable = capacity > 0;
-    final fraction = usable ? (used / capacity).clamp(0.0, 1.0) : 0.0;
+    final fraction = usable
+        ? (used / capacity).clamp(0.0, 1.0).toDouble()
+        : 0.0;
     final theme = Theme.of(context);
     final color = !usable
         ? theme.colorScheme.outline
@@ -211,23 +326,14 @@ class ContextUsageRing extends ConsumerWidget {
         : null;
 
     final ringValue = usable ? fraction : 0.0;
-    final ring = Tooltip(
+    // Tooltip 的文案交给外层 Semantics 朗读,避免读屏重复播报;
+    // InkWell 仍提供点击动作与按钮角色。
+    Widget ringFace(VoidCallback? onTap) => Tooltip(
       message: percentLabel,
+      excludeFromSemantics: true,
       child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        onTap: () => showModalBottomSheet<void>(
-          context: context,
-          showDragHandle: true,
-          useSafeArea: true,
-          builder: (_) => _UsageSheet(
-            usedTokens: used,
-            capacity: capacity,
-            fraction: ringValue,
-            estimated: real == null,
-            cacheHitRate: cacheHitRate,
-            barColor: color,
-          ),
-        ),
+        onTap: onTap,
         child: Container(
           // 32 的逻辑命中区:26 的圆环在小屏上贴着发送键,容易点空。
           width: 32,
@@ -254,12 +360,59 @@ class ContextUsageRing extends ConsumerWidget {
         ),
       ),
     );
-    return ring;
+    if (isDesktopPlatformOf(context)) {
+      // 桌面端:锚定弹卡,圆环即锚点;明细面板纯展示,点卡外/Esc 关闭。
+      return AppFlyoutAnchor(
+        width: _kUsageFlyoutWidth,
+        alignment: AppFlyoutAlignment.end,
+        builder: (context, handle) => Semantics(
+          button: true,
+          label: percentLabel,
+          child: ringFace(handle.toggle),
+        ),
+        flyoutBuilder: (context, handle) => Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const AppFlyoutHeader(
+              icon: Icons.query_stats_outlined,
+              title: '上下文使用情况',
+            ),
+            _UsagePanel(
+              usedTokens: used,
+              capacity: capacity,
+              fraction: ringValue,
+              estimated: real == null,
+              cacheHitRate: cacheHitRate,
+              barColor: color,
+            ),
+          ],
+        ),
+      );
+    }
+    return Semantics(
+      button: true,
+      label: percentLabel,
+      child: ringFace(
+        () => showAppSheet<void>(
+          context,
+          isScrollControlled: false,
+          showDragHandle: true,
+          builder: (_) => _UsageSheet(
+            usedTokens: used,
+            capacity: capacity,
+            fraction: ringValue,
+            estimated: real == null,
+            cacheHitRate: cacheHitRate,
+            barColor: color,
+          ),
+        ),
+      ),
+    );
   }
 }
 
-/// 上下文用量的明细底单:左指标名、右「已用/容量(百分比)」,下方通栏
-/// 进度条,再补一行缓存命中率。数值口径与圆环一致(真实锚点优先)。
+/// 上下文用量的明细底单(移动端薄壳):标题 + 共享明细面板。
 class _UsageSheet extends StatelessWidget {
   final int usedTokens;
   final int capacity;
@@ -284,41 +437,85 @@ class _UsageSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const ChatSheetHeader(
+            icon: Icons.query_stats_outlined,
+            title: '上下文使用情况',
+          ),
+          const SizedBox(height: 4),
+          _UsagePanel(
+            usedTokens: usedTokens,
+            capacity: capacity,
+            fraction: fraction,
+            estimated: estimated,
+            cacheHitRate: cacheHitRate,
+            barColor: barColor,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 上下文用量的共享明细面板:左指标名、右「已用/容量(百分比)」,通栏
+/// 进度条,再补一行缓存命中率。数值口径与圆环一致(真实锚点优先)。
+/// 移动端由 [_UsageSheet] 包标题,桌面端由弹卡包 [AppFlyoutHeader]。
+class _UsagePanel extends StatelessWidget {
+  final int usedTokens;
+  final int capacity;
+  final double fraction;
+  final bool estimated;
+  final double? cacheHitRate;
+  final Color barColor;
+  const _UsagePanel({
+    required this.usedTokens,
+    required this.capacity,
+    required this.fraction,
+    required this.estimated,
+    required this.cacheHitRate,
+    required this.barColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const ChatSheetHeader(
-              icon: Icons.query_stats_outlined,
-              title: '上下文使用情况',
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.lg,
+        AppSpacing.xs,
+        AppSpacing.lg,
+        AppSpacing.lg,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _metricRow(context, label: '上下文容量', value: _capacityText()),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: fraction,
+              minHeight: 8,
+              color: barColor,
+              backgroundColor: scheme.surfaceContainerHighest,
             ),
-            const SizedBox(height: 4),
-            _metricRow(context, label: '上下文容量', value: _capacityText()),
-            const SizedBox(height: 8),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: fraction,
-                minHeight: 8,
-                color: barColor,
-                backgroundColor: scheme.surfaceContainerHighest,
-              ),
-            ),
-            const SizedBox(height: 16),
-            _metricRow(
-              context,
-              label: '缓存命中率',
-              value: cacheHitRate == null
-                  ? '—'
-                  : '${(cacheHitRate! * 100).toStringAsFixed(1)}%',
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 16),
+          _metricRow(
+            context,
+            label: '缓存命中率',
+            value: cacheHitRate == null
+                ? '—'
+                : '${(cacheHitRate! * 100).toStringAsFixed(1)}%',
+          ),
+        ],
       ),
     );
   }
@@ -357,14 +554,11 @@ class _UsageSheet extends StatelessWidget {
   }
 }
 
-/// 模型选择器底单:列出所有 provider 及其模型(单选当前模型),并让用户设置
-/// 推理等级。选择模型后以 `(provider, model)` 记录返回,落库由调用方完成。
+/// 模型选择器底单(移动端薄壳):标题 + 共享选择面板。桌面端不经此类,
+/// 直接由 [ModelSelectorChip] 打开 [_ModelPickerBody] 弹卡。
 ///
-/// 推理四档(关/低/中/高)只改设置、不关闭底单;后端各自映射为请求参数
-/// (OpenAI 兼容为 `reasoning_effort`,anthropic 为 thinking 预算),off 时
-/// 两者都不发送相关字段。底单高度贴合内容(模型少时不留空白),模型多时
-/// 封顶 0.6 屏高;列表行按需懒构建,不会一次性构建全部行。
-class ModelPickerSheet extends ConsumerStatefulWidget {
+/// 选择模型后以 `(provider, model)` 记录返回,落库由调用方完成。
+class ModelPickerSheet extends StatelessWidget {
   /// 可选 provider 目录快照;底单自身不刷新列表。
   final List<LlmProviderConfig> providers;
 
@@ -377,17 +571,62 @@ class ModelPickerSheet extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<ModelPickerSheet> createState() => _ModelPickerSheetState();
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      // 内容少时底单贴合内容(模型只有一两个时不再留半屏空白);
+      // 模型多时封顶 0.6 屏高,列表在封顶内滚动。
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * _kPickerMaxHeightFactor,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const ChatSheetHeader(
+              icon: Icons.smart_toy_outlined,
+              title: '选择模型',
+            ),
+            const SizedBox(height: 4),
+            Flexible(
+              child: _ModelPickerBody(
+                providers: providers,
+                reasoning: reasoning,
+                onPicked: (provider, model) =>
+                    Navigator.pop(context, (provider, model)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
-class _ModelPickerSheetState extends ConsumerState<ModelPickerSheet> {
-  late ReasoningLevel _reasoning;
+/// 模型选择器的共享选择面板:provider 分组模型列表(单选当前模型)+
+/// 底部推理等级滑块(改动即时落库,不关闭弹层)。选中后经 [onPicked] 交
+/// 宿主处理(移动端 pop 底单,桌面端关弹卡),落库由调用方完成。
+///
+/// 推理七档(关/最低/低/中/高/极高/最高)只改设置、不关闭弹层;后端各自映射为请求参数
+/// (OpenAI 兼容为 `reasoning_effort`,anthropic 为 thinking 预算),off 时
+/// 两者都不发送相关字段。模型多时列表在弹层封顶内滚动,行按需懒构建。
+class _ModelPickerBody extends ConsumerStatefulWidget {
+  final List<LlmProviderConfig> providers;
+  final ReasoningLevel reasoning;
+  final void Function(LlmProviderConfig provider, LlmModelEntry model) onPicked;
+  const _ModelPickerBody({
+    required this.providers,
+    required this.reasoning,
+    required this.onPicked,
+  });
 
   @override
-  void initState() {
-    super.initState();
-    _reasoning = widget.reasoning;
-  }
+  ConsumerState<_ModelPickerBody> createState() => _ModelPickerBodyState();
+}
+
+class _ModelPickerBodyState extends ConsumerState<_ModelPickerBody> {
+  late ReasoningLevel _reasoning = widget.reasoning;
 
   /// 切换推理等级:先落库,成功后才更新 provider 与弹层选中态(该设置不进
   /// 文本配置文件,文件只承载用户名与 provider 目录)。
@@ -405,9 +644,7 @@ class _ModelPickerSheetState extends ConsumerState<ModelPickerSheet> {
       );
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('保存推理等级失败,请重试')));
+      showAppSnack(context, '保存推理等级失败,请重试');
       return;
     }
     if (mounted) setState(() => _reasoning = level);
@@ -417,111 +654,91 @@ class _ModelPickerSheetState extends ConsumerState<ModelPickerSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    // 扁平化成「provider 分组头 / 模型行」,用 builder 懒构建;
-    // 标题与推理等级固定在列表上方,不随长列表滚走。
+    // 扁平化成「provider 分组头 / 模型行」,用 builder 懒构建。
     final rows = <(LlmProviderConfig, LlmModelEntry?)>[
       for (final p in widget.providers) ...[
         (p, null),
         for (final m in p.models) (p, m),
       ],
     ];
-    return SafeArea(
-      child: ConstrainedBox(
-        // 内容少时底单贴合内容(模型只有一两个时不再留半屏空白);
-        // 模型多时封顶 0.6 屏高,列表在封顶内滚动。
-        constraints: BoxConstraints(
-          maxHeight:
-              MediaQuery.sizeOf(context).height * _kPickerMaxHeightFactor,
-        ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const ChatSheetHeader(
-                icon: Icons.smart_toy_outlined,
-                title: '选择模型',
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '推理等级',
-                style: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              ReasoningSlider(value: _reasoning, onSelected: _saveReasoning),
-              const Divider(height: 24),
-              Flexible(
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  padding: EdgeInsets.zero,
-                  itemCount: widget.providers.isEmpty ? 1 : rows.length,
-                  itemBuilder: (context, index) {
-                    if (widget.providers.isEmpty) {
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Text(
-                          '还没有配置任何 provider,请先到设置里添加。',
-                          style: TextStyle(color: scheme.outline),
-                        ),
-                      );
-                    }
-                    final (p, m) = rows[index];
-                    if (m == null) {
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 8, bottom: 4),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.dns_outlined,
-                              size: 16,
-                              color: scheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              p.displayName,
-                              style: theme.textTheme.titleSmall?.copyWith(
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            if (p.isActive)
-                              Text(
-                                ' · 当前',
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: scheme.primary,
-                                ),
-                              ),
-                          ],
-                        ),
-                      );
-                    }
-                    return ListTile(
-                      dense: true,
-                      contentPadding: const EdgeInsets.only(left: 16),
-                      leading: Icon(
-                        (p.isActive && m.isActive)
-                            ? Icons.radio_button_checked
-                            : Icons.radio_button_unchecked,
-                        size: 20,
-                        color: (p.isActive && m.isActive)
-                            ? scheme.primary
-                            : scheme.outline,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Flexible(
+          child: ListView.builder(
+            shrinkWrap: true,
+            padding: EdgeInsets.zero,
+            itemCount: widget.providers.isEmpty ? 1 : rows.length,
+            itemBuilder: (context, index) {
+              if (widget.providers.isEmpty) {
+                return const EmptyState(
+                  compact: true,
+                  icon: Icons.dns_outlined,
+                  title: '还没有配置 Provider',
+                  message: '请先到设置里添加一个 LLM Provider。',
+                );
+              }
+              final (p, m) = rows[index];
+              if (m == null) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: 8, bottom: 4),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.dns_outlined,
+                        size: 16,
+                        color: scheme.onSurfaceVariant,
                       ),
-                      title: Text(m.displayName),
-                      subtitle: Text(
-                        '${m.modelId} · 上下文 ${formatTokenCount(m.contextCapacity)} tok'
-                        '${m.maxOutput != null ? ' · 输出 ${formatTokenCount(m.maxOutput!)} tok' : ''}',
+                      const SizedBox(width: 4),
+                      Text(
+                        p.displayName,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                      onTap: () => Navigator.pop(context, (p, m)),
-                    );
-                  },
+                      if (p.isActive)
+                        Text(
+                          ' · 当前',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: scheme.primary,
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              }
+              return ListTile(
+                dense: true,
+                contentPadding: const EdgeInsets.only(left: 16),
+                leading: Icon(
+                  (p.isActive && m.isActive)
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  size: 20,
+                  color: (p.isActive && m.isActive)
+                      ? scheme.primary
+                      : scheme.outline,
                 ),
-              ),
-            ],
+                title: Text(m.displayName),
+                subtitle: Text(
+                  '上下文 ${formatTokenCount(m.contextCapacity)} tok'
+                  '${m.maxOutput != null ? ' · 输出 ${formatTokenCount(m.maxOutput!)} tok' : ''}',
+                ),
+                onTap: () => widget.onPicked(p, m),
+              );
+            },
           ),
         ),
-      ),
+        const Divider(height: 24),
+        Text(
+          '推理等级',
+          style: theme.textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        ReasoningSlider(value: _reasoning, onSelected: _saveReasoning),
+      ],
     );
   }
 }

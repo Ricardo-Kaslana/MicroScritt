@@ -89,12 +89,13 @@ void main() {
 
       await tester.tap(find.text('hello'));
       await tester.pumpAndSettle();
-      // 助手消息:复制/编辑/删除/按要求重写/重新生成 5 个按钮都出现。
+      // 文本气泡只保留复制/编辑/多选;删除等完整动作在长按与三点菜单。
       expect(find.byIcon(Icons.copy_outlined), findsOneWidget);
       expect(find.byIcon(Icons.edit_outlined), findsOneWidget);
-      expect(find.byIcon(Icons.delete_outline), findsOneWidget);
-      expect(find.byIcon(Icons.edit_note), findsOneWidget);
-      expect(find.byIcon(Icons.refresh), findsOneWidget);
+      expect(find.byIcon(Icons.checklist_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.delete_outline), findsNothing);
+      expect(find.byIcon(Icons.edit_note), findsNothing);
+      expect(find.byIcon(Icons.refresh), findsNothing);
 
       await tester.tap(find.text('hello'));
       await tester.pumpAndSettle();
@@ -146,7 +147,9 @@ void main() {
     },
   );
 
-  testWidgets('user messages get resend instead of regenerate', (tester) async {
+  testWidgets('user text bubbles keep only copy, edit and multi-select', (
+    tester,
+  ) async {
     const msg = Message(
       sessionId: 1,
       role: 'user',
@@ -163,13 +166,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.copy_outlined), findsOneWidget);
     expect(find.byIcon(Icons.edit_outlined), findsOneWidget);
-    expect(find.byIcon(Icons.delete_outline), findsOneWidget);
-    // 用户消息:重新发送(与助手「重新生成」对偶),没有重新生成。
-    expect(find.byIcon(Icons.send_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.checklist_outlined), findsOneWidget);
+    // 重新发送与删除已收进长按/三点菜单,不再占底部操作排。
+    expect(find.byIcon(Icons.delete_outline), findsNothing);
+    expect(find.byIcon(Icons.send_outlined), findsNothing);
     expect(find.byIcon(Icons.refresh), findsNothing);
   });
 
-  testWidgets('user action buttons dispatch the resend action', (tester) async {
+  testWidgets('multi-select button dispatches the select action', (
+    tester,
+  ) async {
     const msg = Message(
       sessionId: 1,
       role: 'user',
@@ -185,10 +191,10 @@ void main() {
 
     await tester.tap(find.text('hi'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.send_outlined));
+    await tester.tap(find.byIcon(Icons.checklist_outlined));
     await tester.pumpAndSettle();
 
-    expect(actions, [MessageAction.resend]);
+    expect(actions, [MessageAction.select]);
   });
 
   testWidgets('action buttons dispatch the matching callback', (tester) async {
@@ -210,76 +216,17 @@ void main() {
 
     await tester.tap(find.byIcon(Icons.copy_outlined));
     await tester.tap(find.byIcon(Icons.edit_outlined));
-    await tester.tap(find.byIcon(Icons.delete_outline));
-    await tester.tap(find.byIcon(Icons.edit_note));
-    await tester.tap(find.byIcon(Icons.refresh));
+    await tester.tap(find.byIcon(Icons.checklist_outlined));
     await tester.pumpAndSettle();
 
     expect(actions, [
       MessageAction.copy,
       MessageAction.edit,
-      MessageAction.delete,
-      MessageAction.rewrite,
-      MessageAction.regenerate,
+      MessageAction.select,
     ]);
   });
 
-  testWidgets('rewrite action appears only on the latest assistant reply', (
-    tester,
-  ) async {
-    const user = Message(
-      sessionId: 1,
-      role: 'user',
-      content: 'hi',
-      id: 1,
-      seq: 0,
-    );
-    const olderReply = Message(
-      sessionId: 1,
-      role: 'assistant',
-      content: 'older',
-      id: 2,
-      seq: 1,
-    );
-    const secondUser = Message(
-      sessionId: 1,
-      role: 'user',
-      content: 'again',
-      id: 3,
-      seq: 2,
-    );
-    const latestReply = Message(
-      sessionId: 1,
-      role: 'assistant',
-      content: 'latest',
-      id: 4,
-      seq: 3,
-    );
-    await tester.pumpWidget(
-      _harness(
-        messages: const [user, olderReply, secondUser, latestReply],
-        onAction: (_, _) {},
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    // 更旧的助手回复后面还有用户消息:重写会连带剪掉它们,不提供入口。
-    await tester.tap(find.text('older'));
-    await tester.pumpAndSettle();
-    expect(find.byIcon(Icons.edit_note), findsNothing);
-
-    // 用户消息不是重写对象。
-    await tester.tap(find.text('again'));
-    await tester.pumpAndSettle();
-    expect(find.byIcon(Icons.edit_note), findsNothing);
-
-    // 最新一条助手回复才显示「按要求重写」。
-    await tester.tap(find.text('latest'));
-    await tester.pumpAndSettle();
-    expect(find.byIcon(Icons.edit_note), findsOneWidget);
-  });
-
-  testWidgets('pure image messages offer delete and image regeneration only', (
+  testWidgets('pure image messages offer download and multi-select only', (
     tester,
   ) async {
     const msg = Message(
@@ -288,56 +235,61 @@ void main() {
       content: '',
       id: 1,
       seq: 0,
-      imageBase64: 'aGVsbG8=',
+      imageUrl: 'https://example.com/image.png',
       imagePrompt: 'a cave',
-      hasImage: true,
     );
     final actions = <MessageAction>[];
     await tester.pumpWidget(
       _harness(messages: const [msg], onAction: (m, a) => actions.add(a)),
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
 
     // 图片本身点击打开全屏;点气泡边缘(图片外留白)选中并显示操作行。
     final imageRect = tester.getRect(find.byType(ClipRRect).first);
     await tester.tapAt(Offset(imageRect.left - 6, imageRect.center.dy));
-    await tester.pumpAndSettle();
-    expect(find.byIcon(Icons.delete_outline), findsOneWidget);
-    expect(find.byIcon(Icons.autorenew), findsOneWidget);
+    await tester.pump();
+    expect(find.byIcon(Icons.download_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.checklist_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.delete_outline), findsNothing);
+    expect(find.byIcon(Icons.autorenew), findsNothing);
     expect(find.byIcon(Icons.copy_outlined), findsNothing);
     expect(find.byIcon(Icons.edit_outlined), findsNothing);
     expect(find.byIcon(Icons.refresh), findsNothing);
     expect(find.byIcon(Icons.send_outlined), findsNothing);
 
-    await tester.tap(find.byIcon(Icons.autorenew));
-    expect(actions, [MessageAction.regenerateImage]);
-  });
-
-  testWidgets('image regeneration is hidden without a stored prompt', (
-    tester,
-  ) async {
-    const msg = Message(
-      sessionId: 1,
-      role: 'assistant',
-      content: 'caption',
-      id: 1,
-      seq: 0,
-      imageBase64: 'aGVsbG8=',
-      hasImage: true,
-    );
-    await tester.pumpWidget(
-      _harness(messages: const [msg], onAction: (_, _) {}),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('caption'));
-    await tester.pumpAndSettle();
-
-    expect(find.byIcon(Icons.refresh), findsOneWidget);
-    expect(find.byIcon(Icons.autorenew), findsNothing);
+    await tester.tap(find.byIcon(Icons.download_outlined));
+    expect(actions, [MessageAction.download]);
   });
 
   testWidgets(
-    'image regeneration shows a progress overlay and disables its action',
+    'image messages with captions still only offer download and multi-select',
+    (tester) async {
+      const msg = Message(
+        sessionId: 1,
+        role: 'assistant',
+        content: 'caption',
+        id: 1,
+        seq: 0,
+        imageUrl: 'https://example.com/image.png',
+      );
+      await tester.pumpWidget(
+        _harness(messages: const [msg], onAction: (_, _) {}),
+      );
+      await tester.pump();
+      await tester.tap(find.text('caption'));
+      await tester.pump();
+
+      expect(find.byIcon(Icons.download_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.checklist_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.refresh), findsNothing);
+      expect(find.byIcon(Icons.autorenew), findsNothing);
+      expect(find.byIcon(Icons.copy_outlined), findsNothing);
+      expect(find.byIcon(Icons.edit_outlined), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'image regeneration shows a progress overlay and keeps quick actions',
     (tester) async {
       const msg = Message(
         sessionId: 1,
@@ -345,9 +297,8 @@ void main() {
         content: '',
         id: 1,
         seq: 0,
-        imageBase64: 'aGVsbG8=',
+        imageUrl: 'https://example.com/image.png',
         imagePrompt: 'a cave',
-        hasImage: true,
       );
       await tester.pumpWidget(
         MaterialApp(
@@ -371,13 +322,10 @@ void main() {
       final imageRect = tester.getRect(find.byType(ClipRRect).first);
       await tester.tapAt(Offset(imageRect.left - 6, imageRect.center.dy));
       await tester.pump();
-      final button = tester.widget<IconButton>(
-        find.ancestor(
-          of: find.byIcon(Icons.autorenew),
-          matching: find.byType(IconButton),
-        ),
-      );
-      expect(button.onPressed, isNull);
+      // 重新生成已收进三点菜单;底部只保留图片快捷操作。
+      expect(find.byIcon(Icons.download_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.checklist_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.autorenew), findsNothing);
     },
   );
 
@@ -930,4 +878,229 @@ void main() {
     expect(top, greaterThanOrEqualTo(0));
     expect(top, lessThan(200));
   });
+
+  testWidgets(
+    'revealMessage converges on mixed-height history without ping-ponging',
+    (tester) async {
+      final key = GlobalKey<MessageListState>();
+      // 高度差异极大的历史(短文本 vs 上千字长文):懒加载下 maxScrollExtent
+      // 只是估算,定位必须靠多帧收敛。用户报告过这类列表里定位会在两条
+      // 消息间来回抖动。
+      final messages = List.generate(
+        300,
+        (i) => Message(
+          sessionId: 1,
+          role: i.isEven ? 'user' : 'assistant',
+          content: i % 7 == 0 ? 'long-$i ${'很长的正文用来撑高气泡。' * 120}' : 'msg-$i',
+          id: i + 1,
+          seq: i,
+        ),
+      );
+      await tester.pumpWidget(_harness(messages: messages, listKey: key));
+      await tester.pumpAndSettle();
+
+      var done = false;
+      bool? ok;
+      key.currentState!.revealMessage(80).then((value) {
+        ok = value;
+        done = true;
+      });
+      final offsets = <double>[];
+      for (var i = 0; i < 200 && !done; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+        offsets.add(
+          tester
+              .state<ScrollableState>(find.byType(Scrollable).first)
+              .position
+              .pixels,
+        );
+      }
+      expect(done, isTrue, reason: '定位应在有限帧内收敛');
+      expect(ok, isTrue);
+
+      // 允许一次估算过冲后的回对齐,但不允许反复反向(来回抖动)。
+      // 帧间还存在框架对 maxScrollExtent 的像素级修正(十几 px、肉眼不可
+      // 感知),以视口 5% 作为「真实反向」的门槛,捕捉的是跨消息的大幅
+      // 来回拉扯,而不是边界收紧。
+      final minDelta =
+          tester
+              .state<ScrollableState>(find.byType(Scrollable).first)
+              .position
+              .viewportDimension *
+          0.05;
+      var reversals = 0;
+      for (var i = 2; i < offsets.length; i++) {
+        final prev = offsets[i - 1] - offsets[i - 2];
+        final next = offsets[i] - offsets[i - 1];
+        if (prev.abs() > minDelta &&
+            next.abs() > minDelta &&
+            prev.sign != next.sign) {
+          reversals++;
+        }
+      }
+      expect(reversals, lessThanOrEqualTo(1));
+      expect(find.text('msg-79'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('msg-79')).dy,
+        inInclusiveRange(0, 200),
+      );
+    },
+  );
+
+  testWidgets('a newer reveal cancels the older convergence loop', (
+    tester,
+  ) async {
+    final key = GlobalKey<MessageListState>();
+    final messages = List.generate(
+      400,
+      (i) => Message(
+        sessionId: 1,
+        role: i.isEven ? 'user' : 'assistant',
+        content: 'msg-$i',
+        id: i + 1,
+        seq: i,
+      ),
+    );
+    await tester.pumpWidget(_harness(messages: messages, listKey: key));
+    await tester.pumpAndSettle();
+
+    // 连点两个条目(或搜索返回后立刻点导航):两个收敛循环若同时 jumpTo,
+    // 视口会在两个目标之间来回拉扯。后发起者必须作废先发起者。
+    final first = key.currentState!.revealMessage(20);
+    final second = key.currentState!.revealMessage(350);
+    var done = false;
+    second.then((_) => done = true);
+    for (var i = 0; i < 200 && !done; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(await first, isFalse);
+    expect(await second, isTrue);
+    expect(find.text('msg-349'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('msg-349')).dy,
+      inInclusiveRange(0, 200),
+    );
+  });
+
+  testWidgets('visibleUserMessageId tracks the real top visible user message', (
+    tester,
+  ) async {
+    final key = GlobalKey<MessageListState>();
+    final messages = List.generate(
+      200,
+      (i) => Message(
+        sessionId: 1,
+        role: i.isEven ? 'user' : 'assistant',
+        content: i % 5 == 0 ? 'msg-$i ${'长正文' * 80}' : 'msg-$i',
+        id: i + 1,
+        seq: i,
+      ),
+    );
+    await tester.pumpWidget(_harness(messages: messages, listKey: key));
+    await tester.pumpAndSettle();
+
+    // 偶数 i 是 user(id = i+1)。跳到 i=120 后,可见锚点必须是它自己 ——
+    // 导航卡片的高亮按这个 id 判断。
+    var done = false;
+    bool? ok;
+    key.currentState!.revealMessage(121).then((value) {
+      ok = value;
+      done = true;
+    });
+    for (var i = 0; i < 200 && !done; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(ok, isTrue);
+    expect(key.currentState!.visibleUserMessageId(), 121);
+
+    // 手动滚向历史后,锚点跟着离开目标、落到更旧的一条 user 上。
+    await tester.drag(find.byType(ListView), const Offset(0, 10000));
+    await tester.pumpAndSettle();
+    expect(key.currentState!.visibleUserMessageId(), lessThan(121));
+  });
+
+  testWidgets('consecutive reveals to adjacent early users both land', (
+    tester,
+  ) async {
+    final key = GlobalKey<MessageListState>();
+    final messages = List.generate(
+      200,
+      (i) => Message(
+        sessionId: 1,
+        role: i.isEven ? 'user' : 'assistant',
+        // 第一条撑到远超一屏,让第二条落在已布局窗口之外:连续跳转时
+        // 第二跳必须走「目标未布局」的推进路径。
+        content: i == 0 ? 'msg-$i ${'长正文用来把第一条撑高。' * 1000}' : 'msg-$i',
+        id: i + 1,
+        seq: i,
+      ),
+    );
+    await tester.pumpWidget(_harness(messages: messages, listKey: key));
+    await tester.pumpAndSettle();
+
+    Future<bool> reveal(int id) async {
+      var done = false;
+      bool? result;
+      key.currentState!.revealMessage(id).then((value) {
+        result = value;
+        done = true;
+      });
+      for (var i = 0; i < 200 && !done; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(done, isTrue, reason: 'id=$id 定位应在有限帧内收敛');
+      return result!;
+    }
+
+    // 第 1 条 user(id 1) → 第 2 条 user(id 3):第二次目标就在当前视口
+    // 下方。旧实现按可能反向的斜率估算推进,会在两个位置间来回抖且
+    // 最终到不了目标。
+    expect(await reveal(1), isTrue);
+    expect(key.currentState!.visibleUserMessageId(), 1);
+    expect(await reveal(3), isTrue);
+    expect(key.currentState!.visibleUserMessageId(), 3);
+    expect(find.byKey(const ValueKey('msg-3')), findsOneWidget);
+  });
+
+  testWidgets(
+    'revealMessage reaches a far target whose distance exceeds the estimated '
+    'scroll extent',
+    (tester) async {
+      final key = GlobalKey<MessageListState>();
+      // 前 150 条是长文、后 350 条是短文本:从底部往上定位时,窗口内的
+      // 平均高度与远端真实高度相差一个数量级,懒加载列表的 maxScrollExtent
+      // 远远低于目标真实位置。旧实现在估算边界处直接放弃(boundary 推进
+      // 小于 1px 即 return false),这类长文/图片混排会话永远跳不过去。
+      final messages = List.generate(
+        500,
+        (i) => Message(
+          sessionId: 1,
+          role: i.isEven ? 'user' : 'assistant',
+          content: i < 150 ? 'msg-$i ${'超长正文用来撑高气泡。' * 300}' : 'msg-$i',
+          id: i + 1,
+          seq: i,
+        ),
+      );
+      await tester.pumpWidget(_harness(messages: messages, listKey: key));
+      await tester.pumpAndSettle();
+      expect(find.text('msg-499'), findsOneWidget);
+
+      var done = false;
+      bool? ok;
+      key.currentState!.revealMessage(5).then((value) {
+        ok = value;
+        done = true;
+      });
+      for (var i = 0; i < 200 && !done; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(done, isTrue, reason: '跨上百条长文的定位应在有限帧内收敛');
+      expect(ok, isTrue, reason: '目标在估算 maxScrollExtent 之外也必须继续推进');
+      expect(find.byKey(const ValueKey('msg-5')), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('msg-5'))).dy,
+        inInclusiveRange(0, 200),
+      );
+    },
+  );
 }

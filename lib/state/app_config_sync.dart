@@ -1,13 +1,27 @@
-/// 配置文件回写:把用户名与 LLM provider 快照同步到 `microscritt-config.json`。
+/// 配置文件回写:把用户名、LLM 与生图配置快照同步到
+/// `microscritt-config.json`。
 ///
-/// 文件是启动时权威、运行期由 UI 写回;provider 为空(测试/未注入)时跳过,
-/// 写失败只打日志,绝不让配置文件问题影响数据库保存流程。
+/// 文件是启动时权威、运行期由 UI 写回;文件 provider 为空(测试/未注入)时
+/// 跳过,写失败只打日志并保留 dirty 标记,下次启动从数据库重建而不是应用旧文件。
 library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'providers.dart';
+
+/// 在数据库配置变更前标记配置文件待重建。
+///
+/// 写标记失败不阻断主保存流程;真正的一致性兜底仍是变更后的快照回写。
+Future<void> markAppConfigDirty(WidgetRef ref) async {
+  final file = ref.read(appConfigFileProvider);
+  if (file == null) return;
+  try {
+    await file.markDirty();
+  } catch (e) {
+    debugPrint('配置文件 dirty 标记失败:$e');
+  }
+}
 
 /// 把当前用户名与 LLM provider 快照写回固定配置文件。
 ///

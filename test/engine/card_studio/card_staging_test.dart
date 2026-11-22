@@ -56,11 +56,11 @@ void main() {
     });
     expect(staging.workingCard.name, '新卡');
     expect(staging.workingCard.alternateGreetings, ['g1', 'g2']);
-    expect(staging.workingCard.avatarBase64, isNull);
+    expect(staging.workingCard.avatarHash, isNull);
 
     staging.avatarPrompt = 'portrait';
-    staging.avatarBase64 = 'BASE64';
-    expect(staging.workingCard.avatarBase64, 'BASE64');
+    staging.avatarHash = 'asset-hash';
+    expect(staging.workingCard.avatarHash, 'asset-hash');
   });
 
   test('add/remove entries: temp negative id, appended position, delete cap ledger', () {

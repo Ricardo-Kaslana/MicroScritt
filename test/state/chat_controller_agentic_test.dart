@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';
+import 'package:microscritt/data/memory_repository.dart';
+import 'package:microscritt/data/message_repository.dart';
 import 'package:microscritt/data/session_repository.dart';
 import 'package:microscritt/data/variable_repository.dart';
 import 'package:microscritt/engine/background_status.dart';
@@ -256,5 +258,108 @@ void main() {
     gate.complete();
     await awaitBackground(container);
     expect(container.read(chatControllerProvider).backgroundStatus, BackgroundStatus.succeeded);
+  });
+
+  test('agentic suggestions publish after the round and dismiss drops the batch', () async {
+    final backend = ScriptedLlmBackend([
+      replyStep(),
+      toolStep('setNextSuggestions', {
+        'suggestions': ['我环顾四周,寻找声音的来源。', '我后退半步,压低呼吸。'],
+      }),
+      toolStep('finish', const {}, id: 'c2'),
+    ]);
+    final container = makeContainer(
+      backend,
+      settings: const AppSettings(
+        backgroundMode: BackgroundMode.agentic,
+        backgroundNextSuggestions: true,
+      ),
+    );
+    addTearDown(container.dispose);
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(sessionId: sessionId, character: const CharacterCard(name: 'Alice'));
+    await controller.send('hi');
+    await awaitBackground(container);
+
+    final state = container.read(chatControllerProvider);
+    expect(state.nextSuggestions, [
+      '我环顾四周,寻找声音的来源。',
+      '我后退半步,压低呼吸。',
+    ]);
+    expect(state.backgroundSummary, isNot(contains('建议')));
+
+    controller.dismissNextSuggestions();
+    expect(container.read(chatControllerProvider).nextSuggestions, isEmpty);
+  });
+
+  test('memory proposal surfaces for review; accept writes the library only', () async {
+    final memory = MemoryRepository(db);
+    await memory.set(sessionId, 'old fact');
+    final backend = ScriptedLlmBackend([
+      replyStep(),
+      toolStep('proposeMemory', {'content': 'new fact'}),
+      toolStep('finish', const {}, id: 'c2'),
+    ]);
+    final container = makeContainer(
+      backend,
+      settings: const AppSettings(backgroundMode: BackgroundMode.agentic),
+    );
+    addTearDown(container.dispose);
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(sessionId: sessionId, character: const CharacterCard(name: 'Alice'));
+    await controller.send('hi');
+    await awaitBackground(container);
+
+    var state = container.read(chatControllerProvider);
+    expect(state.memoryProposal, 'new fact');
+    expect((await memory.bySession(sessionId)).single.content, 'old fact');
+    expect(state.frozenMemory, 'old fact');
+
+    await controller.acceptMemoryProposal();
+    state = container.read(chatControllerProvider);
+    expect(state.memoryProposal, isNull);
+    expect((await memory.bySession(sessionId)).single.content, 'new fact');
+    // 记忆库已更新,但上下文第 0 条仍冻结旧版,等待显式「应用到上下文」。
+    expect(state.frozenMemory, 'old fact');
+  });
+
+  test('pending variable injection is written as an attachment before the next user message', () async {
+    final backend = ScriptedLlmBackend([
+      replyStep(),
+      toolStep('setVariables', {'variables': {'hp': '8'}}),
+      toolStep('setVariableInjection', {'keys': ['hp']}),
+      toolStep('finish', const {}, id: 'c2'),
+      replyStep(),
+      toolStep('finish', const {}, id: 'c3'),
+    ]);
+    final container = makeContainer(
+      backend,
+      settings: const AppSettings(
+        backgroundMode: BackgroundMode.agentic,
+        backgroundVariableInjection: true,
+      ),
+    );
+    addTearDown(container.dispose);
+    final controller = container.read(chatControllerProvider.notifier);
+    await controller.load(sessionId: sessionId, character: const CharacterCard(name: 'Alice'));
+    await controller.send('hi');
+    await awaitBackground(container);
+    expect(container.read(chatControllerProvider).backgroundSummary, contains('注入变量 hp'));
+
+    await controller.send('again');
+    await awaitBackground(container);
+
+    final rows = await MessageRepository(db).bySession(sessionId);
+    final injectionIndex = rows.indexWhere(
+      (m) => (m.refId ?? '').startsWith('notice:varinj:'),
+    );
+    expect(injectionIndex, greaterThanOrEqualTo(0));
+    final injection = rows[injectionIndex];
+    expect(injection.content, contains('- hp: 8'));
+    expect(injection.content, contains('<system-reminder>'));
+    final nextUserIndex = rows.indexWhere(
+      (m) => m.role == 'user' && m.content == 'again',
+    );
+    expect(nextUserIndex, injectionIndex + 1);
   });
 }

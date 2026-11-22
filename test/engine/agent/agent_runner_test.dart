@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/backend/upstream_error.dart';
+import 'package:microscritt/engine/agent/agent_action.dart';
 import 'package:microscritt/engine/agent/agent_events.dart';
 import 'package:microscritt/engine/agent/agent_runner.dart';
 import 'package:microscritt/engine/agent/agent_tool.dart';
@@ -162,6 +163,102 @@ void main() {
     expect(result, isA<AgentRunSuccess>());
     // finish 之前的调用照常执行,其后的忽略。
     expect(log, ['setVariables', 'readVariables']);
+  });
+
+  test('pure tool dedupes identical calls within a run, key order-insensitive', () async {
+    var executions = 0;
+    final reg = AgentToolRegistry();
+    reg.register(AgentTool(
+      tool: const LlmTool(
+        name: 'searchHistory',
+        description: 'search',
+        parameters: {'type': 'object'},
+      ),
+      pure: true,
+      execute: (args) async {
+        executions++;
+        return 'RESULT ${args['query']}';
+      },
+    ));
+    final backend = ScriptedLlmBackend([
+      [
+        ToolCallsEvent([
+          ToolCall(
+            id: 'a',
+            name: 'searchHistory',
+            arguments: jsonEncode({'query': 'dragon', 'limit': 5}),
+          ),
+          ToolCall(
+            id: 'b',
+            name: 'searchHistory',
+            arguments: jsonEncode({'limit': 5, 'query': 'dragon'}),
+          ),
+        ]),
+        const DoneEvent(),
+      ],
+      finishStep(),
+    ]);
+    await AgentRunner.run(spec(backend, reg: reg));
+
+    expect(executions, 1);
+    final msgs = backend.requests[1].messages;
+    expect(msgs[2].content, 'RESULT dragon');
+    expect(msgs[3].content, contains('already shown above'));
+  });
+
+  test('non-pure tools never dedupe: state may have changed between calls', () async {
+    final log = <String>[];
+    final backend = ScriptedLlmBackend([
+      toolStep([call('readVariables'), call('readVariables')]),
+      finishStep(),
+    ]);
+    await AgentRunner.run(spec(backend, reg: registry(log: log)));
+
+    expect(log, ['readVariables', 'readVariables']);
+    final msgs = backend.requests[1].messages;
+    expect(msgs[2].content, '{}');
+    expect(msgs[3].content, '{}');
+  });
+
+  group('decodeToolArguments', () {
+    test('empty, whitespace and literal null normalize to an empty object', () {
+      expect(decodeToolArguments(''), isEmpty);
+      expect(decodeToolArguments('   '), isEmpty);
+      expect(decodeToolArguments('\n\t '), isEmpty);
+      expect(decodeToolArguments('null'), isEmpty);
+      expect(decodeToolArguments(' null '), isEmpty);
+      expect(decodeToolArguments('{}'), isEmpty);
+      expect(decodeToolArguments('{"a":1}'), {'a': 1});
+    });
+
+    test('non-empty malformed or non-object JSON stays invalid', () {
+      expect(decodeToolArguments('{'), isNull);
+      expect(decodeToolArguments('not json'), isNull);
+      expect(decodeToolArguments('[]'), isNull);
+      expect(decodeToolArguments('"text"'), isNull);
+      expect(decodeToolArguments('42'), isNull);
+    });
+  });
+
+  test('no-arg tools execute with empty/null arguments instead of tripping the guardrail',
+      () async {
+    final log = <String>[];
+    final backend = ScriptedLlmBackend([
+      [
+        ToolCallsEvent([
+          const ToolCall(id: 'a', name: 'readVariables', arguments: ''),
+          const ToolCall(id: 'b', name: 'readVariables', arguments: 'null'),
+          const ToolCall(id: 'c', name: 'readVariables', arguments: '   '),
+        ]),
+        const DoneEvent(),
+      ],
+      finishStep(),
+    ]);
+    final result = await AgentRunner.run(spec(backend, reg: registry(log: log)));
+
+    expect(result, isA<AgentRunSuccess>());
+    expect(log, ['readVariables', 'readVariables', 'readVariables']);
+    expect(backend.calls, 2);
   });
 
   test('bad arguments are fed back as tool_result and self-correct next step', () async {

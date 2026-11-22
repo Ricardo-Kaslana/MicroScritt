@@ -14,7 +14,11 @@ class AppSettingsRepository {
   /// 不允许脏数据阻断启动水合。
   Future<AppSettings> load() async {
     final rows = await db.db.query('app_settings', where: 'id = 1');
-    if (rows.isEmpty) return const AppSettings();
+    if (rows.isEmpty) {
+      const settings = AppSettings();
+      _syncImageCompression(settings);
+      return settings;
+    }
     final raw = rows.first['theme_mode'] as String? ?? '';
     final mode =
         AppThemeMode.values.where((m) => m.name == raw).firstOrNull ??
@@ -43,7 +47,10 @@ class AppSettingsRepository {
     final charAnchorRaw = rows.first['background_character_anchor'];
     final memAnchorRaw = rows.first['background_memory_anchor'];
     final deletionConfirmRaw = rows.first['background_deletion_confirm'];
-    return AppSettings(
+    final varInjectionRaw = rows.first['background_variable_injection'];
+    final nextSuggestionsRaw = rows.first['background_next_suggestions'];
+    final compressRaw = rows.first['compress_images'];
+    final settings = AppSettings(
       themeMode: mode,
       backgroundEnabled: enabled,
       features: BackgroundFeatures.fromMask(
@@ -79,12 +86,32 @@ class AppSettingsRepository {
       backgroundDeletionConfirm: deletionConfirmRaw is int
           ? deletionConfirmRaw != 0
           : false,
+      // Agentic 增强是显式取舍:缺失/脏值一律关闭。
+      backgroundVariableInjection: varInjectionRaw is int
+          ? varInjectionRaw != 0
+          : false,
+      backgroundNextSuggestions: nextSuggestionsRaw is int
+          ? nextSuggestionsRaw != 0
+          : false,
+      // 脏值/缺失回落关闭:压缩是显式取舍,不做隐式行为变化。
+      compressImages: compressRaw is int ? compressRaw != 0 : false,
     );
+    _syncImageCompression(settings);
+    return settings;
   }
 
-  /// 整行 upsert(id 恒为 1)。
+  /// 整行 upsert(id 恒为 1);写入成功后同步资产库的入库压缩策略。
   Future<void> save(AppSettings s) async {
-    await db.db.insert('app_settings', {
+    await db.db.transaction((txn) => saveInTransaction(txn, s));
+    _syncImageCompression(s);
+  }
+
+  /// 在调用方事务内整行 upsert;不自行开启/提交事务。
+  Future<void> saveInTransaction(
+    DatabaseExecutor executor,
+    AppSettings s,
+  ) async {
+    await executor.insert('app_settings', {
       'id': 1,
       'theme_mode': s.themeMode.name,
       'background_enabled': s.backgroundEnabled ? 1 : 0,
@@ -105,6 +132,27 @@ class AppSettingsRepository {
       'background_character_anchor': s.backgroundCharacterAnchor ? 1 : 0,
       'background_memory_anchor': s.backgroundMemoryAnchor ? 1 : 0,
       'background_deletion_confirm': s.backgroundDeletionConfirm ? 1 : 0,
+      'background_variable_injection': s.backgroundVariableInjection ? 1 : 0,
+      'background_next_suggestions': s.backgroundNextSuggestions ? 1 : 0,
+      'compress_images': s.compressImages ? 1 : 0,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  /// 仅更新后台模型锚点(配置导入 remap 用):整份 `saveInTransaction` 会把
+  /// 事务前读到的设置覆盖回去,冲掉期间其它设置改动。
+  Future<void> setBackgroundModelIdInTransaction(
+    DatabaseExecutor executor,
+    int? modelId,
+  ) async {
+    await executor.update('app_settings', {
+      'background_model_id': modelId,
+    }, where: 'id = 1');
+  }
+
+  /// 把设置同步到资产库的入库策略;压缩只影响写入前,不做历史回填。
+  void _syncImageCompression(AppSettings s) {
+    db.images.compressMaxEdge = s.compressImages
+        ? AppSettings.imageCompressLongEdge
+        : 0;
   }
 }

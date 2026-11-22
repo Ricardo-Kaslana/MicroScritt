@@ -9,11 +9,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/app_settings.dart';
 import '../state/providers.dart';
+import 'common/form_row.dart';
 import 'common/info_button.dart';
 import 'common/section_header.dart';
 import 'hooks_screen.dart';
 import 'prompt_items_screen.dart';
 import 'regex_scripts_screen.dart';
+import 'settings/image_storage_section.dart';
 import 'settings/settings_actions.dart';
 import 'settings/settings_desktop_screen.dart';
 import 'settings/settings_layout.dart';
@@ -87,25 +89,34 @@ class _SettingsMobileScreenState extends ConsumerState<SettingsMobileScreen> {
           const SectionHeader('外观', icon: Icons.palette_outlined),
           GroupCard(
             children: [
-              // 主题:横向三段切到宽度吃不满,直接铺整张卡,顶部留 12 padding 与卡片边缘呼吸。
+              // 主题:三段等分铺满整张卡。移动端不显示图标与选中勾,并把段内
+              // 水平 padding 收紧 —— 带图标时窄屏/大字号会撑出卡片,只能靠
+              // 横向滚动兜底;现在超出段宽的文字在段内换行(按钮变高),不会
+              // 再产生横向滚动。
               Padding(
                 padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
                 child: SegmentedButton<AppThemeMode>(
+                  key: const ValueKey('settings_theme_selector'),
+                  expandedInsets: EdgeInsets.zero,
+                  showSelectedIcon: false,
+                  style: const ButtonStyle(
+                    visualDensity: VisualDensity.compact,
+                    padding: WidgetStatePropertyAll(
+                      EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                  ),
                   segments: const [
                     ButtonSegment(
                       value: AppThemeMode.system,
                       label: Text('跟随系统'),
-                      icon: Icon(Icons.brightness_auto),
                     ),
                     ButtonSegment(
                       value: AppThemeMode.light,
                       label: Text('浅色'),
-                      icon: Icon(Icons.light_mode_outlined),
                     ),
                     ButtonSegment(
                       value: AppThemeMode.dark,
                       label: Text('深色'),
-                      icon: Icon(Icons.dark_mode_outlined),
                     ),
                   ],
                   selected: {appSettings.themeMode},
@@ -114,54 +125,26 @@ class _SettingsMobileScreenState extends ConsumerState<SettingsMobileScreen> {
               ),
               // 聊天背景:Switch 在标题行;模糊度滑块在副标题位置紧贴开关,绑成一项。
               // 关闭时整段连滑块一起置灰;拖动只更新内存(即时反馈),松手才落库。
-              SwitchListTile(
+              SettingsSwitchTile(
                 contentPadding: const EdgeInsets.symmetric(horizontal: 14),
-                secondary: const Icon(Icons.wallpaper_outlined),
-                title: const Text('聊天背景'),
-                subtitle: const Text('开启后聊天页显示角色卡背景图;未设置背景图时使用角色头像'),
+                icon: Icons.wallpaper_outlined,
+                title: '聊天背景',
+                description: '开启后聊天页显示角色卡背景图;未设置背景图时使用角色头像',
                 value: appSettings.chatBackgroundEnabled,
                 onChanged: (v) => saveChatBackgroundEnabled(ref, v),
               ),
-              // 模糊度行:ListTile 的 subtitle 槽位放「实时数字 + Slider」,开关关闭时禁用。
-              // Row 排版与「内容与扩展」卡的 ListTile 视觉一致;数字用 onSurfaceVariant
-              // 弱化,滑块横向吃满,既保持卡片基线又不让滑块独立占整行。
-              ListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 14),
-                leading: const SizedBox.shrink(),
-                title: const Text('背景模糊度'),
-                subtitle: Row(
-                  children: [
-                    Text(
-                      '${backgroundBlur.round()}',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: appSettings.chatBackgroundEnabled
-                            ? Theme.of(context).colorScheme.onSurfaceVariant
-                            : Theme.of(context).colorScheme.onSurfaceVariant
-                                  .withValues(alpha: 0.5),
-                      ),
-                    ),
-                    Expanded(
-                      child: Slider(
-                        key: const ValueKey('chatBackgroundBlurSlider'),
-                        value: backgroundBlur,
-                        min: 0,
-                        max: 32,
-                        onChanged: appSettings.chatBackgroundEnabled
-                            ? (v) =>
-                                  ref
-                                          .read(
-                                            chatBackgroundBlurProvider.notifier,
-                                          )
-                                          .state =
-                                      v
-                            : null,
-                        onChangeEnd: appSettings.chatBackgroundEnabled
-                            ? (v) => saveChatBackgroundBlur(ref, v)
-                            : null,
-                      ),
-                    ),
-                  ],
-                ),
+              // 模糊度行:滑块与实时数字共用 subtitle 槽位,开关关闭时整段禁用。
+              SettingsSliderTile(
+                title: '背景模糊度',
+                valueLabel: '${backgroundBlur.round()}',
+                value: backgroundBlur,
+                min: 0,
+                max: 32,
+                sliderKey: const ValueKey('chatBackgroundBlurSlider'),
+                enabled: appSettings.chatBackgroundEnabled,
+                onChanged: (v) =>
+                    ref.read(chatBackgroundBlurProvider.notifier).state = v,
+                onChangeEnd: (v) => saveChatBackgroundBlur(ref, v),
               ),
             ],
           ),
@@ -170,79 +153,49 @@ class _SettingsMobileScreenState extends ConsumerState<SettingsMobileScreen> {
           const SectionHeader('对话与后台', icon: Icons.tune_outlined),
           GroupCard(
             children: [
-              SwitchListTile(
+              SettingsSwitchTile(
+                // 三挡/重试/兜底细节收进标题旁的说明弹层,副标题只留一行状态。
                 contentPadding: const EdgeInsets.symmetric(horizontal: 14),
-                secondary: const Icon(Icons.compress_outlined),
-                // 标题旁挂 InfoButton:三挡/重试/兜底细节收进弹层,不在设置页
-                // 铺长段说明;副标题保持默认灰,不再用整行 primary 色链接样式。
-                title: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('上下文自动压缩'),
-                    const SizedBox(width: 2),
-                    InfoButton(
-                      onTap: () => showAutoCompactHelpDialog(context, ref),
-                    ),
-                  ],
+                icon: Icons.compress_outlined,
+                title: '上下文自动压缩',
+                titleTrailing: InfoButton(
+                  onTap: () => showAutoCompactHelpDialog(context, ref),
                 ),
-                subtitle: Text('按窗口占用率自动压缩 · 触发线 $compactSoftPct%'),
+                description: '按窗口占用率自动压缩 · 触发线 $compactSoftPct%',
                 value: appSettings.autoCompactEnabled,
-                onChanged: (v) =>
-                    saveTurnSettings(ref, autoCompactEnabled: v),
+                onChanged: (v) => saveTurnSettings(ref, autoCompactEnabled: v),
               ),
-              // 触发线行:与「背景模糊度」同款,标题 + 值 + 滑块;行为说明与
-              // 派生强制线细节收进标题旁「查看说明」弹层。关闭自动压缩时整段
-              // 置灰;拖动只更新内存(即时反馈),松手才落库。
-              ListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 14),
-                leading: const SizedBox.shrink(),
-                title: const Text('自动压缩触发线'),
-                subtitle: Row(
-                  children: [
-                    Text(
-                      '$compactSoftPct%',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: appSettings.autoCompactEnabled
-                            ? Theme.of(context).colorScheme.onSurfaceVariant
-                            : Theme.of(context).colorScheme.onSurfaceVariant
-                                  .withValues(alpha: 0.5),
-                      ),
-                    ),
-                    Expanded(
-                      child: Slider(
-                        key: const ValueKey('autoCompactThresholdSlider'),
-                        value: compactThreshold,
-                        min: AppSettings.minAutoCompactThreshold,
-                        max: AppSettings.maxAutoCompactThreshold,
-                        divisions: 12,
-                        label: '$compactSoftPct%',
-                        onChanged: appSettings.autoCompactEnabled
-                            ? (v) => setState(
-                                () => _compactThresholdDraft =
-                                    AppSettings.clampAutoCompactThreshold(v),
-                              )
-                            : null,
-                        onChangeEnd: appSettings.autoCompactEnabled
-                            ? (v) {
-                                setState(() => _compactThresholdDraft = null);
-                                saveTurnSettings(
-                                  ref,
-                                  autoCompactThreshold:
-                                      AppSettings.clampAutoCompactThreshold(v),
-                                );
-                              }
-                            : null,
-                      ),
-                    ),
-                  ],
+              // 触发线行:拖动只更新内存(即时反馈),松手才落库。
+              SettingsSliderTile(
+                title: '自动压缩触发线',
+                valueLabel: '$compactSoftPct%',
+                value: compactThreshold,
+                min: AppSettings.minAutoCompactThreshold,
+                max: AppSettings.maxAutoCompactThreshold,
+                divisions: 12,
+                sliderLabel: '$compactSoftPct%',
+                sliderKey: const ValueKey('autoCompactThresholdSlider'),
+                enabled: appSettings.autoCompactEnabled,
+                onChanged: (v) => setState(
+                  () => _compactThresholdDraft =
+                      AppSettings.clampAutoCompactThreshold(v),
                 ),
+                onChangeEnd: (v) {
+                  setState(() => _compactThresholdDraft = null);
+                  saveTurnSettings(
+                    ref,
+                    autoCompactThreshold: AppSettings.clampAutoCompactThreshold(
+                      v,
+                    ),
+                  );
+                },
               ),
               ListTile(
                 contentPadding: const EdgeInsets.symmetric(horizontal: 14),
                 leading: const Icon(Icons.attach_file),
                 title: const Text('单轮附件上限'),
                 subtitle: const Text('每轮最多自动注入的世界书附件条数 · @技能与通知不受限'),
-                trailing: DropdownButton<int>(
+                trailing: SettingsDropdown<int>(
                   value:
                       const [
                         0,
@@ -253,14 +206,6 @@ class _SettingsMobileScreenState extends ConsumerState<SettingsMobileScreen> {
                       ].contains(appSettings.maxAutoAttachments)
                       ? appSettings.maxAutoAttachments
                       : 5,
-                  // 行尾值选择下拉:与全局菜单语言一致——无下划线、白面圆角弹出、灰色 chevron。
-                  underline: const SizedBox.shrink(),
-                  dropdownColor: scheme.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  menuMaxHeight: 240,
-                  style: TextStyle(fontSize: 14, color: scheme.onSurface),
-                  iconSize: 20,
-                  iconEnabledColor: scheme.onSurfaceVariant,
                   items: const [
                     DropdownMenuItem(value: 0, child: Text('关闭')),
                     DropdownMenuItem(value: 2, child: Text('最多 2 条')),
@@ -327,9 +272,7 @@ class _SettingsMobileScreenState extends ConsumerState<SettingsMobileScreen> {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (_) => const RegexScriptsScreen(),
-                  ),
+                  MaterialPageRoute(builder: (_) => const RegexScriptsScreen()),
                 ),
               ),
             ],
@@ -347,13 +290,15 @@ class _SettingsMobileScreenState extends ConsumerState<SettingsMobileScreen> {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (_) => const UsageStatsScreen(),
-                  ),
+                  MaterialPageRoute(builder: (_) => const UsageStatsScreen()),
                 ),
               ),
             ],
           ),
+          const SizedBox(height: 16),
+          // ===== 图片与存储 =====
+          const SectionHeader('图片与存储', icon: Icons.cleaning_services_outlined),
+          const ImageStorageSection(),
           const SizedBox(height: 16),
           // ===== 配置 =====
           // 用户名与 LLM 后端另存一份纯文本配置文件(启动读取、修改回写),
@@ -364,13 +309,16 @@ class _SettingsMobileScreenState extends ConsumerState<SettingsMobileScreen> {
               ListTile(
                 leading: const Icon(Icons.file_download_outlined),
                 title: const Text('导出配置'),
-                subtitle: const Text('用户名与 LLM 后端(含 API Key,请妥善保管)'),
+                subtitle: const Text(
+                  '用户名、LLM、生图配置、插件代码与画风'
+                  '(含明文 API Key,请妥善保管)',
+                ),
                 onTap: () => exportSettingsConfig(context, ref),
               ),
               ListTile(
                 leading: const Icon(Icons.file_upload_outlined),
                 title: const Text('导入配置'),
-                subtitle: const Text('从 JSON 文件恢复,覆盖当前用户名与 LLM 后端'),
+                subtitle: const Text('从 JSON 文件恢复完整配置并覆盖对应配置节'),
                 onTap: () => importSettingsConfig(context, ref),
               ),
               ListTile(
@@ -400,9 +348,9 @@ class _SettingsMobileScreenState extends ConsumerState<SettingsMobileScreen> {
                 child: Text(
                   'MicroScritt · 移动端优先的极简 AI 角色扮演应用。\n'
                   '纯客户端运行:对话、生图、Hook 与数据全部在本地,LLM 只接收纯文本上下文。',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: scheme.outline),
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ),
             ],

@@ -5,20 +5,26 @@ library;
 ///
 /// 支持纯数字(128000)以及带后缀的写法:`k`/`K`(×1000)、`m`/`M`(×1,000,000)。
 /// 例:"128000"→128000, "128k"/"128K"→128000, "1m"/"1M"→1000000,"256k"→256000。
-/// 无法解析(空/非法)返回 null。
+/// 无法解析(空/非法)返回 null。0、负值、非有限数与超出合理输入上限
+/// (>10 亿,已足以覆盖任何真实模型)同样返回 null —— 调用方据此给出
+/// 可见错误;绝不把 Infinity 传给 `round()`(会抛 UnsupportedError)。
 int? parseTokenShorthand(String raw) {
   final s = raw.trim().toLowerCase();
   if (s.isEmpty) return null;
   final match = RegExp(r'^(\d+(?:\.\d+)?)([km]?)$').firstMatch(s);
   if (match == null) return null;
-  final number = double.parse(match.group(1)!);
+  final number = double.tryParse(match.group(1)!);
+  if (number == null || !number.isFinite) return null;
   final suffix = match.group(2)!;
   final multiplier = switch (suffix) {
     'k' => 1000,
     'm' => 1000000,
     _ => 1,
   };
-  return (number * multiplier).round();
+  final scaled = number * multiplier;
+  if (!scaled.isFinite || scaled <= 0 || scaled > 1000000000) return null;
+  final tokens = scaled.round();
+  return tokens > 0 ? tokens : null;
 }
 
 /// 把 token 数格式化为简洁的 K / M 人类可读串(供 ring 数值、展示)。

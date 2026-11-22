@@ -21,6 +21,7 @@ class BackgroundSummaryParts {
   final List<BackgroundVariableChange> updates;
   final List<String> removed;
   final List<String> proposed;
+  final List<String> injected;
   final List<String> auditStats;
 
   const BackgroundSummaryParts._({
@@ -31,6 +32,7 @@ class BackgroundSummaryParts {
     this.updates = const [],
     this.removed = const [],
     this.proposed = const [],
+    this.injected = const [],
     this.auditStats = const [],
   });
 
@@ -93,6 +95,7 @@ class BackgroundSummaryParts {
     final updates = <BackgroundVariableChange>[];
     final removed = <String>[];
     final proposed = <String>[];
+    final injected = <String>[];
     String? imageState;
     var recognized = false;
     for (final segment in text.split(' · ')) {
@@ -130,6 +133,13 @@ class BackgroundSummaryParts {
         recognized = true;
         continue;
       }
+      if (part.startsWith('注入变量 ')) {
+        final names = _names(part.substring('注入变量 '.length));
+        if (names.isEmpty) return null;
+        injected.addAll(names);
+        recognized = true;
+        continue;
+      }
       return null;
     }
     if (!recognized) return null;
@@ -140,6 +150,7 @@ class BackgroundSummaryParts {
       updates: updates,
       removed: removed,
       proposed: proposed,
+      injected: injected,
     );
   }
 

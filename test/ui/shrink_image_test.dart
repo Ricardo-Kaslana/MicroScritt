@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 import 'package:microscritt/data/shrink_image.dart';
 
 /// 用 dart:ui 画一张纯色 PNG(文件很小,但解压后像素很多 —— 刚好覆盖
@@ -106,6 +107,38 @@ void main() {
       final notImage = base64Encode([1, 2, 3]);
       expect(await shrinkBase64Image(notImage), notImage);
       expect(await shrinkBase64Image(null), isNull);
+    });
+  });
+
+  testWidgets(
+    'images at or below maxDim are returned byte-for-byte, never upscaled',
+    (tester) async {
+      await tester.runAsync(() async {
+        // 边界用 <=:恰好 1024 的宽不应再触发一次重编码。
+        final exact = await _solidPng(1024, 768);
+        expect(await shrinkImageBytesToBytes(exact), same(exact));
+
+        final small = await _solidPng(320, 200);
+        expect(await shrinkImageBytesToBytes(small), same(small));
+        final image = await _decode(small);
+        try {
+          expect((image.width, image.height), (320, 200));
+        } finally {
+          image.dispose();
+        }
+      });
+    },
+  );
+
+  testWidgets('GIF keeps its original bytes instead of first-frame PNG', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final gif = Uint8List.fromList(
+        img.encodeGif(img.Image(width: 1600, height: 100)),
+      );
+      expect(await shrinkImageBytesToBytes(gif, maxDim: 64), same(gif));
+      expect(await shrinkImageBytes(gif, maxDim: 64), base64Encode(gif));
     });
   });
 }

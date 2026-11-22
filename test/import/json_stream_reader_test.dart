@@ -175,4 +175,49 @@ void main() {
       throwsA(isA<FormatException>()),
     );
   });
+
+  test('header values over the per-value cap fail instead of buffering', () async {
+    final scanner = JsonStreamScanner(
+      Stream.fromIterable([
+        '{"variables":{"hp":"',
+        'x' * 80,
+        '"}}',
+      ]),
+      maxValueBytes: 64,
+    );
+    await scanner.beginObject();
+    expect(await scanner.nextKey(), 'variables');
+    await expectLater(
+      scanner.readSmallValue(),
+      throwsA(
+        isA<FormatException>().having(
+          (e) => e.message,
+          'message',
+          contains('上限'),
+        ),
+      ),
+    );
+    await scanner.close();
+  });
+
+  test('v1–v4 version must be an integer in 1..4', () async {
+    final dir = await Directory.systemTemp.createTemp('stream_version');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final file = File('${dir.path}/archive.json');
+    for (final version in ['5', '0', '"4"', 'null', '4.0']) {
+      file.writeAsStringSync(
+        '{"version":$version,"character":{"name":"A"},"messages":[]}',
+      );
+      await expectLater(
+        SessionArchiveReader(file).readHeader(),
+        throwsA(isA<FormatException>()),
+        reason: 'version $version',
+      );
+    }
+    file.writeAsStringSync('{"character":{"name":"A"},"messages":[]}');
+    await expectLater(
+      SessionArchiveReader(file).readHeader(),
+      throwsA(isA<FormatException>()),
+    );
+  });
 }

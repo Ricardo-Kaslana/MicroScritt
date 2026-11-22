@@ -1,16 +1,16 @@
 /// 角色卡领域模型:ST V1/V2/V3 兼容字段、角色卡 extension 与落库序列化。
 ///
 /// 序列化分三种口径,不可混用:
-/// - [CharacterCard.toJson]:内存/导入后的完整卡(可能内嵌头像);
-/// - [CharacterCard.toStorageJson]:落库用,剥掉内嵌头像,避免单行超过
-///   Android SQLite 的 CursorWindow 上限;
-/// - [CharacterCard.toExportJson]:导出用,把列里的头像补回卡 JSON。
+/// - [CharacterCard.toJson]:内存/导入后的完整卡(可含短暂导入头像);
+/// - [CharacterCard.toStorageJson]:落库用,剥掉内嵌头像与 V3 data-image URI;
+/// - [CharacterCard.toExportJson]:导出用,仅由调用方显式传入头像 base64。
 ///
-/// 头像与背景图始终以 `avatar_base64` / `background_base64` 列为主存储,
-/// 卡 JSON 内的同名字段只作为导入来源与导出还原。
+/// 运行态头像与背景只保存文件资产 SHA-256;base64 不允许进入仓储与制卡主链路。
 library;
 
 import 'bubble_style.dart';
+
+const Object _unchangedImage = Object();
 
 /// 角色卡(不可变);未知字段保存在 [raw] 中,导出时原样透传。
 class CharacterCard {
@@ -26,7 +26,8 @@ class CharacterCard {
   /// 场景设定,进入主写 system 的角色段。
   final String scenario;
 
-  /// 首条开场白,新建会话时作为助手首条消息落库。
+  /// 首条开场白。新会话只在该角色没有其它可选开场白时自动把它作为助手
+  /// 首条消息落库;有多条时留空会话,由用户在空态选择。
   final String firstMessage;
 
   /// 对话示例(`mes_example`),进入主写 system 的示例段。
@@ -41,16 +42,35 @@ class CharacterCard {
   /// 作者备注;V1 兼容 `creatorcomment`。
   final String creatorNotes;
 
-  /// 内嵌头像(base64);落库时剥离,读取时由 `avatar_base64` 列回填。
-  final String? avatarBase64;
+  /// 头像文件资产 SHA-256;字节由 ImageAssetStore 管理。
+  final String? avatarHash;
 
-  /// 角色卡专属聊天背景图(base64)。未设置时为 null,开启背景后回退头像。
-  /// 持久化在 characters.background_base64 列(不塞进角色卡 JSON)。
-  final String? backgroundBase64;
+  /// 角色卡专属聊天背景文件资产 SHA-256;未设置时开启背景回退头像。
+  final String? backgroundHash;
+
+  /// 第三方卡 JSON/PNG 导入边界上的短暂头像 base64。
+  ///
+  /// 仓储加载的卡与 AI 制卡链路始终为 null;保存前必须缩图并资产化为
+  /// [avatarHash]。该字段只用于兼容外部角色卡协议,不是运行态图片存储。
+  final String? importedAvatarBase64;
 
   /// 备用开场白(ST V2 `alternate_greetings`)。导入时兼容数组与单字符串两种
   /// 形态(部分第三方导出工具把数组写成字符串);新建/编辑角色时逐行录入。
   final List<String> alternateGreetings;
+
+  /// 是否有多条不同的非空开场白(主开场白 + 备用,去空去重)。
+  ///
+  /// 新建会话据此决定是否自动落入 `firstMessage`:只有一条时保持自动起笔;
+  /// 有多条时留空会话,由用户在空态选择。选择只体现在该会话的消息里,
+  /// 不写任何跨会话状态。
+  bool get hasMultipleGreetings {
+    final seen = <String>{};
+    for (final raw in [firstMessage, ...alternateGreetings]) {
+      final text = raw.trim();
+      if (text.isNotEmpty) seen.add(text);
+    }
+    return seen.length > 1;
+  }
 
   /// 标签(ST `tags`)。导入时兼容数组与中英文逗号分隔字符串(V1 时代形态)。
   final List<String> tags;
@@ -88,8 +108,9 @@ class CharacterCard {
     this.systemPrompt = '',
     this.postHistoryInstructions = '',
     this.creatorNotes = '',
-    this.avatarBase64,
-    this.backgroundBase64,
+    this.avatarHash,
+    this.backgroundHash,
+    this.importedAvatarBase64,
     this.alternateGreetings = const [],
     this.tags = const [],
     this.creator = '',
@@ -115,22 +136,48 @@ class CharacterCard {
       systemPrompt: _str(d, 'system_prompt'),
       postHistoryInstructions: _str(d, 'post_history_instructions'),
       // V1 用 creatorcomment 表示作者备注,V2/V3 是 creator_notes——空则回退。
-      creatorNotes: creatorNotes.isEmpty ? _str(d, 'creatorcomment') : creatorNotes,
-      avatarBase64: d['avatar'] is String ? d['avatar'] as String : null,
+      creatorNotes: creatorNotes.isEmpty
+          ? _str(d, 'creatorcomment')
+          : creatorNotes,
+      importedAvatarBase64: _importedAvatar(d),
       alternateGreetings: _strArray(d, 'alternate_greetings'),
       tags: _strTags(d, 'tags'),
       creator: _str(d, 'creator'),
       characterVersion: _str(d, 'character_version'),
       // talkativeness:V1 在顶层,V2/V3 在 data.extensions;两处都读。
-      talkativeness: _str(d, 'talkativeness').isEmpty ? _ext(d, 'talkativeness') : _str(d, 'talkativeness'),
+      talkativeness: _str(d, 'talkativeness').isEmpty
+          ? _ext(d, 'talkativeness')
+          : _str(d, 'talkativeness'),
       // fav:V1 顶层,V2/V3 在 extensions;两处都读。
       fav: _extBool(d, 'fav') || d['fav'] == true,
-      // depth_prompt:extensions.depth_prompt = {depth, prompt, role};prompt 为空视为无。
-      depthPrompt: _extMap(d, 'depth_prompt')?['prompt'].toString().trim() ?? '',
+      // depth_prompt:extensions.depth_prompt = {depth, prompt, role};仅接受
+      // 字符串 prompt,缺失/非字符串回落空串 —— 对 null 调 toString() 会把
+      // 字符串 "null" 当成真实提示词写回导出。
+      depthPrompt: _extNestedStr(d, 'depth_prompt', 'prompt'),
       // MicroScritt 私有:角色级气泡样式(extensions.microscritt_bubble_style)。
       bubbleStyle: _extBubbleStyle(d),
       raw: json,
     );
+  }
+
+  /// 从仓储 data_json 读取;即使历史/手工数据残留内嵌图片,也不带进运行态。
+  factory CharacterCard.fromStorageJson(Map<String, dynamic> json) =>
+      CharacterCard.fromJson(_withoutEmbeddedImages(json));
+
+  static String? _importedAvatar(Map<String, dynamic> d) {
+    final direct = d['avatar'];
+    if (direct is String) return direct;
+    final assets = d['assets'];
+    if (assets is! List) return null;
+    String? fallback;
+    for (final item in assets) {
+      if (item is! Map<String, dynamic>) continue;
+      final uri = item['uri'];
+      if (uri is! String || !_isDataImageUri(uri)) continue;
+      if (item['type'] == 'icon' && item['name'] == 'main') return uri;
+      fallback ??= uri;
+    }
+    return fallback;
   }
 
   /// `extensions.microscritt_bubble_style` 不存在或损坏时返回 null(默认样式)。
@@ -188,8 +235,18 @@ class CharacterCard {
     return null;
   }
 
+  /// `extensions.<key>.<field>` 字符串提取;只接受字符串,缺失/其它类型为空串。
+  static String _extNestedStr(
+    Map<String, dynamic> d,
+    String key,
+    String field,
+  ) {
+    final value = _extMap(d, key)?[field];
+    return value is String ? value.trim() : '';
+  }
+
   /// 数组字段提取;兼容单字符串形态(部分第三方导出工具把 alternate_greetings
-  /// 写成字符串,而非数组)。
+  /// 写成字符串,而非数组);新建/编辑角色时逐行录入。
   static List<String> _strArray(Map<String, dynamic> d, String key) {
     final v = d[key];
     if (v is List) {
@@ -213,136 +270,107 @@ class CharacterCard {
     return const [];
   }
 
-  /// 卡内没有头像时用 [avatar] 回填,已有头像则保持原样。
-  /// 用于读取 `characters.avatar_base64` 列后把头像补回内存卡。
-  CharacterCard withAvatar(String? avatar) => avatar == null || avatarBase64 != null
+  /// 卡内没有头像时用 [hash] 回填;已有资产或待资产化导入头像时保持原样。
+  CharacterCard withAvatar(String? hash) =>
+      hash == null || avatarHash != null || importedAvatarBase64 != null
       ? this
-      : CharacterCard(
-          name: name,
-          description: description,
-          personality: personality,
-          scenario: scenario,
-          firstMessage: firstMessage,
-          mesExample: mesExample,
-          systemPrompt: systemPrompt,
-          postHistoryInstructions: postHistoryInstructions,
-          creatorNotes: creatorNotes,
-          avatarBase64: avatar,
-          backgroundBase64: backgroundBase64,
-          alternateGreetings: alternateGreetings,
-          tags: tags,
-          creator: creator,
-          characterVersion: characterVersion,
-          talkativeness: talkativeness,
-          fav: fav,
-          depthPrompt: depthPrompt,
-          bubbleStyle: bubbleStyle,
-          raw: raw,
-        );
+      : _copyImages(avatarHash: hash);
 
-  /// 卡内没有背景图时用 [background] 回填,已有背景图则保持原样。
-  /// 用于读取 `characters.background_base64` 列后把背景补回内存卡。
-  CharacterCard withBackground(String? background) => background == null || backgroundBase64 != null
+  /// 卡内没有背景资产时用 [hash] 回填,已有背景则保持原样。
+  CharacterCard withBackground(String? hash) =>
+      hash == null || backgroundHash != null
       ? this
-      : CharacterCard(
-          name: name,
-          description: description,
-          personality: personality,
-          scenario: scenario,
-          firstMessage: firstMessage,
-          mesExample: mesExample,
-          systemPrompt: systemPrompt,
-          postHistoryInstructions: postHistoryInstructions,
-          creatorNotes: creatorNotes,
-          avatarBase64: avatarBase64,
-          backgroundBase64: background,
-          alternateGreetings: alternateGreetings,
-          tags: tags,
-          creator: creator,
-          characterVersion: characterVersion,
-          talkativeness: talkativeness,
-          fav: fav,
-          depthPrompt: depthPrompt,
-          bubbleStyle: bubbleStyle,
-          raw: raw,
-        );
+      : _copyImages(backgroundHash: hash);
 
-  /// 替换原始 JSON 信封(raw),建模字段保持不变。
-  ///
-  /// 草稿文件不落 raw(大卡可达数十 MB);恢复时把当前库的 raw 附回快照卡,
-  /// 保证应用时 `toJson` 合并出的信封与未知 extensions 不丢。
+  /// 替换原始 JSON 信封(raw),建模字段与图片引用保持不变。
   CharacterCard withRaw(Map<String, dynamic> raw) => CharacterCard(
-        name: name,
-        description: description,
-        personality: personality,
-        scenario: scenario,
-        firstMessage: firstMessage,
-        mesExample: mesExample,
-        systemPrompt: systemPrompt,
-        postHistoryInstructions: postHistoryInstructions,
-        creatorNotes: creatorNotes,
-        avatarBase64: avatarBase64,
-        backgroundBase64: backgroundBase64,
-        alternateGreetings: alternateGreetings,
-        tags: tags,
-        creator: creator,
-        characterVersion: characterVersion,
-        talkativeness: talkativeness,
-        fav: fav,
-        depthPrompt: depthPrompt,
-        bubbleStyle: bubbleStyle,
-        raw: raw,
-      );
+    name: name,
+    description: description,
+    personality: personality,
+    scenario: scenario,
+    firstMessage: firstMessage,
+    mesExample: mesExample,
+    systemPrompt: systemPrompt,
+    postHistoryInstructions: postHistoryInstructions,
+    creatorNotes: creatorNotes,
+    avatarHash: avatarHash,
+    backgroundHash: backgroundHash,
+    importedAvatarBase64: importedAvatarBase64,
+    alternateGreetings: alternateGreetings,
+    tags: tags,
+    creator: creator,
+    characterVersion: characterVersion,
+    talkativeness: talkativeness,
+    fav: fav,
+    depthPrompt: depthPrompt,
+    bubbleStyle: bubbleStyle,
+    raw: raw,
+  );
 
-  /// **强制**替换头像(导入缩图用):[withAvatar] 只在卡原本无头像时回填,这里
-  /// 无条件覆盖 —— 大卡整张 PNG 作头像会撑爆 Android CursorWindow,导入时
-  /// 必须把头像换成缩图,不换就会存回整张超大 base64。
-  CharacterCard replacingAvatar(String? avatar) => CharacterCard(
-        name: name,
-        description: description,
-        personality: personality,
-        scenario: scenario,
-        firstMessage: firstMessage,
-        mesExample: mesExample,
-        systemPrompt: systemPrompt,
-        postHistoryInstructions: postHistoryInstructions,
-        creatorNotes: creatorNotes,
-        avatarBase64: avatar,
-        backgroundBase64: backgroundBase64,
-        alternateGreetings: alternateGreetings,
-        tags: tags,
-        creator: creator,
-        characterVersion: characterVersion,
-        talkativeness: talkativeness,
-        fav: fav,
-        depthPrompt: depthPrompt,
-        bubbleStyle: bubbleStyle,
-        raw: raw,
-      );
+  /// 无条件替换头像资产;同时丢弃尚未资产化的导入 base64。
+  CharacterCard replacingAvatar(String? hash) =>
+      _copyImages(avatarHash: hash, clearImportedAvatar: true);
 
-  /// **强制**替换背景(导入缩图用),语义同 [replacingAvatar]。
-  CharacterCard replacingBackground(String? background) => CharacterCard(
-        name: name,
-        description: description,
-        personality: personality,
-        scenario: scenario,
-        firstMessage: firstMessage,
-        mesExample: mesExample,
-        systemPrompt: systemPrompt,
-        postHistoryInstructions: postHistoryInstructions,
-        creatorNotes: creatorNotes,
-        avatarBase64: avatarBase64,
-        backgroundBase64: background,
-        alternateGreetings: alternateGreetings,
-        tags: tags,
-        creator: creator,
-        characterVersion: characterVersion,
-        talkativeness: talkativeness,
-        fav: fav,
-        depthPrompt: depthPrompt,
-        bubbleStyle: bubbleStyle,
-        raw: raw,
-      );
+  /// 无条件替换背景资产。
+  CharacterCard replacingBackground(String? hash) =>
+      _copyImages(backgroundHash: hash);
+
+  /// 仅在外部角色卡导入边界设置/清理短暂 base64,不改变已有资产 hash。
+  CharacterCard replacingImportedAvatar(String? base64) => CharacterCard(
+    name: name,
+    description: description,
+    personality: personality,
+    scenario: scenario,
+    firstMessage: firstMessage,
+    mesExample: mesExample,
+    systemPrompt: systemPrompt,
+    postHistoryInstructions: postHistoryInstructions,
+    creatorNotes: creatorNotes,
+    avatarHash: avatarHash,
+    backgroundHash: backgroundHash,
+    importedAvatarBase64: base64,
+    alternateGreetings: alternateGreetings,
+    tags: tags,
+    creator: creator,
+    characterVersion: characterVersion,
+    talkativeness: talkativeness,
+    fav: fav,
+    depthPrompt: depthPrompt,
+    bubbleStyle: bubbleStyle,
+    raw: raw,
+  );
+
+  CharacterCard _copyImages({
+    Object? avatarHash = _unchangedImage,
+    Object? backgroundHash = _unchangedImage,
+    bool clearImportedAvatar = false,
+  }) => CharacterCard(
+    name: name,
+    description: description,
+    personality: personality,
+    scenario: scenario,
+    firstMessage: firstMessage,
+    mesExample: mesExample,
+    systemPrompt: systemPrompt,
+    postHistoryInstructions: postHistoryInstructions,
+    creatorNotes: creatorNotes,
+    avatarHash: identical(avatarHash, _unchangedImage)
+        ? this.avatarHash
+        : avatarHash as String?,
+    backgroundHash: identical(backgroundHash, _unchangedImage)
+        ? this.backgroundHash
+        : backgroundHash as String?,
+    importedAvatarBase64: clearImportedAvatar ? null : importedAvatarBase64,
+    alternateGreetings: alternateGreetings,
+    tags: tags,
+    creator: creator,
+    characterVersion: characterVersion,
+    talkativeness: talkativeness,
+    fav: fav,
+    depthPrompt: depthPrompt,
+    bubbleStyle: bubbleStyle,
+    raw: raw,
+  );
 
   Map<String, dynamic> toJson() => raw.isEmpty
       ? {
@@ -360,11 +388,8 @@ class CharacterCard {
           'creator': creator,
           'character_version': characterVersion,
           'talkativeness': talkativeness,
-          // 手动构建/编辑的卡也要带 avatar,否则编辑保存或导出后头像丢失
-          // (导入的卡 raw 非空,直接沿用原数据)。
-          if (avatarBase64 != null) 'avatar': avatarBase64,
-          // extensions:气泡样式(MicroScritt 私有)/深度提示/收藏标记 —— V2/V3
-          // 规范把它们放 extensions,顶层 fav 属 V1 形态且严格的跨端解析器不认。
+          // 只有外部导入暂存值可进入完整卡 JSON;资产 hash 不是 ST avatar 协议。
+          if (importedAvatarBase64 != null) 'avatar': importedAvatarBase64,
           if (_needsExtensions())
             'extensions': {
               if (bubbleStyle != null && !bubbleStyle!.isDefault)
@@ -377,13 +402,11 @@ class CharacterCard {
       : _mergedRaw();
 
   bool _needsExtensions() =>
-      (bubbleStyle != null && !bubbleStyle!.isDefault) || depthPrompt.isNotEmpty || fav;
+      (bubbleStyle != null && !bubbleStyle!.isDefault) ||
+      depthPrompt.isNotEmpty ||
+      fav;
 
-  /// 把(可能已被编辑的)当前字段合并进 raw 副本再导出/落库 —— 此前 raw 原样
-  /// 透传,编辑过的字段无法反映到 raw,编辑页为求字段生效只能丢弃 raw,导致
-  /// V2/V3 信封降级成 V1 扁平、character_book 与未知 extensions 全丢。合并只
-  /// 覆盖本应用可编辑的字段;信封结构(spec/data)、character_book、第三方
-  /// extensions 键全部原样保留。始终在副本上操作,绝不改动原 raw。
+  /// 把当前可编辑字段合并进 raw 副本;信封、世界书和未知扩展原样保留。
   Map<String, dynamic> _mergedRaw() {
     final copy = <String, dynamic>{...raw};
     var target = copy;
@@ -414,7 +437,6 @@ class CharacterCard {
     if (talkativeness.isNotEmpty) ext['talkativeness'] = talkativeness;
     if (fav) ext['fav'] = true;
     if (depthPrompt.isNotEmpty) {
-      // 保留既有 depth/role(若有),只覆写 prompt。
       final dp = ext['depth_prompt'] is Map<String, dynamic>
           ? <String, dynamic>{...(ext['depth_prompt'] as Map<String, dynamic>)}
           : <String, dynamic>{};
@@ -428,32 +450,54 @@ class CharacterCard {
     return copy;
   }
 
-  /// data_json 落库用序列化:与 [toJson] 相同,但**剥掉内嵌头像**(顶层 `avatar`
-  /// 与信封 `data.avatar` 都剥)。头像只存 `avatar_base64` 列,读取时按 id 惰性
-  /// 回填 —— 大卡原始 JSON 里内嵌整张 base64 头像(20MB 卡 ≈ 14MB base64)会
-  /// 让 data_json 单行超过 Android SQLite 2MB CursorWindow,任何投影 data_json
-  /// 的查询都抛 "Row too big to fit into CursorWindow",这就是"小卡正常、大卡
-  /// 列表转圈/无法加载"的根因(桌面 FFI 直连 SQLite 无此上限)。背景图本就不进
-  /// JSON(background_base64 列独立)。始终在副本上操作,绝不改动原 raw。
-  Map<String, dynamic> toStorageJson() {
-    final json = toJson();
-    if (json['data'] is Map<String, dynamic>) {
-      final data = json['data'] as Map<String, dynamic>;
-      return <String, dynamic>{...json, 'data': <String, dynamic>{...data}..remove('avatar')}..remove('avatar');
+  /// data_json 落库用:剥掉顶层/信封 avatar 与标准 V3 assets 的 data-image URI。
+  /// 图片字节只由文件资产库保存;远程 assets URI 与未知扩展不做盲目改写。
+  Map<String, dynamic> toStorageJson() => _withoutEmbeddedImages(toJson());
+
+  static Map<String, dynamic> _withoutEmbeddedImages(
+    Map<String, dynamic> json,
+  ) {
+    Map<String, dynamic> clean(Map<String, dynamic> source) {
+      final out = <String, dynamic>{...source}..remove('avatar');
+      final assets = out['assets'];
+      if (assets is List) {
+        out['assets'] = [
+          for (final item in assets)
+            if (item is Map<String, dynamic> && _isDataImageUri(item['uri']))
+              <String, dynamic>{...item}..remove('uri')
+            else
+              item,
+        ];
+      }
+      return out;
     }
-    return <String, dynamic>{...json}..remove('avatar');
+
+    final copy = clean(json);
+    final data = json['data'];
+    if (data is Map<String, dynamic>) copy['data'] = clean(data);
+    return copy;
   }
 
-  /// 导出用序列化:与 [toJson] 相同,但 raw 缺头像时把列里的头像补回
-  /// (data_json 落库已剥掉头像;导出到其它酒馆端必须还原,否则头像丢失)。
-  /// raw 已带头像时原样保留(小卡导出仍带走原图)。只在副本上操作。
-  Map<String, dynamic> toExportJson() {
+  static bool _isDataImageUri(Object? value) =>
+      value is String &&
+      value.trimLeft().toLowerCase().startsWith('data:image/');
+
+  /// 导出用序列化:不自动读取或补回 base64。
+  ///
+  /// 调用方只有在导出边界显式传入 [avatarBase64] 时,才为缺少内嵌头像的卡
+  /// 写入 `avatar`/`data.avatar`;文件资产 hash 永不序列化成 ST 图片字段。
+  Map<String, dynamic> toExportJson({String? avatarBase64}) {
     final json = toJson();
     final data = json['data'];
-    final hasAvatar = json['avatar'] != null || (data is Map<String, dynamic> && data['avatar'] != null);
-    if (hasAvatar || avatarBase64 == null) return json;
+    final hasAvatar =
+        json['avatar'] != null ||
+        (data is Map<String, dynamic> && data['avatar'] != null);
+    if (hasAvatar || avatarBase64 == null || avatarBase64.isEmpty) return json;
     if (data is Map<String, dynamic>) {
-      return <String, dynamic>{...json, 'data': <String, dynamic>{...data, 'avatar': avatarBase64}};
+      return <String, dynamic>{
+        ...json,
+        'data': <String, dynamic>{...data, 'avatar': avatarBase64},
+      };
     }
     return <String, dynamic>{...json, 'avatar': avatarBase64};
   }

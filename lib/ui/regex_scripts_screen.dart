@@ -15,6 +15,7 @@ import '../models/regex_script_seeds.dart';
 import '../state/providers.dart';
 import '../ui/widgets/rich_message_text.dart';
 import 'common/app_menu.dart';
+import 'common/app_snack_bar.dart';
 import 'common/confirm_dialog.dart';
 import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
@@ -23,6 +24,7 @@ import 'common/list_page_scaffold.dart';
 import 'common/resource_io.dart';
 import 'common/section_header.dart';
 import 'common/toggle_delete_tile.dart';
+import 'theme/app_theme.dart';
 
 /// 正则脚本列表页(设置页「内容与扩展 · 正则脚本」入口)。
 ///
@@ -33,7 +35,11 @@ class RegexScriptsScreen extends ConsumerWidget {
   const RegexScriptsScreen({super.key});
 
   /// 切换脚本启用状态:整条更新后失效列表(停用脚本不再参与替换)。
-  Future<void> _toggle(BuildContext context, WidgetRef ref, RegexScript s) async {
+  Future<void> _toggle(
+    BuildContext context,
+    WidgetRef ref,
+    RegexScript s,
+  ) async {
     final id = s.id;
     if (id == null) return;
     final enabled = !s.enabled;
@@ -42,13 +48,7 @@ class RegexScriptsScreen extends ConsumerWidget {
         .update(s.copyWith(enabled: enabled));
     ref.invalidate(regexScriptsProvider);
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(enabled ? '已启用「${s.name}」' : '已停用「${s.name}」'),
-        ),
-      );
+    showAppSnack(context, enabled ? '已启用「${s.name}」' : '已停用「${s.name}」');
   }
 
   /// 删除脚本:确认后直接删行,不再参与任何气泡的显示层替换。
@@ -293,15 +293,11 @@ class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
   Future<void> _save() async {
     if (_saving) return;
     if (_name.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('名字不能为空')));
+      showAppSnack(context, '名字不能为空');
       return;
     }
     if (validateRegexPattern(_find.text) != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('查找正则无效,请先修正')));
+      showAppSnack(context, '查找正则无效,请先修正');
       return;
     }
     setState(() => _saving = true);
@@ -322,6 +318,9 @@ class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
       }
       ref.invalidate(regexScriptsProvider);
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      // 写库失败:留在本页保留表单,明确提示失败原因。
+      if (mounted) showAppSnack(context, '保存失败: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -413,32 +412,36 @@ class _RegexScriptEditScreenState extends ConsumerState<RegexScriptEditScreen> {
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14),
-          child: Container(
+          child: SizedBox(
             width: double.infinity,
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
+            child: SurfaceCard(
+              padding: const EdgeInsets.all(14),
+              radius: BorderRadius.circular(AppRadius.input),
+              borderColor: Colors.transparent,
               color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
-              borderRadius: BorderRadius.circular(12),
+              child: compiled == null
+                  ? Text(
+                      '修正查找正则后这里显示预览',
+                      style: TextStyle(
+                        color: scheme.onSurfaceVariant,
+                        fontSize: 14,
+                      ),
+                    )
+                  : RichMessageText(
+                      key: ValueKey(
+                        'preview-${_find.text}|${_replace.text}|${_sample.text}',
+                      ),
+                      text: _sample.text,
+                      // 预览底色跟随主题:写死黑字在深色主题下与深底叠成
+                      // 一片,预览等于不可读。
+                      style: TextStyle(
+                        fontSize: 15,
+                        height: 1.4,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
+                      scripts: compiled,
+                    ),
             ),
-            child: compiled == null
-                ? Text(
-                    '修正查找正则后这里显示预览',
-                    style: TextStyle(color: scheme.outline, fontSize: 14),
-                  )
-                : RichMessageText(
-                    key: ValueKey(
-                      'preview-${_find.text}|${_replace.text}|${_sample.text}',
-                    ),
-                    text: _sample.text,
-                    // 预览底色跟随主题:写死黑字在深色主题下与深底叠成
-                    // 一片,预览等于不可读。
-                    style: TextStyle(
-                      fontSize: 15,
-                      height: 1.4,
-                      color: Theme.of(context).colorScheme.onSurface,
-                    ),
-                    scripts: compiled,
-                  ),
           ),
         ),
       ],

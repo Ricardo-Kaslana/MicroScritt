@@ -1,26 +1,29 @@
 /// 聊天消息气泡:正文、可折叠指令块与图片三态渲染。
 ///
-/// 图片按 `messages.image_base64` → 按 id 惰性读库 → 远程 URL 的顺序择一,
-/// 任何网络/解码失败都落静态失败占位,不留无限转圈;所有显示层改写(宏
-/// 替换、显示层正则、折叠)都不回写落库正文。
+/// 本地图片按 hash 从文件资产库渲染,缺失时回退远程 URL;任何网络/解码
+/// 失败都落静态失败占位,不留无限转圈。所有显示层改写(宏替换、显示层
+/// 正则、折叠)都不回写落库正文。
 library;
 
 import 'dart:async';
-import 'dart:collection';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../backend/disk_image_cache.dart';
 import '../../backend/image_downloader.dart';
-import '../../data/image_codec.dart';
 import '../../models/message.dart';
 import '../../engine/display_regex.dart';
 import '../../engine/glossary.dart';
 import '../../models/bubble_style.dart';
+import '../../state/providers.dart';
 import '../common/chat_layout.dart';
 import '../common/image_header.dart';
+import '../common/inline_spinner.dart';
+import '../common/motion.dart';
 import '../text_syntax.dart';
+import 'image_asset_preview.dart';
 import 'image_viewer.dart';
 import 'rich_message_text.dart';
 
@@ -218,9 +221,9 @@ Color resolveAssistantTextColor(ColorScheme scheme, BubbleStyle? style) {
 ///
 /// 纯显示组件:正文经 [RichMessageText] 管线渲染,用户侧额外支持可折叠的
 /// `<tag>` 指令块;不修改 [message],复制/编辑/删除/重生成等动作都由上层
-/// 回调触发。图片在 base64、惰性读库与远程 URL 三种来源间择一,详见
-/// [_CachedMemoryImage] / [_LazyMemoryImage] / [_CachedNetworkImage]。
-class MessageBubble extends StatelessWidget {
+/// 回调触发。图片在文件资产与远程 URL 两种来源间择一,聊天文件资产经
+/// [ImageAssetPreview] 选择显示预览,全屏始终读取原图。
+class MessageBubble extends ConsumerWidget {
   /// 要渲染的消息行(只读,渲染过程不改写)。
   final Message message;
 
@@ -257,10 +260,6 @@ class MessageBubble extends StatelessWidget {
   /// 角色级气泡样式(仅助手气泡生效;null = 应用默认)。
   final BubbleStyle? style;
 
-  /// 按消息 id 惰性读取 image_base64(轻量查询后图片不随消息列表加载)。
-  /// null 时 hasImage 消息无图可显(回退 URL)。
-  final Future<String?> Function(int messageId)? imageLoader;
-
   /// 删除本条消息中的图片(全屏查看器"删除图片"按钮触发):有正文的清空
   /// 图片字段,纯图无正文的整条移除(由控制器决定);null 或消息尚无 id
   /// (草稿/导入前)时不提供删除入口。
@@ -269,8 +268,8 @@ class MessageBubble extends StatelessWidget {
   /// 本条图片正在重新生成:图片区叠半透明遮罩与转圈。
   final bool regenerating;
 
-  /// 本条图片的本地修订号:原地替换后递增,本地图片缓存按它区分新旧字节。
-  final int imageRevision;
+  /// 多选模式:图片点击改为触发 [onTap](切换选中),不再打开全屏查看器。
+  final bool selectionMode;
 
   /// 是否组内首条(上方无同角色消息):控制顶部间距与分组感。
   final bool groupStart;
@@ -297,10 +296,9 @@ class MessageBubble extends StatelessWidget {
     this.onTermTap,
     this.highlightDialogue = true,
     this.style,
-    this.imageLoader,
     this.onImageDelete,
     this.regenerating = false,
-    this.imageRevision = 0,
+    this.selectionMode = false,
     this.groupStart = true,
     this.groupEnd = true,
     this.selected = false,
@@ -308,7 +306,7 @@ class MessageBubble extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final isUser = message.role == 'user';
     final imageUrl = message.imageUrl;
     final scheme = Theme.of(context).colorScheme;
@@ -323,112 +321,168 @@ class MessageBubble extends StatelessWidget {
     final deleteImage = onImageDelete == null || messageId == null
         ? null
         : () => onImageDelete!(messageId);
+    // 本地资产缺失而改走 URL 渲染时，顺手把已验证同哈希的字节回填资产库；
+    // URL-only 消息则把首次取到的字节正式资产化并写回哈希，结束“每次滚动
+    // 都重新联网”的状态。两种情况都不改写正文，失败静默回退 URL。
+    final handleImageBytes = messageId == null
+        ? null
+        : message.hasImage
+        ? (Uint8List bytes) async {
+            await ref
+                .read(messageRepositoryProvider)
+                .repairImageAsset(messageId, bytes);
+          }
+        : imageUrl != null && imageUrl.isNotEmpty
+        ? (Uint8List bytes) async {
+            await ref
+                .read(messageRepositoryProvider)
+                .adoptRemoteImage(messageId, imageUrl, bytes);
+          }
+        : null;
     // 缩略解码尺寸上限(见 [_bubbleDecodeSize]);全屏查看器仍用原始字节。
     final decodeSize = _bubbleDecodeSize(context, isUser: isUser);
+    final imageSemanticsLabel = selectionMode ? '选择图片消息' : '查看图片';
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: GestureDetector(
-        onTap: onTap,
-        onLongPress: onLongPress,
-        // 桌面用鼠标时没有长按,右键(次键点击)同样打开消息菜单。
-        onSecondaryTap: onLongPress,
-        behavior: HitTestBehavior.opaque,
-        child: ChatBubbleFrame(
-          isUser: isUser,
-          groupStart: groupStart,
-          groupEnd: groupEnd,
-          selected: selected,
-          highlighted: highlighted,
-          style: style,
-          // 用户与助手气泡都按内容宽度自适应(短消息是小气泡),各自有最大宽度
-          // 上限:用户 520/移动满宽,助手与输入卡同宽/移动满宽。约束放在外壳上,
-          // 作用域是**可见气泡**(边距之外),不把外边距算进上限。
-          constraints: BoxConstraints(
-            maxWidth: isUser
-                ? userBubbleMaxWidth(context)
-                : assistantBubbleMaxWidth(context),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // base64 优先:本地持久化的图(生成时已下载落库)绝不走网络,
-              // 对话中/重启后都不会重新加载;URL 仅作为无本地字节时的回退。
-              // 空串是历史导入/轻量查询的残留,不能当成"有本地图"。
-              if (message.imageBase64?.isNotEmpty == true)
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: _withImageProgress(
-                    _CachedMemoryImage(
-                      base64: message.imageBase64!,
-                      decodeSize: decodeSize,
-                      onDelete: deleteImage,
+      child: MouseRegion(
+        cursor: (onTap != null || onLongPress != null)
+            ? SystemMouseCursors.click
+            : MouseCursor.defer,
+        child: Semantics(
+          container: true,
+          button: selectionMode,
+          selected: selectionMode ? selected : null,
+          child: GestureDetector(
+            onTap: onTap,
+            onLongPress: onLongPress,
+            // 桌面用鼠标时没有长按,右键(次键点击)同样打开消息菜单。
+            onSecondaryTap: onLongPress,
+            behavior: HitTestBehavior.opaque,
+            child: ChatBubbleFrame(
+              isUser: isUser,
+              groupStart: groupStart,
+              groupEnd: groupEnd,
+              selected: selected,
+              highlighted: highlighted,
+              style: style,
+              // 用户与助手气泡都按内容宽度自适应(短消息是小气泡),各自有最大宽度
+              // 上限:用户 520/移动满宽,助手与输入卡同宽/移动满宽。约束放在外壳上,
+              // 作用域是**可见气泡**(边距之外),不把外边距算进上限。
+              constraints: BoxConstraints(
+                maxWidth: isUser
+                    ? userBubbleMaxWidth(context)
+                    : assistantBubbleMaxWidth(context),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // hash 本身就是缓存键:重绘换 hash 会建立新的文件 provider。
+                  // 本地文件缺失时才回退 URL;无 URL 则显示静态失败占位。
+                  if (message.hasImage)
+                    Semantics(
+                      image: true,
+                      button: true,
+                      label: imageSemanticsLabel,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: _withImageProgress(
+                          ImageAssetPreview(
+                            key: ValueKey('message-image-${message.imageHash}'),
+                            hash: message.imageHash!,
+                            cacheWidth: decodeSize.width,
+                            cacheHeight: decodeSize.height,
+                            loading: const SizedBox(
+                              width: double.infinity,
+                              height: 200,
+                              child: _CachedImagePlaceholder(),
+                            ),
+                            fallback: imageUrl != null && imageUrl.isNotEmpty
+                                ? _CachedNetworkImage(
+                                    imageUrl: imageUrl,
+                                    decodeSize: decodeSize,
+                                    onDelete: deleteImage,
+                                    onBytesAvailable: handleImageBytes,
+                                    tapOverride: selectionMode ? onTap : null,
+                                  )
+                                : const SizedBox(
+                                    width: double.infinity,
+                                    height: 200,
+                                    child: _BrokenImagePlaceholder(),
+                                  ),
+                            builder: (context, provider, original, aspect) =>
+                                _AdaptiveImage(
+                                  provider: provider,
+                                  initialAspect: aspect,
+                                  onTap: selectionMode
+                                      ? onTap
+                                      : () => showImageFullscreen(
+                                          context,
+                                          file: original,
+                                          url: imageUrl,
+                                          onDelete: deleteImage,
+                                        ),
+                                ),
+                          ),
+                        ),
+                      ),
+                    )
+                  else if (imageUrl != null && imageUrl.isNotEmpty)
+                    Semantics(
+                      image: true,
+                      button: true,
+                      label: imageSemanticsLabel,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: _withImageProgress(
+                          _CachedNetworkImage(
+                            imageUrl: imageUrl,
+                            decodeSize: decodeSize,
+                            onDelete: deleteImage,
+                            onBytesAvailable: handleImageBytes,
+                            tapOverride: selectionMode ? onTap : null,
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                )
-              else if (message.hasImage &&
-                  message.id != null &&
-                  imageLoader != null)
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  // 轻量查询出的"库里有图":按 id 惰性读 base64(LRU 缓存)。
-                  child: _withImageProgress(
-                    _LazyMemoryImage(
-                      messageId: message.id!,
-                      loader: imageLoader!,
-                      revision: imageRevision,
-                      decodeSize: decodeSize,
-                      onDelete: deleteImage,
+                  // 正文渲染走 RichMessageText 显示管线(宏替换 + 正则脚本 +
+                  // 富文本解析);仅显示层改写,存储/发给 LLM 的内容保持原样。
+                  // 可见文本为空时组件自身返回零尺寸占位。字体随角色级样式。
+                  // 用户气泡额外支持 <tag>…</tag> 折叠段(hook 输入改写的落库
+                  // 形态,见 [kUserFoldableTagPattern]):默认收起为一枚 chip,
+                  // 点击展开/收起,纯显示层。
+                  if (isUser)
+                    _UserMessageBody(
+                      content: message.content,
+                      baseStyle: chatBubbleTextStyle(onBubble, bold: true),
+                      userName: displayUserName,
+                      charName: displayCharName,
+                      scripts: regexScripts,
+                      glossary: glossary,
+                      onTermTap: onTermTap,
+                      highlightDialogue: highlightDialogue,
+                      syntax: compiledSyntax,
+                    )
+                  else
+                    RichMessageText(
+                      text: message.content,
+                      style: chatBubbleTextStyle(
+                        onBubble,
+                        fontFamily: style?.fontFamily,
+                        fontSize: style?.fontSize,
+                      ),
+                      userName: displayUserName,
+                      charName: displayCharName,
+                      scripts: regexScripts,
+                      glossary: glossary,
+                      onTermTap: onTermTap,
+                      highlightDialogue: highlightDialogue,
+                      syntax: compiledSyntax,
+                      surface: SyntaxSurface.assistantBubble,
                     ),
-                  ),
-                )
-              else if (imageUrl != null && imageUrl.isNotEmpty)
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: _withImageProgress(
-                    _CachedNetworkImage(
-                      imageUrl: imageUrl,
-                      decodeSize: decodeSize,
-                      onDelete: deleteImage,
-                    ),
-                  ),
-                ),
-              // 正文渲染走 RichMessageText 显示管线(宏替换 + 正则脚本 +
-              // 富文本解析);仅显示层改写,存储/发给 LLM 的内容保持原样。
-              // 可见文本为空时组件自身返回零尺寸占位。字体随角色级样式。
-              // 用户气泡额外支持 <tag>…</tag> 折叠段(hook 输入改写的落库
-              // 形态,见 [kUserFoldableTagPattern]):默认收起为一枚 chip,
-              // 点击展开/收起,纯显示层。
-              if (isUser)
-                _UserMessageBody(
-                  content: message.content,
-                  baseStyle: chatBubbleTextStyle(onBubble, bold: true),
-                  userName: displayUserName,
-                  charName: displayCharName,
-                  scripts: regexScripts,
-                  glossary: glossary,
-                  onTermTap: onTermTap,
-                  highlightDialogue: highlightDialogue,
-                  syntax: compiledSyntax,
-                )
-              else
-                RichMessageText(
-                  text: message.content,
-                  style: chatBubbleTextStyle(
-                    onBubble,
-                    fontFamily: style?.fontFamily,
-                    fontSize: style?.fontSize,
-                  ),
-                  userName: displayUserName,
-                  charName: displayCharName,
-                  scripts: regexScripts,
-                  glossary: glossary,
-                  onTermTap: onTermTap,
-                  highlightDialogue: highlightDialogue,
-                  syntax: compiledSyntax,
-                  surface: SyntaxSurface.assistantBubble,
-                ),
-            ],
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -444,16 +498,7 @@ class MessageBubble extends StatelessWidget {
         const Positioned.fill(
           child: ColoredBox(
             color: Colors.black38,
-            child: Center(
-              child: SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              ),
-            ),
+            child: Center(child: InlineSpinner(size: 24, color: Colors.white)),
           ),
         ),
       ],
@@ -681,7 +726,10 @@ class _FoldableNoteState extends State<_FoldableNote> {
                   if (expandable)
                     AnimatedRotation(
                       turns: _expanded ? 0.5 : 0,
-                      duration: const Duration(milliseconds: 200),
+                      duration: motionDurationOf(
+                        context,
+                        const Duration(milliseconds: 200),
+                      ),
                       child: Icon(
                         Icons.expand_more,
                         size: 15,
@@ -745,9 +793,6 @@ class _AdaptiveImage extends StatefulWidget {
   /// 滚动回看不再先闪一帧方图。
   final double? initialAspect;
 
-  /// 首次解析出真实宽高比时回调(调用方写入 LRU,供下次回看直接使用)。
-  final ValueChanged<double>? onAspectResolved;
-
   /// 图片流加载失败时回调(URL 图用于清理失效的磁盘缓存并重试一次)。
   final VoidCallback? onLoadFailed;
 
@@ -755,7 +800,6 @@ class _AdaptiveImage extends StatefulWidget {
     required this.provider,
     this.onTap,
     this.initialAspect,
-    this.onAspectResolved,
     this.onLoadFailed,
   });
 
@@ -799,10 +843,15 @@ class _AdaptiveImageState extends State<_AdaptiveImage> {
   void didUpdateWidget(covariant _AdaptiveImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.provider, widget.provider)) {
+      // provider 换源(原图 → 后台生成的 1600 预览)必须当场重新解析。
+      // didChangeDependencies 只在 InheritedWidget 变化时才会再来,普通
+      // setState 重建不会触发;若只清 _resolved 等它,气泡会一直停在占位,
+      // 而全屏查看器读原图却完全正常。保留上一帧直到新 provider 首帧到达,
+      // 避免这次替换闪一次灰块。
       _detach();
-      _info = null;
       _failed = false;
-      _resolved = null; // 下次 didChangeDependencies 用新 provider 重新解析。
+      _resolved = widget.provider;
+      _listen();
     }
   }
 
@@ -810,18 +859,28 @@ class _AdaptiveImageState extends State<_AdaptiveImage> {
     _stream = widget.provider.resolve(createLocalImageConfiguration(context));
     _listener = ImageStreamListener(
       (info, _) {
-        if (!mounted) return;
-        final firstFrame = _info == null;
-        setState(() => _info = info);
-        if (firstFrame) {
-          final h = info.image.height;
-          if (h > 0) widget.onAspectResolved?.call(info.image.width / h);
+        // ImageStream 给每个监听者的是 clone,由监听者负责释放;替换旧帧
+        // 时先 dispose,否则 ImageInfo 额外持有一份永不释放的解码图。
+        if (!mounted) {
+          info.dispose();
+          return;
         }
+        setState(() {
+          _info?.dispose();
+          _info = info;
+          _failed = false;
+        });
       },
       onError: (_, __) {
         // 捕获流错误:网络拉取失败/本地解码异常都落到失败占位;若省略
         // onError,失败的网络图会一直转圈,用户永远等不到结果。
-        if (mounted) setState(() => _failed = true);
+        if (mounted) {
+          setState(() {
+            _info?.dispose();
+            _info = null;
+            _failed = true;
+          });
+        }
         widget.onLoadFailed?.call();
       },
     );
@@ -839,6 +898,8 @@ class _AdaptiveImageState extends State<_AdaptiveImage> {
   @override
   void dispose() {
     _detach();
+    _info?.dispose();
+    _info = null;
     super.dispose();
   }
 
@@ -862,22 +923,27 @@ class _AdaptiveImageState extends State<_AdaptiveImage> {
           height = _maxImageHeight;
           width = height * aspect;
         }
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onTap,
-          child: SizedBox(
-            width: width,
-            height: height,
-            child: info == null
-                ? (_failed
-                      ? const _BrokenImagePlaceholder()
-                      : const _CachedImagePlaceholder())
-                : RawImage(
-                    image: info.image,
-                    // 框比例 == 图比例 → 恰好铺满无裁切;contain 仅作异常比例
-                    // 数据下的兜底,正常路径下不产生任何留边。
-                    fit: BoxFit.contain,
-                  ),
+        return MouseRegion(
+          cursor: widget.onTap == null
+              ? MouseCursor.defer
+              : SystemMouseCursors.click,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: SizedBox(
+              width: width,
+              height: height,
+              child: info == null
+                  ? (_failed
+                        ? const _BrokenImagePlaceholder()
+                        : const _CachedImagePlaceholder())
+                  : RawImage(
+                      image: info.image,
+                      // 框比例 == 图比例 → 恰好铺满无裁切;contain 仅作异常比例
+                      // 数据下的兜底,正常路径下不产生任何留边。
+                      fit: BoxFit.contain,
+                    ),
+            ),
           ),
         );
       },
@@ -906,10 +972,19 @@ class _CachedNetworkImage extends StatefulWidget {
 
   /// 全屏查看器的"删除图片"回调(null = 无删除入口),透传给查看器。
   final Future<void> Function()? onDelete;
+
+  /// 下载或磁盘命中后回传原始字节，供上层校验哈希并修复缺失本地资产。
+  final Future<void> Function(Uint8List bytes)? onBytesAvailable;
+
+  /// 多选模式下接管图片点击(切换选中);null = 点击打开全屏查看器。
+  final VoidCallback? tapOverride;
+
   const _CachedNetworkImage({
     required this.imageUrl,
     required this.decodeSize,
     this.onDelete,
+    this.onBytesAvailable,
+    this.tapOverride,
   });
 
   @override
@@ -950,6 +1025,16 @@ class _CachedNetworkImageState extends State<_CachedNetworkImage> {
           _aspect = aspect;
           _provider = _downsampledFile(cached, size: widget.decodeSize);
         });
+        final repair = widget.onBytesAvailable;
+        if (repair != null) {
+          unawaited(() async {
+            try {
+              await repair(await cached.readAsBytes());
+            } catch (_) {
+              // 缓存文件读取/修复失败不影响已显示的图片。
+            }
+          }());
+        }
         return;
       }
       // 磁盘未命中:经下载器取一次(超时 + 连接停滞重试都有上限)。
@@ -966,6 +1051,16 @@ class _CachedNetworkImageState extends State<_CachedNetworkImage> {
         _provider = _downsampled(bytes, size: widget.decodeSize);
       });
       unawaited(DiskImageCache.write(url, bytes));
+      final repair = widget.onBytesAvailable;
+      if (repair != null) {
+        unawaited(() async {
+          try {
+            await repair(bytes);
+          } catch (_) {
+            // 资产修复失败不影响 URL 回退渲染，下次显示仍会重试。
+          }
+        }());
+      }
     } catch (_) {
       if (mounted) setState(() => _failed = true);
     }
@@ -976,6 +1071,9 @@ class _CachedNetworkImageState extends State<_CachedNetworkImage> {
   Future<void> _handleLoadFailed() async {
     if (_retried || !mounted) return;
     _retried = true;
+    // 先删掉可能损坏的磁盘缓存,否则重载会再次命中同一份坏文件。
+    await DiskImageCache.invalidate(widget.imageUrl);
+    if (!mounted) return;
     setState(() {
       _failed = false;
       _provider = null;
@@ -1007,11 +1105,13 @@ class _CachedNetworkImageState extends State<_CachedNetworkImage> {
         provider: p,
         initialAspect: _aspect,
         onLoadFailed: _handleLoadFailed,
-        onTap: () => showImageFullscreen(
-          context,
-          url: widget.imageUrl,
-          onDelete: widget.onDelete,
-        ),
+        onTap:
+            widget.tapOverride ??
+            () => showImageFullscreen(
+              context,
+              url: widget.imageUrl,
+              onDelete: widget.onDelete,
+            ),
       );
     }
     if (_failed) {
@@ -1027,269 +1127,6 @@ class _CachedNetworkImageState extends State<_CachedNetworkImage> {
       height: 200,
       child: _CachedImagePlaceholder(),
     );
-  }
-}
-
-/// 气泡里的本地图片(消息库的 image_base64;生成时已下载落库,不走网络)。
-///
-/// 每次重建若重新 safeBase64Decode + Image.memory,整幅图会被反复解码;
-/// 这里把字节与 MemoryImage provider 缓存在 State,仅当 base64 或解码尺寸
-/// 真正变化时才重算,再交给 [_AdaptiveImage] 按真实宽高比定高。
-class _CachedMemoryImage extends StatefulWidget {
-  final String base64;
-
-  /// 气泡内缩略解码尺寸上限(物理像素)。
-  final _DecodeSize decodeSize;
-
-  /// 全屏查看器的"删除图片"回调(null = 无删除入口),透传给查看器。
-  final Future<void> Function()? onDelete;
-  const _CachedMemoryImage({
-    required this.base64,
-    required this.decodeSize,
-    this.onDelete,
-  });
-
-  @override
-  State<_CachedMemoryImage> createState() => _CachedMemoryImageState();
-}
-
-class _CachedMemoryImageState extends State<_CachedMemoryImage> {
-  Uint8List? _bytes;
-  ImageProvider? _provider;
-
-  /// 从文件头预读的宽高比(解码完成前也能按真实比例占位)。
-  double? _aspect;
-
-  @override
-  void didUpdateWidget(covariant _CachedMemoryImage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.base64 != widget.base64 ||
-        oldWidget.decodeSize != widget.decodeSize) {
-      _bytes = null;
-      _provider = null;
-      _aspect = null;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bytes = _bytes ??= safeBase64Decode(widget.base64);
-    if (bytes == null) return const SizedBox.shrink();
-    // 点击全屏查看:气泡内为了省内存按「气泡框尺寸上限」解码,全屏页用
-    // 原始字节按 2K 宽高上限重新解出,不经过本地缩略图。
-    return _AdaptiveImage(
-      provider: _provider ??= _downsampled(bytes, size: widget.decodeSize),
-      initialAspect: _aspect ??= imageAspectFromBytes(bytes),
-      onTap: () =>
-          showImageFullscreen(context, bytes: bytes, onDelete: widget.onDelete),
-    );
-  }
-}
-
-/// 惰性加载的本地图片:轻量查询后消息只带 `has_image` 标志,这里按 id 向
-/// 仓库单条读取 base64。解码结果进静态 LRU(滚动重建/State 销毁都不再回库),
-/// base64 → 字节的重解码放在后台 isolate(3MB 级字符串主线程解码会掉帧)。
-class _LazyMemoryImage extends StatefulWidget {
-  final int messageId;
-  final Future<String?> Function(int messageId) loader;
-
-  /// 图片内容修订号:原地替换后递增,变化时绕过旧缓存重新读库。
-  final int revision;
-
-  /// 气泡内缩略解码尺寸上限(物理像素)。
-  final _DecodeSize decodeSize;
-
-  /// 全屏查看器的"删除图片"回调(null = 无删除入口),透传给查看器。
-  final Future<void> Function()? onDelete;
-  const _LazyMemoryImage({
-    required this.messageId,
-    required this.loader,
-    this.revision = 0,
-    required this.decodeSize,
-    this.onDelete,
-  });
-  @override
-  State<_LazyMemoryImage> createState() => _LazyMemoryImageState();
-}
-
-class _LazyMemoryImageState extends State<_LazyMemoryImage> {
-  ImageProvider? _provider;
-  bool _failed = false;
-
-  /// 全尺寸字节(气泡内展示用降采样结果,这里保留原字节供全屏查看)。
-  Uint8List? _bytes;
-
-  /// LRU 里带回来的宽高比:回看同一张图时首帧就能按真实比例定高,
-  /// 不再先闪一帧方形占位。
-  double? _initialAspect;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  @override
-  void didUpdateWidget(covariant _LazyMemoryImage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.messageId != widget.messageId ||
-        oldWidget.revision != widget.revision) {
-      _provider = null;
-      _bytes = null;
-      _initialAspect = null;
-      _failed = false;
-      _load();
-    } else if (oldWidget.decodeSize != widget.decodeSize) {
-      // 屏幕像素比/尺寸变化:按新尺寸重新解码,字节仍从 LRU 复用。
-      _provider = null;
-      _load();
-    }
-  }
-
-  /// LRU 优先,未命中回库;base64 解码放后台 isolate(3MB 级字符串在主线程
-  /// 解码会掉帧)。任何异常都必须落到失败态,否则占位转圈永远不停。
-  Future<void> _load() async {
-    try {
-      final cached = _LazyImageCache.get(widget.messageId, widget.revision);
-      if (cached != null) {
-        if (mounted) {
-          _bytes = cached.bytes;
-          _initialAspect = cached.aspect;
-          setState(
-            () =>
-                _provider = _downsampled(cached.bytes, size: widget.decodeSize),
-          );
-        }
-        return;
-      }
-      final base64 = await widget.loader(widget.messageId);
-      final bytes = base64 == null
-          ? null
-          : await compute(safeBase64Decode, base64);
-      if (!mounted) return;
-      if (bytes == null || bytes.isEmpty) {
-        setState(() => _failed = true);
-        return;
-      }
-      _bytes = bytes;
-      // 文件头就能给出真实比例:解码尚未完成时占位框已按正确形状布局,
-      // 不再先闪一个方形再跳到真实高度(长会话滚动锚点也不再被二次扰动)。
-      _initialAspect = imageAspectFromBytes(bytes);
-      _LazyImageCache.put(
-        widget.messageId,
-        widget.revision,
-        bytes,
-        aspect: _initialAspect,
-      );
-      setState(() => _provider = _downsampled(bytes, size: widget.decodeSize));
-    } catch (_) {
-      // 读库/解码抛异常也必须落到失败态,否则占位转圈永远不停。
-      if (mounted) setState(() => _failed = true);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final p = _provider;
-    if (p != null) {
-      final full = _bytes;
-      return _AdaptiveImage(
-        provider: p,
-        initialAspect: _initialAspect,
-        // 首次解码出的比例写回 LRU,下次滚动回看直接按真实比例布局。
-        onAspectResolved: (aspect) => _LazyImageCache.putAspect(
-          widget.messageId,
-          widget.revision,
-          aspect,
-        ),
-        // 惰性读取失败(无字节)时不接点击,避免打开一个空白全屏页。
-        onTap: full == null
-            ? null
-            : () => showImageFullscreen(
-                context,
-                bytes: full,
-                onDelete: widget.onDelete == null
-                    ? null
-                    : () async {
-                        await widget.onDelete!();
-                        // 删除落库后把本消息的惰性缓存字节一并清掉,防止
-                        // 同 id 重建时 LRU 先命中、图"删了又回来"。
-                        _LazyImageCache.remove(widget.messageId);
-                      },
-              ),
-      );
-    }
-    if (_failed) return const SizedBox.shrink();
-    return const SizedBox(
-      width: double.infinity,
-      height: 200,
-      child: _CachedImagePlaceholder(),
-    );
-  }
-}
-
-/// LRU 中的一条图片记录:字节、修订号与已解码的宽高比。
-class _LazyImageEntry {
-  /// 写入时的消息图片修订号;与读取方不一致即视为失效。
-  final int revision;
-  final Uint8List bytes;
-
-  /// 首次解码得到的宽高比;null = 还没解码过。
-  double? aspect;
-
-  _LazyImageEntry(this.revision, this.bytes, this.aspect);
-}
-
-/// 惰性图片字节的静态 LRU:气泡 State 在滚动中会被销毁重建,没有这层缓存
-/// 每次重建都要回库重读 + 重解码。
-///
-/// 上限按**字节总量**而非张数 —— 生图单张 1.5~3MB,按张数计可轻易常驻
-/// 数十 MB Dart 堆;32MB 封顶后长会话滚动回看也不会把字节推到失控,逐出
-/// 仍是最旧优先。
-class _LazyImageCache {
-  static final LinkedHashMap<int, _LazyImageEntry> _map = LinkedHashMap();
-  static const _maxBytes = 32 * 1024 * 1024;
-  static int _bytes = 0;
-
-  /// 命中要求修订号一致:原地替换后旧字节不再返回,由调用方回库重读。
-  static _LazyImageEntry? get(int id, int revision) {
-    final v = _map.remove(id);
-    if (v == null) return null;
-    if (v.revision != revision) return null;
-    _map[id] = v;
-    return v;
-  }
-
-  /// 解码出宽高比后写回并把条目置为最近使用;条目已被逐出或修订号不符
-  /// 时忽略。
-  static void putAspect(int id, int revision, double aspect) {
-    final v = _map.remove(id);
-    if (v == null) return;
-    if (v.revision != revision) {
-      _map[id] = v;
-      return;
-    }
-    v.aspect = aspect;
-    _map[id] = v;
-  }
-
-  /// 主动逐出某条消息的缓存字节(该消息的图片被删除时调用)。
-  static void remove(int id) {
-    final v = _map.remove(id);
-    if (v != null) _bytes -= v.bytes.length;
-  }
-
-  /// 写入(同 id 旧条目先逐出),随后按字节总量裁到上限;单张超上限的
-  /// 极端大图会被自身逐出,不做特判 —— 下次未命中再回库。
-  static void put(int id, int revision, Uint8List bytes, {double? aspect}) {
-    remove(id);
-    _map[id] = _LazyImageEntry(revision, bytes, aspect);
-    _bytes += bytes.length;
-    while (_bytes > _maxBytes && _map.isNotEmpty) {
-      final oldest = _map.keys.first;
-      _bytes -= _map[oldest]!.bytes.length;
-      _map.remove(oldest);
-    }
   }
 }
 
@@ -1324,11 +1161,7 @@ class _CachedImagePlaceholder extends StatelessWidget {
     height: double.infinity,
     alignment: Alignment.center,
     color: Theme.of(context).colorScheme.surfaceContainerHighest,
-    child: const SizedBox(
-      width: 24,
-      height: 24,
-      child: CircularProgressIndicator(strokeWidth: 2),
-    ),
+    child: const InlineSpinner(size: 24),
   );
 }
 

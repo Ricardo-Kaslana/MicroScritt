@@ -5,6 +5,8 @@
 /// 注入的只读回调。
 library;
 
+import 'dart:convert';
+
 import '../../backend/llm_backend.dart';
 import '../../backend/upstream_error.dart';
 import '../../models/app_settings.dart';
@@ -122,6 +124,10 @@ class AgentRunner {
 
   static final _whitespace = RegExp(r'\s+');
 
+  /// 纯读工具同参重复调用的回喂占位:结果已在转录上方,重复全文只会白占输入。
+  static const _duplicateResult =
+      '(identical call; result unchanged and already shown above)';
+
   /// 纯 prose 步的回喂指令(模型面向,英文与提示词同语言)。
   static const _proseOnlyFeedback =
       'You must act via tool calls, not prose. Call one of the registered tools, '
@@ -133,12 +139,20 @@ class AgentRunner {
     ];
     final tools = <LlmTool>[...spec.registry.definitions, kFinishTool];
     final stepUsages = <TokenUsage>[];
+    // 纯读工具的同参结果缓存(仅本 run):重复调用回短占位,不再把全文
+    // 追加第二遍。暂存态写工具不进此表。
+    final pureResults = <String, String>{};
     var invalidStreak = 0;
     var step = 0;
 
     TokenUsage total() => _sum(stepUsages);
     AgentRunFailure fail(AgentFailureReason reason, String? detail) =>
-        AgentRunFailure(reason, detail: detail, stepUsages: stepUsages, totalUsage: total());
+        AgentRunFailure(
+          reason,
+          detail: detail,
+          stepUsages: stepUsages,
+          totalUsage: total(),
+        );
     void emit(
       List<String> names,
       TokenUsage usage, {
@@ -146,21 +160,28 @@ class AgentRunner {
       String text = '',
       TokenUsage? requestUsage,
     }) {
-      final reported = success &&
-          (usage.inputTokens > 0 || usage.outputTokens > 0 || usage.cachedInputTokens > 0);
-      spec.onStep?.call(AgentStepEvent(
-        step: step,
-        toolNames: names,
-        usage: usage,
-        requestUsage: requestUsage ?? usage,
-        reported: reported,
-        success: success,
-        text: text,
-      ));
+      final reported =
+          success &&
+          (usage.inputTokens > 0 ||
+              usage.outputTokens > 0 ||
+              usage.cachedInputTokens > 0);
+      spec.onStep?.call(
+        AgentStepEvent(
+          step: step,
+          toolNames: names,
+          usage: usage,
+          requestUsage: requestUsage ?? usage,
+          reported: reported,
+          success: success,
+          text: text,
+        ),
+      );
     }
 
     while (true) {
-      if (spec.shouldCancel?.call() ?? false) return fail(AgentFailureReason.cancelled, null);
+      if (spec.shouldCancel?.call() ?? false) {
+        return fail(AgentFailureReason.cancelled, null);
+      }
       step++;
 
       // 步内尝试:只重试瞬态/限流;输出上限与主写一致,只带模型配置的
@@ -184,8 +205,12 @@ class AgentRunner {
           // (legacy 单发只有一条固定 user 指令,打末块断点白付写入溢价,
           // 故 false;agent 相反)。DeepSeek 自动缓存忽略此字段。
           cacheMessageBreakpoint: true,
-          stableSystemPart: spec.cacheStableSystem ? spec.stableSystemPart : null,
-          variableSystemPart: spec.cacheStableSystem ? spec.variableSystemPart : null,
+          stableSystemPart: spec.cacheStableSystem
+              ? spec.stableSystemPart
+              : null,
+          variableSystemPart: spec.cacheStableSystem
+              ? spec.variableSystemPart
+              : null,
         );
         outcome = await runAgentStep(
           spec.backend,
@@ -195,7 +220,7 @@ class AgentRunner {
           onTextDelta: spec.onTextDelta,
         );
         requestUsage = outcome.usage;
-        stepUsage = _add(stepUsage, outcome.usage);
+        stepUsage = stepUsage + outcome.usage;
         if (outcome is AgentStepSuccess) break;
         final failure = outcome as AgentStepFailure;
         if (failure.reason == AgentFailureReason.cancelled) {
@@ -204,7 +229,8 @@ class AgentRunner {
           return fail(AgentFailureReason.cancelled, null);
         }
         final kind = failure.kind;
-        final retryable = kind == null ||
+        final retryable =
+            kind == null ||
             kind == UpstreamErrorKind.transient ||
             kind == UpstreamErrorKind.rateLimit;
         if (retryable &&
@@ -222,7 +248,35 @@ class AgentRunner {
       }
       final success = outcome;
 
-      final calls = success.calls;
+      // 边界防御:协议后端已约定丢弃空 name、为缺失 id 合成 `call_<index>`;
+      // 这里兜底拒绝对残缺调用的执行与回放 —— 空 name 既无法执行也无法原样
+      // 回放(上游 400),直接判上游协议错误,不把注定失败的转录回喂给模型。
+      final rawCalls = success.calls;
+      if (rawCalls.any((c) => c.name.isEmpty)) {
+        stepUsages.add(stepUsage);
+        emit(const [], stepUsage, success: false, requestUsage: requestUsage);
+        return fail(AgentFailureReason.backendError, '上游返回了缺少函数名的工具调用(协议错误)');
+      }
+      // 缺失 id 按到达序合成稳定 id,与后端 `call_<index>` 的约定同形:
+      // assistant 回放的 tool_calls 与 tool_result 的 tool_call_id 必须一致。
+      final usedIds = <String>{
+        for (final c in rawCalls)
+          if (c.id.isNotEmpty) c.id,
+      };
+      var synthetic = 0;
+      final calls = <ToolCall>[];
+      for (final c in rawCalls) {
+        if (c.id.isNotEmpty) {
+          calls.add(c);
+          continue;
+        }
+        while (usedIds.contains('call_$synthetic')) {
+          synthetic++;
+        }
+        final id = 'call_$synthetic';
+        usedIds.add(id);
+        calls.add(ToolCall(id: id, name: c.name, arguments: c.arguments));
+      }
       if (calls.isEmpty) {
         // 纯 prose / 空响应:非法步。错误经 user 消息回喂(无 tool_call_id
         // 可挂);空正文不追加 assistant 消息(Anthropic 空块数组会 400)。
@@ -239,12 +293,16 @@ class AgentRunner {
         continue;
       }
 
-      transcript.add(ChatMessage(
-        ChatRole.assistant,
-        success.text,
-        toolCalls: calls,
-        opaqueBlocks: success.replayBlocks.isEmpty ? null : success.replayBlocks,
-      ));
+      transcript.add(
+        ChatMessage(
+          ChatRole.assistant,
+          success.text,
+          toolCalls: calls,
+          opaqueBlocks: success.replayBlocks.isEmpty
+              ? null
+              : success.replayBlocks,
+        ),
+      );
       final executed = <String>[];
       Map<String, Object?>? finishArgs;
       for (final call in calls) {
@@ -260,34 +318,57 @@ class AgentRunner {
           final why = tool == null
               ? 'unknown tool "${call.name}"'
               : 'arguments must be a valid JSON object';
-          transcript.add(ChatMessage(
-            ChatRole.tool,
-            'Error: $why. Use one of the registered tools with a JSON object argument.',
-            toolCallId: call.id,
-          ));
+          transcript.add(
+            ChatMessage(
+              ChatRole.tool,
+              'Error: $why. Use one of the registered tools with a JSON object argument.',
+              toolCallId: call.id,
+            ),
+          );
+          continue;
+        }
+        final pureKey = tool.pure
+            ? '${call.name}\u0000${_canonicalArgs(args)}'
+            : null;
+        if (pureKey != null && pureResults.containsKey(pureKey)) {
+          executed.add(call.name);
+          transcript.add(
+            ChatMessage(ChatRole.tool, _duplicateResult, toolCallId: call.id),
+          );
           continue;
         }
         String result;
         try {
           result = await tool.execute(args);
+          if (pureKey != null) pureResults[pureKey] = result;
         } on AgentToolFailure catch (e) {
-          transcript.add(ChatMessage(ChatRole.tool, 'Error: ${e.message}', toolCallId: call.id));
+          transcript.add(
+            ChatMessage(
+              ChatRole.tool,
+              'Error: ${e.message}',
+              toolCallId: call.id,
+            ),
+          );
           continue;
         } catch (e) {
           // 执行器意外异常:回喂纠错,不报废整轮(与语义拒绝同待遇)。
-          transcript.add(ChatMessage(
-            ChatRole.tool,
-            'Error: tool execution failed: $e',
-            toolCallId: call.id,
-          ));
+          transcript.add(
+            ChatMessage(
+              ChatRole.tool,
+              'Error: tool execution failed: $e',
+              toolCallId: call.id,
+            ),
+          );
           continue;
         }
         executed.add(call.name);
-        transcript.add(ChatMessage(
-          ChatRole.tool,
-          _truncateResult(result),
-          toolCallId: call.id,
-        ));
+        transcript.add(
+          ChatMessage(
+            ChatRole.tool,
+            _truncateResult(result),
+            toolCallId: call.id,
+          ),
+        );
         if (spec.shouldCancel?.call() ?? false) {
           stepUsages.add(stepUsage);
           emit(executed, stepUsage, success: false, requestUsage: requestUsage);
@@ -297,7 +378,13 @@ class AgentRunner {
 
       if (finishArgs != null) {
         stepUsages.add(stepUsage);
-        emit(executed, stepUsage, success: true, text: success.text, requestUsage: requestUsage);
+        emit(
+          executed,
+          stepUsage,
+          success: true,
+          text: success.text,
+          requestUsage: requestUsage,
+        );
         return AgentRunSuccess(
           finishArgs: finishArgs,
           stepUsages: stepUsages,
@@ -319,32 +406,49 @@ class AgentRunner {
         // 提醒作为 user 消息追加在 tool results 之后:Anthropic 序列化自动
         // 并入同一 user 消息(text 块与 tool_result 共存,守角色交替);
         // OpenAI 是合法的 tool 后 user 消息。
-        transcript.add(ChatMessage(
-          ChatRole.user,
-          spec.softReminder!(step, step ~/ reminderInterval),
-        ));
+        transcript.add(
+          ChatMessage(
+            ChatRole.user,
+            spec.softReminder!(step, step ~/ reminderInterval),
+          ),
+        );
       }
       stepUsages.add(stepUsage);
-      emit(executed, stepUsage, success: true, text: success.text, requestUsage: requestUsage);
+      emit(
+        executed,
+        stepUsage,
+        success: true,
+        text: success.text,
+        requestUsage: requestUsage,
+      );
     }
   }
 
   static String _truncateResult(String result) =>
       result.length <= maxToolResultChars
-          ? result
-          : '${result.substring(0, maxToolResultChars)}\n…(truncated)';
+      ? result
+      : '${result.substring(0, maxToolResultChars)}\n…(truncated)';
+
+  /// 参数规范化编码:对象键排序后序列化,模型换一个键序的重复调用同样
+  /// 命中去重;数组顺序有语义,原样保留。
+  static String _canonicalArgs(Map<String, Object?> args) {
+    Object? walk(Object? value) {
+      if (value is Map) {
+        final keys = [for (final k in value.keys) k.toString()]..sort();
+        return {for (final k in keys) k: walk(value[k])};
+      }
+      if (value is List) return [for (final e in value) walk(e)];
+      return value;
+    }
+
+    return jsonEncode(walk(args));
+  }
 
   static String _oneLine(String text) {
     final t = text.replaceAll(_whitespace, ' ').trim();
     return t.length <= maxDetailChars ? t : t.substring(0, maxDetailChars);
   }
 
-  static TokenUsage _add(TokenUsage a, TokenUsage b) => TokenUsage(
-    inputTokens: a.inputTokens + b.inputTokens,
-    outputTokens: a.outputTokens + b.outputTokens,
-    cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
-  );
-
   static TokenUsage _sum(List<TokenUsage> usages) =>
-      usages.fold(const TokenUsage(), _add);
+      usages.fold(const TokenUsage(), (a, b) => a + b);
 }

@@ -134,3 +134,58 @@ int planKeepWithinBudget({
   }
   return kept;
 }
+
+/// 首个保留对话行之前的前导附件行(世界书/技能/通知):位于上一对话行与
+/// 首个保留行之间。附件必须与所属用户消息同窗,预算规划与压缩切割必须
+/// 使用同一组边界,否则一方计入了、另一方却把它折掉。
+Iterable<Message> leadingAttachmentsBefore({
+  required List<Message> active,
+  required List<Message> chat,
+  required int cutIndex,
+}) sync* {
+  if (cutIndex <= 0 || cutIndex >= chat.length) return;
+  final prevSeq = chat[cutIndex - 1].seq;
+  final firstKeptSeq = chat[cutIndex].seq;
+  for (final m in active) {
+    if (!m.isChat && m.seq > prevSeq && m.seq < firstKeptSeq) yield m;
+  }
+}
+
+/// 与 [planKeepWithinBudget] 相同的保留条数规划,但把"首个保留对话行"的
+/// 前导附件行(世界书/技能/通知)计入预算:附件必须与所属用户消息同窗,
+/// 只按对话行估算会让压缩后占用超过目标挡,并在切割点拆散这一对。
+int planKeepWithinBudgetWithAttachments({
+  required List<Message> active,
+  required int budgetTokens,
+  int minKeep = ContextBudgetPolicy.minKeepMessages,
+}) {
+  final chat = active.where((m) => m.isChat).toList();
+  if (chat.isEmpty) return 0;
+  var keep = planKeepWithinBudget(
+    active: chat,
+    budgetTokens: budgetTokens,
+    minKeep: minKeep,
+  );
+  // 每降一档保留数,都要把新暴露的前导附件组计入预算,直至稳定。
+  for (var iter = 0; iter < chat.length; iter++) {
+    final cutIndex = chat.length - keep;
+    if (cutIndex <= 0) break;
+    var groupChars = 0;
+    for (final m in leadingAttachmentsBefore(
+      active: active,
+      chat: chat,
+      cutIndex: cutIndex,
+    )) {
+      groupChars += m.content.length;
+    }
+    if (groupChars == 0) break;
+    final next = planKeepWithinBudget(
+      active: chat,
+      budgetTokens: budgetTokens - estimateTokensFromChars(groupChars),
+      minKeep: minKeep,
+    );
+    if (next >= keep) break;
+    keep = next;
+  }
+  return keep;
+}

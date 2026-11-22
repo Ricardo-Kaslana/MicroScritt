@@ -27,7 +27,7 @@ void main() {
     final png = buildPngWithText('ccv3', b64);
     final card = CharacterCardImporter.fromBytes(png);
     // 头像来自 PNG 图片本身(而非 JSON),满足 V2/V3 标准里图片不进 JSON。
-    final avatarBytes = safeBase64Decode(card.avatarBase64);
+    final avatarBytes = safeBase64Decode(card.importedAvatarBase64);
     expect(avatarBytes, isNotNull);
     expect(avatarBytes, hasLength(greaterThan(8)));
     expect(avatarBytes!.sublist(0, 4), [0x89, 0x50, 0x4E, 0x47]);
@@ -48,10 +48,10 @@ void main() {
       includePngImageAsAvatar: false,
     );
     expect(card.name, 'Pixel');
-    expect(card.avatarBase64, isNull);
+    expect(card.importedAvatarBase64, isNull);
 
     // 默认行为保持不变(测试/其它调用方仍拿"PNG 即头像")。
-    expect(CharacterCardImporter.fromBytes(png).avatarBase64, isNotNull);
+    expect(CharacterCardImporter.fromBytes(png).importedAvatarBase64, isNotNull);
     expect(CharacterCardImporter.isPng(png), isTrue);
     expect(CharacterCardImporter.isPng(utf8.encode('{"name":"x"}')), isFalse);
   });
@@ -64,13 +64,42 @@ void main() {
     });
     final png = buildPngWithText('chara', base64.encode(utf8.encode(json)));
     final card = CharacterCardImporter.fromBytes(png);
-    expect(card.avatarBase64, tinyB64);
+    expect(card.importedAvatarBase64, tinyB64);
   });
 
   test('imports from plain JSON string', () {
     final card = CharacterCardImporter.fromJsonString('{"name":"Bob","personality":"calm"}');
     expect(card.name, 'Bob');
     expect(card.personality, 'calm');
+  });
+
+  test('rejects non-object JSON and blank names with FormatException', () {
+    expect(
+      () => CharacterCardImporter.fromJsonString('[]'),
+      throwsFormatException,
+    );
+    expect(
+      () => CharacterCardImporter.fromJsonString('"just a string"'),
+      throwsFormatException,
+    );
+    expect(
+      () => CharacterCardImporter.fromJsonString('{"name":"   "}'),
+      throwsFormatException,
+    );
+    expect(
+      () => CharacterCardImporter.fromJsonString('null'),
+      throwsFormatException,
+    );
+  });
+
+  test('safeBase64Decode strips internal whitespace before decoding', () {
+    final bytes = utf8.encode('{"name":"Aila"}');
+    final wrapped = base64.encode(bytes).replaceAllMapped(
+      RegExp(r'.{4}'),
+      (m) => '${m[0]}\n',
+    );
+    expect(safeBase64Decode(wrapped), bytes);
+    expect(safeBase64Decode('data:image/png;base64,${wrapped.trim()}'), bytes);
   });
 
   test('decodeCharaPayload tolerates whitespace, url-safe base64, and direct JSON', () {

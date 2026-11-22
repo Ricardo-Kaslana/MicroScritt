@@ -55,6 +55,7 @@ void main() {
   });
 
   testWidgets('用量粒:折叠显示主写摘要,点开有三路引擎分账 + 合计,再点收起', (tester) async {
+    final semantics = tester.ensureSemantics();
     const chat = ChatState(
       inputTokens: 1200,
       outputTokens: 50,
@@ -82,10 +83,13 @@ void main() {
     // 命中率明细:主写 cached 900/1200 → 75%,后台 40/100 → 40%。
     expect(rich('hit 75%'), findsOneWidget);
     expect(rich('hit 40%'), findsOneWidget);
+    expect(find.bySemanticsLabel('收起用量明细'), findsOneWidget);
 
-    await tester.tap(find.byKey(const ValueKey('chat-island')));
+    // 收起钮是可独立命中的辅助功能入口,不再只靠点整颗灵岛。
+    await tester.tap(find.byIcon(Icons.expand_more));
     await tester.pumpAndSettle();
     expect(find.text('主写'), findsNothing);
+    semantics.dispose();
   });
 
   testWidgets('贴顶翻历史时用量粒让位(idleHushed),活动态不受影响', (tester) async {
@@ -229,11 +233,44 @@ void main() {
     for (final label in ['变量', '移除', '待确认', '生图']) {
       expect(find.text(label), findsOneWidget);
     }
-    for (final chip in ['新增 1', '修改 1', '2', '1', '图片生成中']) {
-      expect(find.text(chip), findsOneWidget);
+    // 分组行:右侧数值合并为一段文本,不再用独立计数胶囊。
+    for (final value in ['新增 1 · 修改 1', '删除 2', '建议删除 1', '图片生成中']) {
+      expect(find.text(value), findsOneWidget);
     }
     // 具体变量键值/名称不再出现在灵动岛。
-    for (final detail in ['mood=calm', 'focus=high', 'old_flag', 'old_banner', 'temp']) {
+    for (final detail in [
+      'mood=calm',
+      'focus=high',
+      'old_flag',
+      'old_banner',
+      'temp',
+    ]) {
+      expect(rich(detail), findsNothing);
+    }
+  });
+
+  testWidgets('后台收尾闪示:变量注入单独成组,组内只报键数', (tester) async {
+    const chat = ChatState(inputTokens: 100, outputTokens: 5);
+    await tester.pumpWidget(
+      host(chat.copyWith(backgroundStatus: BackgroundStatus.running)),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.pumpWidget(
+      host(
+        chat.copyWith(
+          backgroundStatus: BackgroundStatus.succeeded,
+          backgroundSummary: '变量 mood=calm · 注入变量 mood focus',
+          backgroundVariableStats: const BackgroundVariableStats(updated: 1),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('注入'), findsOneWidget);
+    expect(find.text('2 键'), findsOneWidget);
+    // 注入键名不展开到灵动岛,只保留数量。
+    for (final detail in ['mood=calm', 'focus']) {
       expect(rich(detail), findsNothing);
     }
   });
@@ -362,6 +399,22 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
     expect(find.byType(Text), findsNothing);
+  });
+
+  testWidgets('异步结果用 liveRegion 播报,流式秒表不抢播报', (tester) async {
+    bool hasLiveRegion() => tester
+        .widgetList<Semantics>(find.byType(Semantics))
+        .any((s) => s.properties.liveRegion == true);
+
+    await tester.pumpWidget(
+      host(const ChatState(streaming: true, outputTokens: 10)),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(hasLiveRegion(), isFalse, reason: '流式秒表不应持续播报');
+
+    await tester.pumpWidget(host(const ChatState(error: '生成失败:网络超时')));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(hasLiveRegion(), isTrue, reason: '错误警报应主动播报');
   });
 
   testWidgets('hidden:入场收敛期灵岛整体退场', (tester) async {

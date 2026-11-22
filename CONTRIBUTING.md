@@ -77,7 +77,7 @@ flutter test
   /// 角色卡领域模型与 ST 兼容字段的解析/序列化。
   ///
   /// 落库一律经 [CharacterCard.toStorageJson](剥掉内嵌头像),
-  /// 头像只存 `characters.avatar_base64` 列。
+  /// 头像只存 `characters.avatar_hash` 列,字节由文件资产库管理。
   library;
   ```
 

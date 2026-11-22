@@ -23,10 +23,18 @@ const LlmTool kFinishTool = LlmTool(
 /// 解码工具 arguments:必须是合法 JSON 对象,否则 null(非法调用)。
 /// 残缺 JSON 不做修复 —— 修复是 legacy 单发解析的兜底,agent 有回喂自纠
 /// 通道,畸形参数直接报错让模型重发更可靠。
+///
+/// 无参工具的空参数是常见网关行为(`""`/纯空白/字面 `null`),统一归一为
+/// 空对象而不是判非法:否则连续三次空参调用就会触发非法连击护栏、丢掉
+/// 整轮暂存。只有**非空畸形** JSON 才判非法。
 Map<String, Object?>? decodeToolArguments(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return const {};
   try {
-    final decoded = jsonDecode(raw);
+    final decoded = jsonDecode(trimmed);
     if (decoded is Map<String, Object?>) return decoded;
+    // 字面 null 与空参数等价;其他非对象(数组/标量)仍是非法调用。
+    if (decoded == null) return const {};
   } on FormatException {
     // 落入 null:非法参数。
   }

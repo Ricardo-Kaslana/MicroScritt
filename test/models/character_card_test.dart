@@ -1,4 +1,6 @@
 // 角色卡模型测试:ST V1/V2/V3 字段兼容、三种序列化口径与气泡样式扩展。
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/models/bubble_style.dart';
 import 'package:microscritt/models/character_card.dart';
@@ -32,13 +34,16 @@ void main() {
     expect(card.personality, 'Wise');
   });
 
-  test('toJson keeps the avatar for hand-built cards (round-trip)', () {
-    const card = CharacterCard(name: 'Pixel', avatarBase64: 'aGVsbG8=');
+  test('toJson keeps only the transient imported avatar for round-trip', () {
+    const card = CharacterCard(name: 'Pixel', importedAvatarBase64: 'aGVsbG8=');
     final json = card.toJson();
     expect(json['avatar'], 'aGVsbG8=');
 
     final reloaded = CharacterCard.fromJson(json);
-    expect(reloaded.avatarBase64, 'aGVsbG8=');
+    expect(reloaded.importedAvatarBase64, 'aGVsbG8=');
+    expect(reloaded.avatarHash, isNull);
+    // 文件资产 hash 不是外部 ST avatar 协议,不能写进 JSON。
+    expect(const CharacterCard(avatarHash: 'abc').toJson().containsKey('avatar'), isFalse);
   });
 
   test('toStorageJson strips the embedded avatar but keeps everything else', () {
@@ -73,33 +78,57 @@ void main() {
     expect(raw['data'], isNot(same(card.toStorageJson()['data'])));
   });
 
-  test('toExportJson re-injects the column avatar when raw has none', () {
-    // data_json 落库已剥头像;导出必须把列里的头像补回,否则换端丢图。
+  test('V3 data-image assets are imported and stripped from storage JSON', () {
+    const uri = 'data:image/png;base64,QUJD';
+    final card = CharacterCard.fromJson({
+      'spec': 'chara_card_v3',
+      'data': {
+        'name': 'V3',
+        'assets': [
+          {'type': 'icon', 'name': 'main', 'uri': uri},
+          {'type': 'background', 'name': 'remote', 'uri': 'https://example.com/bg.png'},
+        ],
+      },
+    });
+    expect(card.importedAvatarBase64, uri);
+
+    final stored = card.toStorageJson();
+    final assets = (stored['data'] as Map<String, dynamic>)['assets'] as List;
+    expect((assets.first as Map).containsKey('uri'), isFalse);
+    expect((assets.last as Map)['uri'], 'https://example.com/bg.png');
+
+    final loaded = CharacterCard.fromStorageJson(card.toJson());
+    expect(loaded.importedAvatarBase64, isNull);
+    expect(jsonEncode(loaded.raw), isNot(contains(uri)));
+  });
+
+  test('toExportJson injects avatar only when the boundary supplies base64', () {
     const avatar = 'aGVsbG8=';
-    final flat = CharacterCard.fromJson({'name': 'Alice'}).withAvatar(avatar);
-    expect(flat.toExportJson()['avatar'], avatar);
-    // 信封卡注入到 data.avatar。
-    final v2 = CharacterCard.fromJson({'spec': 'chara_card_v2', 'data': {'name': 'Alice'}}).withAvatar(avatar);
-    final data = v2.toExportJson()['data'] as Map<String, dynamic>;
+    final flat = CharacterCard.fromJson({'name': 'Alice'}).withAvatar('a' * 64);
+    expect(flat.toExportJson(avatarBase64: avatar)['avatar'], avatar);
+    expect(flat.toExportJson().containsKey('avatar'), isFalse);
+
+    final v2 = CharacterCard.fromJson({'spec': 'chara_card_v2', 'data': {'name': 'Alice'}})
+        .withAvatar('b' * 64);
+    final data = v2.toExportJson(avatarBase64: avatar)['data'] as Map<String, dynamic>;
     expect(data['avatar'], avatar);
-    // raw 已带头像时原样保留(小卡导出仍带走原图,不被列值覆盖)。
+
     const embedded = 'RU1CRURERUQ=';
     final withRaw = CharacterCard.fromJson({'name': 'Alice', 'avatar': embedded});
-    expect(withRaw.toExportJson()['avatar'], embedded);
-    // 无头像时不注入任何东西。
+    expect(withRaw.toExportJson(avatarBase64: avatar)['avatar'], embedded);
     expect(CharacterCard.fromJson({'name': 'Alice'}).toExportJson().containsKey('avatar'), isFalse);
   });
 
   test('withBackground fills in background without touching the avatar', () {
-    const card = CharacterCard(name: 'Pixel', avatarBase64: 'aGVsbG8=');
+    const card = CharacterCard(name: 'Pixel', avatarHash: 'aGVsbG8=');
     final filled = card.withBackground('Ymc=');
-    expect(filled.backgroundBase64, 'Ymc=');
-    expect(filled.avatarBase64, 'aGVsbG8=');
+    expect(filled.backgroundHash, 'Ymc=');
+    expect(filled.avatarHash, 'aGVsbG8=');
     // 已有背景时不覆盖。
-    expect(const CharacterCard(name: 'x', backgroundBase64: 'explicit').withBackground('Ymc=').backgroundBase64,
+    expect(const CharacterCard(name: 'x', backgroundHash: 'explicit').withBackground('Ymc=').backgroundHash,
         'explicit');
     // null 列值不覆盖已有背景(与 withAvatar 语义一致)。
-    expect(const CharacterCard(name: 'x', backgroundBase64: 'explicit').withBackground(null).backgroundBase64,
+    expect(const CharacterCard(name: 'x', backgroundHash: 'explicit').withBackground(null).backgroundHash,
         'explicit');
   });
 
@@ -107,16 +136,16 @@ void main() {
     // 回归防护「大卡导入缩图被丢弃」:with* 只在无头像时回填,而 PNG 卡头像
     // 本就有值 —— 若导入用 with* 会把缩图丢掉、仍存回整张超大 base64,导致
     // Android 读取 "Row too big"。replacingAvatar 必须无条件覆盖。
-    const card = CharacterCard(name: 'Pixel', avatarBase64: 'BIG_AVATAR');
+    const card = CharacterCard(name: 'Pixel', avatarHash: 'BIG_AVATAR');
     final shrunk = card.replacingAvatar('SMALL_AVATAR');
-    expect(shrunk.avatarBase64, 'SMALL_AVATAR');
+    expect(shrunk.avatarHash, 'SMALL_AVATAR');
     expect(shrunk.name, 'Pixel');
     // 其他字段保留。
-    expect(const CharacterCard(name: 'Pixel', description: 'd', backgroundBase64: 'bg')
+    expect(const CharacterCard(name: 'Pixel', description: 'd', backgroundHash: 'bg')
         .replacingAvatar('s')
-        .backgroundBase64, 'bg');
+        .backgroundHash, 'bg');
     // replacingBackground 同理无条件覆盖。
-    expect(const CharacterCard(name: 'x', backgroundBase64: 'old').replacingBackground('new').backgroundBase64, 'new');
+    expect(const CharacterCard(name: 'x', backgroundHash: 'old').replacingBackground('new').backgroundHash, 'new');
   });
 
   test('parses full V2 fields incl. extensions (talkativeness/fav/depth_prompt)', () {
@@ -155,6 +184,34 @@ void main() {
     expect(card.depthPrompt, '[写环境描写]');
   });
 
+  test('missing or non-string depth_prompt.prompt falls back to empty', () {
+    final missing = CharacterCard.fromJson({
+      'name': 'A',
+      'extensions': {
+        'depth_prompt': {'depth': 4, 'role': 'system'},
+      },
+    });
+    expect(missing.depthPrompt, '');
+    expect(jsonEncode(missing.toJson()), isNot(contains('"prompt":"null"')));
+
+    final nonString = CharacterCard.fromJson({
+      'name': 'A',
+      'extensions': {
+        'depth_prompt': {'prompt': null},
+      },
+    });
+    expect(nonString.depthPrompt, '');
+    expect(jsonEncode(nonString.toJson()), isNot(contains('"prompt":"null"')));
+
+    final numeric = CharacterCard.fromJson({
+      'name': 'A',
+      'extensions': {
+        'depth_prompt': {'prompt': 42},
+      },
+    });
+    expect(numeric.depthPrompt, '');
+  });
+
   test('V1 fallbacks: creatorcomment, string tags/alternate_greetings, char_name', () {
     final card = CharacterCard.fromJson({
       'char_name': '老卡',
@@ -174,7 +231,7 @@ void main() {
     final both = CharacterCard.fromJson({'name': 'x', 'creator_notes': 'v2注', 'creatorcomment': 'v1注'});
     expect(both.creatorNotes, 'v2注');
     // 非字符串 avatar 不抛异常。
-    expect(CharacterCard.fromJson({'name': 'x', 'avatar': 42}).avatarBase64, isNull);
+    expect(CharacterCard.fromJson({'name': 'x', 'avatar': 42}).avatarHash, isNull);
   });
 
   test('hand-built card toJson round-trips the new fields', () {
@@ -349,8 +406,8 @@ extension on CharacterCard {
         systemPrompt: systemPrompt,
         postHistoryInstructions: postHistoryInstructions,
         creatorNotes: creatorNotes,
-        avatarBase64: avatarBase64,
-        backgroundBase64: backgroundBase64,
+        avatarHash: avatarHash,
+        backgroundHash: backgroundHash,
         alternateGreetings: alternateGreetings,
         tags: tags,
         creator: creator,

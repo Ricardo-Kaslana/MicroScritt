@@ -1,23 +1,27 @@
-/// 会话归档 writer:按 version 4 结构逐条流式写出会话 JSON。
+/// 会话归档 writer:默认写出 version 5 的 ZIP STORE `.msarc`。
 ///
-/// 图片按 1MB 分块从 SQLite 读出、就地转义写入 sink(峰值内存≈一条消息),
-/// 不把整会话的图片拼成一个大字符串;[exportToFile] 失败或取消时删除
-/// 半成品文件。
+/// `meta.json` 保存会话、角色、变量与记忆;`messages.ndjson` 逐行保存消息;
+/// 所有本地图片以 `assets/<sha256>` 去重写入。图片原图与归档输出均按块流动,
+/// 只有角色卡协议要求补回的头像会在导出边界单张读入并转 base64。
 library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../data/character_repository.dart';
 import '../data/database.dart';
+import '../data/image_asset_store.dart';
 import '../data/memory_repository.dart';
 import '../data/message_repository.dart';
 import '../data/session_repository.dart';
 import '../data/variable_repository.dart';
 import '../data/worldbook_repository.dart';
+import '../import/session_archive_limits.dart';
 import '../models/message.dart';
 import '../models/worldbook_entry.dart';
 import 'character_card_exporter.dart';
+import 'zip_store_writer.dart';
 
 /// 导出进度回调:`done` 为已写消息条数,`total` 为归档内消息总数。
 typedef SessionExportProgress = void Function(int done, int total);
@@ -27,40 +31,47 @@ class SessionExportCancelled implements Exception {
   const SessionExportCancelled();
 }
 
-/// 会话归档 writer:归档是 version 4 的自明 JSON,逐条消息写出。
-///
-/// 消息图片不先汇总成整会话字符串,而是按 1MB 分块从 SQLite 读出、分块
-/// 转义写入 [StringSink](峰值内存≈一条消息);[exportString] 仅用于
-/// 测试/小会话,UI 一律走 [exportToFile]。
-///
-/// 归档字段:`version` / `session` / `character`(含世界书)/
-/// `characterBackgroundBase64` / `messages`(compactOf 翻译为数组内索引、
-/// 图片与 imageUrl、imagePrompt、附件行 kind/refId)/ `variables` /
-/// `variableAccess` / `memory`(取最新一条)。
+/// version 5 会话归档的流式 writer。
 class SessionArchiveWriter {
   final AppDatabase db;
-  SessionArchiveWriter(this.db);
 
-  /// 每写约 8MB 主动 flush 一次,避免 IOSink 内部缓冲堆积。
-  static const int _drainThreshold = 8 * 1024 * 1024;
+  /// meta.json 体积上限(默认与导入端共享 64MiB)。
+  ///
+  /// 导入端对 meta.json 有硬上限;导出端必须用同一数值预检,否则会产出一份
+  /// 「导出成功却永远导不回来」的归档。当前选择明确报错而不是把头像/大世界
+  /// 书拆成独立 entry:后者会改变 v5 结构,旧版本导入端无法识别。测试可传
+  /// 更小值覆盖超限路径。
+  final int maxMetaBytes;
 
-  /// 把整份归档拼成字符串;只适合测试或小会话,大图历史会整份驻留内存。
-  Future<String> exportString({required int sessionId}) async {
-    final buffer = StringBuffer();
-    await exportToSink(sessionId: sessionId, sink: buffer);
-    return buffer.toString();
+  SessionArchiveWriter(
+    this.db, {
+    this.maxMetaBytes = SessionArchiveLimits.maxMetaBytes,
+  });
+
+  /// 把整份归档拼成字节;只适合测试或小会话,生产路径使用 [exportToFile]。
+  ///
+  /// [messageIds] 非空时只导出属于该会话的选中消息(保持时间序),用于会话内
+  /// 多选导出;摘要折叠关系不随部分导出保留,导入后消息全部完整可见。
+  Future<Uint8List> exportBytes({
+    required int sessionId,
+    Set<int>? messageIds,
+  }) async {
+    final output = BytesBuilder(copy: false);
+    final writer = ZipStoreWriter.custom(add: output.add);
+    await _export(writer, sessionId: sessionId, messageIds: messageIds);
+    await writer.close();
+    return output.takeBytes();
   }
 
   /// 流式写入文件;失败或取消时删除半成品,不留截断归档。
   ///
   /// 桌面端 UI 传目标同目录的 `.part` 暂存路径,成功后自行 rename 到目标
-  /// 文件 —— 目标位置永远不会出现写了一半的归档。移动端 UI 先写临时文件,
-  /// 再交系统「保存到本地」或分享面板(原生侧按流复制)。`onProgress` 按
-  /// 消息条数回调,`isCancelled` 在每条消息前检查,取消抛
-  /// [SessionExportCancelled]。
+  /// 文件;移动端 UI 先写临时文件再交系统保存或分享。交付语义不因 ZIP 格式
+  /// 改变;[onProgress] 按消息条数回调,[isCancelled] 在消息与资产边界检查。
   Future<File> exportToFile({
     required int sessionId,
     required File file,
+    Set<int>? messageIds,
     SessionExportProgress? onProgress,
     bool Function()? isCancelled,
   }) async {
@@ -68,96 +79,160 @@ class SessionArchiveWriter {
     final sink = file.openWrite();
     var ok = false;
     try {
-      await exportToSink(
+      final writer = ZipStoreWriter(sink);
+      await _export(
+        writer,
         sessionId: sessionId,
-        sink: sink,
+        messageIds: messageIds,
         onProgress: onProgress,
         isCancelled: isCancelled,
-        drain: sink.flush,
       );
+      await writer.close();
       await sink.flush();
       ok = true;
       return file;
     } finally {
-      await sink.close();
-      if (!ok) {
-        try {
-          if (await file.exists()) await file.delete();
-        } catch (_) {}
+      try {
+        await sink.close();
+      } finally {
+        if (!ok) {
+          try {
+            if (await file.exists()) await file.delete();
+          } catch (_) {}
+        }
       }
     }
   }
 
-  /// 流式写出整个归档到 [sink];[drain] 在累计约 8MB 时调用一次,供文件
-  /// sink 主动 flush。会话缺失时省略 `session` 键,角色卡按空处理,不抛错
-  /// (导出端不因单条坏数据中断;是否可导入由导入端校验决定)。
-  ///
-  /// 单条消息的图片按 1MB 分块读取并转义,内存峰值只与一条消息的图片
-  /// 大小相关;`isCancelled` 在每条消息前检查,为真时抛
-  /// [SessionExportCancelled],已写内容由调用方按失败处理。
-  Future<void> exportToSink({
+  Future<void> _export(
+    ZipStoreWriter writer, {
     required int sessionId,
-    required StringSink sink,
+    Set<int>? messageIds,
     SessionExportProgress? onProgress,
     bool Function()? isCancelled,
-    Future<void> Function()? drain,
   }) async {
     final session = await SessionRepository(db).get(sessionId);
-    final (character, worldbook, messages, variables, memories) = await (
+    final allMessages = await MessageRepository(db).bySession(sessionId);
+    final messages = messageIds == null
+        ? allMessages
+        : allMessages
+              .where((m) => m.id != null && messageIds.contains(m.id))
+              .toList(growable: false);
+    if (messageIds != null && messages.isEmpty) {
+      throw const FormatException('没有可导出的选中消息');
+    }
+    if (messages.length > SessionArchiveLimits.maxMessages) {
+      throw const FormatException('会话消息条数超过 2,000,000 上限,无法导出');
+    }
+    final (character, worldbook, variables, memories) = await (
       session == null
           ? Future.value(null)
           : CharacterRepository(db).get(session.characterId),
       session == null
           ? Future.value(const <WorldbookEntry>[])
           : WorldbookRepository(db).byCharacter(session.characterId),
-      // 轻量投影:只取 has_image 标志,图片逐条分块读取。
-      MessageRepository(db).bySession(sessionId),
       VariableRepository(db).snapshot(sessionId),
       MemoryRepository(db).bySession(sessionId),
     ).wait;
 
-    // compact_of 在库里是"摘要行 id"语义;归档里翻译为消息数组内索引。
-    final fileIndexOf = <int, int>{for (final (i, m) in messages.indexed) if (m.id != null) m.id!: i};
+    // 部分导出不保留压缩摘要关系:摘要行未选中时保留 is_compacted 会让导入
+    // 后的这些消息在上下文组装中被跳过,却没有摘要可供回看。
+    final partial = messageIds != null;
 
-    sink.write('{"version":4');
-    if (session != null) {
-      sink.write(',"session":');
-      sink.write(jsonEncode(_sessionJson(session)));
-    }
-    sink.write(',"character":');
-    sink.write(jsonEncode(
-      character == null ? const <String, dynamic>{} : CharacterCardExporter.exportJson(character, worldbook: worldbook),
-    ));
-    if (character?.backgroundBase64 != null) {
-      sink.write(',"characterBackgroundBase64":');
-      sink.write(jsonEncode(character!.backgroundBase64));
-    }
-    sink.write(',"messages":[');
+    final avatarHash = _validAssetHash(character?.avatarHash, '角色头像');
+    final backgroundHash = _validAssetHash(character?.backgroundHash, '角色背景');
+    final assetHashes = <String>{
+      if (avatarHash != null) avatarHash,
+      if (backgroundHash != null) backgroundHash,
+      for (final message in messages)
+        if (_validAssetHash(message.imageHash, '消息图片') != null)
+          message.imageHash!,
+    };
 
-    final repo = MessageRepository(db);
-    var sinceDrain = 0;
-    for (final (i, message) in messages.indexed) {
-      if (isCancelled?.call() ?? false) throw const SessionExportCancelled();
-      if (i > 0) sink.write(',');
-      sinceDrain += await _writeMessage(sink, message, fileIndexOf, repo);
-      onProgress?.call(i + 1, messages.length);
-      if (drain != null && sinceDrain >= _drainThreshold) {
-        await drain();
-        sinceDrain = 0;
+    // ST 角色卡协议仍以 avatar base64 表示头像;只在归档这一外边界补回。
+    // 背景不是 ST 字段,v5 使用独立 hash 并与其他图片共用 assets 去重。
+    String? avatarBase64;
+    if (avatarHash != null) {
+      final avatarFile = db.images.fileFor(avatarHash);
+      final avatarSize = await avatarFile.length();
+      if (avatarSize <= 0 || avatarSize > ImageAssetStore.maxOriginalBytes) {
+        throw FormatException('导出头像大小无效:$avatarHash ($avatarSize)');
+      }
+      final bytes = await avatarFile.readAsBytes();
+      avatarBase64 = base64Encode(bytes);
+    }
+    final meta = <String, Object?>{
+      'version': 5,
+      if (session != null) 'session': _sessionJson(session),
+      'character': character == null
+          ? const <String, dynamic>{}
+          : CharacterCardExporter.exportJson(
+              character,
+              worldbook: worldbook,
+              avatarBase64: avatarBase64,
+            ),
+      if (avatarHash != null) 'characterAvatarHash': avatarHash,
+      if (backgroundHash != null) 'characterBackgroundHash': backgroundHash,
+      'variables': variables.values,
+      'variableAccess': {
+        for (final entry in variables.access.entries)
+          entry.key: entry.value.name,
+      },
+      'memory': memories.isEmpty ? null : memories.last.content,
+    };
+    final metaBytes = utf8.encode(jsonEncode(meta));
+    if (metaBytes.length > maxMetaBytes) {
+      throw FormatException(
+        '导出元数据(角色卡/世界书/变量/记忆)超过 ${maxMetaBytes ~/ (1024 * 1024)}MiB 上限,'
+        '导入端将拒绝该归档;请精简角色卡或世界书后重试',
+      );
+    }
+    await writer.addBytes('meta.json', metaBytes);
+
+    // compact_of 在库里是摘要行 id;归档内统一翻译成消息行索引。
+    final fileIndexOf = <int, int>{
+      for (final (index, message) in messages.indexed)
+        if (message.id != null) message.id!: index,
+    };
+    Stream<List<int>> messageLines() async* {
+      for (final (index, message) in messages.indexed) {
+        if (isCancelled?.call() ?? false) {
+          throw const SessionExportCancelled();
+        }
+        final line = utf8.encode(
+          '${jsonEncode(_messageJson(message, fileIndexOf, partial: partial))}\n',
+        );
+        // 与导入端单行上限同源:超限的归档导出后必然导入失败,这里提前
+        // 明确报错,而不是交付一份坏档。
+        if (line.length > SessionArchiveLimits.maxMessageLineBytes) {
+          throw FormatException(
+            '第 ${index + 1} 条消息超过 '
+            '${SessionArchiveLimits.maxMessageLineBytes ~/ (1024 * 1024)}MiB 上限,无法导出',
+          );
+        }
+        yield line;
+        onProgress?.call(index + 1, messages.length);
       }
     }
 
-    sink.write('],"variables":');
-    sink.write(jsonEncode(variables.values));
-    // v66 起变量的三档后台权限随档导出;可选键,旧导入端忽略、旧档缺失
-    // 由导入端回落 protected。
-    sink.write(',"variableAccess":');
-    sink.write(jsonEncode({
-      for (final entry in variables.access.entries) entry.key: entry.value.name,
-    }));
-    sink.write(',"memory":');
-    sink.write(jsonEncode(memories.isEmpty ? null : memories.last.content));
-    sink.write('}');
+    await writer.addStream('messages.ndjson', messageLines());
+    for (final hash in assetHashes) {
+      if (isCancelled?.call() ?? false) throw const SessionExportCancelled();
+      final file = db.images.fileFor(hash);
+      final size = await file.length();
+      if (size <= 0 || size > ImageAssetStore.maxOriginalBytes) {
+        throw FormatException('导出图片大小无效:$hash ($size)');
+      }
+      await writer.addStream('assets/$hash', file.openRead(), size: size);
+    }
+  }
+
+  static String? _validAssetHash(String? hash, String label) {
+    if (hash == null || hash.isEmpty) return null;
+    if (!ImageAssetStore.isValidHash(hash)) {
+      throw FormatException('$label引用不是有效的 SHA-256:$hash');
+    }
+    return hash;
   }
 
   static Map<String, Object?> _sessionJson(Session session) => {
@@ -178,61 +253,24 @@ class SessionArchiveWriter {
     },
   };
 
-  /// 按原归档字段顺序写一条消息,返回写入字符数(用于 flush 节流)。
-  /// 图片块逐个 `jsonEncode` 后去掉外层引号写入 —— base64 全为 ASCII,
-  /// 分块转义与整串转义结果逐字节一致。
-  static Future<int> _writeMessage(
-    StringSink sink,
+  static Map<String, Object?> _messageJson(
     Message message,
-    Map<int, int> fileIndexOf,
-    MessageRepository repo,
-  ) async {
-    var written = 0;
-    void write(String text) {
-      sink.write(text);
-      written += text.length;
-    }
-
-    write('{"role":');
-    write(jsonEncode(message.role));
-    write(',"content":');
-    write(jsonEncode(message.content));
-    write(',"seq":');
-    write(jsonEncode(message.seq));
-    write(',"isCompacted":');
-    write(jsonEncode(message.isCompacted));
-    final compactIndex = message.compactOf == null ? null : fileIndexOf[message.compactOf];
-    if (compactIndex != null) {
-      write(',"compactOf":');
-      write(jsonEncode(compactIndex));
-    }
-    final id = message.id;
-    if (message.hasImage && id != null) {
-      write(',"imageBase64":"');
-      await for (final chunk in repo.imageBase64Chunks(id)) {
-        final encoded = jsonEncode(chunk);
-        write(encoded.substring(1, encoded.length - 1));
-      }
-      write('"');
-    }
-    if (message.imageUrl != null) {
-      write(',"imageUrl":');
-      write(jsonEncode(message.imageUrl));
-    }
-    // 生图原始描述:图片重新生成的依据。可选键,旧导入端忽略、旧档缺失为 null。
-    if (message.imagePrompt != null) {
-      write(',"imagePrompt":');
-      write(jsonEncode(message.imagePrompt));
-    }
-    if (message.kind != MessageKind.chat) {
-      write(',"kind":');
-      write(jsonEncode(message.kind.wire));
-    }
-    if (message.refId != null) {
-      write(',"refId":');
-      write(jsonEncode(message.refId));
-    }
-    write('}');
-    return written;
-  }
+    Map<int, int> fileIndexOf, {
+    required bool partial,
+  }) => {
+    'role': message.role,
+    'content': message.content,
+    'seq': message.seq,
+    // 部分导出没有摘要行,清空折叠标记,避免导入后消息被上下文组装跳过。
+    'isCompacted': partial ? false : message.isCompacted,
+    if (!partial &&
+        message.compactOf != null &&
+        fileIndexOf[message.compactOf] != null)
+      'compactOf': fileIndexOf[message.compactOf],
+    if (message.hasImage) 'imageHash': message.imageHash,
+    if (message.imageUrl != null) 'imageUrl': message.imageUrl,
+    if (message.imagePrompt != null) 'imagePrompt': message.imagePrompt,
+    if (message.kind != MessageKind.chat) 'kind': message.kind.wire,
+    if (message.refId != null) 'refId': message.refId,
+  };
 }

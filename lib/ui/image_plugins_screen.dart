@@ -13,9 +13,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/image_plugin.dart';
 import '../models/image_plugin_seeds.dart';
+import '../state/app_config_sync.dart';
+import '../state/image_plugin_runtime.dart';
 import '../state/providers.dart';
+import 'common/app_snack_bar.dart';
 import 'common/confirm_dialog.dart';
 import 'common/empty_state.dart';
+import 'common/inline_spinner.dart';
 import 'common/list_page_scaffold.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/section_header.dart';
@@ -35,12 +39,7 @@ class ImagePluginsScreen extends ConsumerStatefulWidget {
 class _ImagePluginsScreenState extends ConsumerState<ImagePluginsScreen> {
   bool _importing = false;
 
-  void _snack(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
-  }
+  void _snack(String message) => showAppSnack(context, message);
 
   Future<void> _refresh() async {
     final repository = ref.read(imagePluginRepositoryProvider);
@@ -75,6 +74,9 @@ class _ImagePluginsScreenState extends ConsumerState<ImagePluginsScreen> {
       var source = utf8.decode(bytes);
       if (source.startsWith('\ufeff')) source = source.substring(1);
       var plugin = ImagePlugin.fromPackageJson(source);
+      if (kBuiltinImagePluginIds.contains(plugin.id)) {
+        throw const FormatException('内置插件的包体由应用维护，不可覆盖，仅可启停');
+      }
       final existing = ref
           .read(imagePluginsProvider)
           .where((item) => item.id == plugin.id)
@@ -83,18 +85,14 @@ class _ImagePluginsScreenState extends ConsumerState<ImagePluginsScreen> {
       if (!await _confirmImport(plugin, replacing: existing != null)) return;
       final runtime = ref.read(hookRuntimeProvider);
       if (runtime == null) throw const FormatException('当前平台无法运行 JS 生图插件');
-      final valid = await runtime.evaluate('''
-(function() {
-${plugin.code}
-  return typeof step === "function" ? "ok" : "missing";
-})()
-''');
-      if (valid != 'ok') {
+      if (!await validateImagePluginRuntime(runtime, plugin)) {
         throw const FormatException('插件 JS 无效，或未定义同步 step(ctx) 函数');
       }
       plugin = plugin.copyWith(enabled: existing?.enabled ?? true);
+      await markAppConfigDirty(ref);
       await ref.read(imagePluginRepositoryProvider).save(plugin);
       await _refresh();
+      await syncAppConfigFile(ref);
       _snack(
         existing == null ? '已导入插件「${plugin.name}」' : '已更新插件「${plugin.name}」',
       );
@@ -154,10 +152,12 @@ ${plugin.code}
   }
 
   Future<void> _toggle(ImagePlugin plugin) async {
+    await markAppConfigDirty(ref);
     await ref
         .read(imagePluginRepositoryProvider)
         .setEnabled(plugin.id, !plugin.enabled);
     await _refresh();
+    await syncAppConfigFile(ref);
   }
 
   /// 删除插件;仓库对仍被生图配置引用的插件抛 `StateError`,这里把原因
@@ -170,8 +170,10 @@ ${plugin.code}
     );
     if (!confirmed) return;
     try {
+      await markAppConfigDirty(ref);
       await ref.read(imagePluginRepositoryProvider).delete(plugin.id);
       await _refresh();
+      await syncAppConfigFile(ref);
       _snack('已删除插件「${plugin.name}」');
     } on StateError catch (error) {
       _snack(error.message);
@@ -186,13 +188,9 @@ ${plugin.code}
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _importing ? null : _import,
         icon: _importing
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
+            ? const InlineSpinner(size: 18)
             : const Icon(Icons.file_open_outlined),
-        label: Text(_importing ? '导入中' : '导入 JSON'),
+        label: Text(_importing ? '导入中…' : '导入 JSON'),
       ),
       items: plugins,
       emptyState: const EmptyState(

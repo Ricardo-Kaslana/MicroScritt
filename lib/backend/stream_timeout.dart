@@ -5,6 +5,8 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 /// LLM 流式请求的超时护栏(http 包本身没有默认超时,不设防的 `await for`
 /// 在半开连接/服务端挂起时会永久挂起,主写有停止按钮兜底,后台/压缩路径
@@ -61,4 +63,39 @@ Stream<T> withIdleTimeout<T>(Stream<T> source, Duration idle) {
     },
   );
   return controller.stream;
+}
+
+/// 非 2xx 错误体的读取上限:错误体只用来诊断,不需要全文;部分网关在错误
+/// 路径上仍挂着长连接或回传整页 HTML,不设上限会把内存与等待时间交给上游。
+const int kUpstreamErrorBodyLimit = 64 * 1024;
+
+/// 带空闲超时与字节上限地读取非 2xx 错误体。
+///
+/// 超限即停止读取(取消底层订阅,不等服务端关流)并在末尾标注截断;
+/// 读取阶段的空闲超时归一为占位文本 —— 错误分类仍以状态码为准,不能因为
+/// 错误体读不动就再次挂起或把整次请求升级成未分类异常。
+Future<String> readUpstreamErrorBody(
+  Stream<List<int>> stream,
+  Duration idle, {
+  int limit = kUpstreamErrorBodyLimit,
+}) async {
+  final bytes = BytesBuilder(copy: false);
+  var truncated = false;
+  try {
+    await for (final chunk in withIdleTimeout(stream, idle)) {
+      final remaining = limit - bytes.length;
+      if (chunk.length > remaining) {
+        bytes.add(chunk.sublist(0, remaining));
+        truncated = true;
+        break;
+      }
+      bytes.add(chunk);
+      if (bytes.length >= limit) break;
+    }
+  } on TimeoutException {
+    truncated = true;
+  }
+  // 截断可能切在多字节字符中间:allowMalformed 让诊断文本仍是合法字符串。
+  final text = utf8.decode(bytes.takeBytes(), allowMalformed: true);
+  return truncated ? '$text…(truncated)' : text;
 }

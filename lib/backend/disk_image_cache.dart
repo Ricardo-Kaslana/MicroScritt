@@ -1,25 +1,29 @@
 /// 远程图片字节的本地磁盘缓存与近似 LRU 淘汰。
 ///
-/// 只缓存 URL-only 图片的字节(base64 图片走 `Image.memory`);缓存失败
-/// 一律静默降级为联网读取,不影响渲染主流程。
+/// 只缓存 URL-only 图片的字节(hash 图片走文件资产库);缓存失败
+/// 一律静默降级为联网读取,不影响渲染主流程。写盘前与命中读取时都校验
+/// 图片魔数,HTML/错误页不会被当成图片长期缓存;损坏缓存可经 [invalidate]
+/// 删除后重新下载。
 library;
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/data_root.dart';
+import 'image_magic.dart';
 
 /// 远程图片字节的本地磁盘缓存。
 ///
 /// 目的:URL-only 的图片(旧消息 / 生成时下载失败)在对话滚动重建、Flutter 内存
 /// 图片缓存逐出、重启后会被 `NetworkImage` 反复重新拉取 —— 这里把首次取到的字节
 /// 写盘,之后任何一次渲染都优先读盘(本地解码,不依赖网络),彻底消除"已生成的
-/// 图片反复重新加载"。base64 已落库的消息走 [Image.memory],不经过这里。
+/// 图片反复重新加载"。已资产化的 hash 图片走 FileImage,不经过这里。
 ///
 /// 文件名是 URL 的 **FNV-1a 64 位哈希**(16 个十六进制字符,定长)而非全长
 /// base64Url 编码:带签名查询参数的长 CDN URL 经 base64Url 膨胀后轻松超过
@@ -41,12 +45,20 @@ class DiskImageCache {
   /// 读都 `setLastModified`,长会话滚动回看会变成持续的磁盘元数据写。
   static const Duration _touchInterval = Duration(hours: 1);
 
+  /// 过期临时文件的清理门槛;远大于一次下载写盘的耗时。
+  static const Duration _tempMaxAge = Duration(hours: 24);
+
   /// 各缓存根目录的已知总字节数(缺失 = 尚未扫描)。按根目录隔离,
   /// 测试的临时目录互不影响;写入时累加,只有超限才做一次全目录扫描淘汰。
   static final Map<String, int> _totalByRoot = {};
 
   /// 串行化同一根目录的「记账 + 淘汰」,避免并发写入重复扫描/重复计数。
   static final Map<String, Future<void>> _accountQueue = {};
+
+  /// 已做过一次进程内过期临时文件清扫的根目录。
+  static final Set<String> _tempSweptRoots = {};
+
+  static final Random _random = Random.secure();
 
   /// 测试注入缓存根目录;null 时按 [DataRoot] 解析:桌面端固定在
   /// `~/.microscritt/image_cache`,移动端用应用支持目录下的 `image_cache`。
@@ -90,32 +102,37 @@ class DiskImageCache {
     return File('${root.path}${Platform.pathSeparator}$legacy.img');
   }
 
-  /// 读取某 URL 的缓存文件;未命中/出错返回 null。
+  /// 读取某 URL 的缓存文件;未命中/出错/内容不是图片返回 null。
   ///
   /// 命中时按 [_touchInterval] 节流刷新 mtime(LRU 的"最近使用"信号);旧版
   /// 长名命中后**复制**到新名(不再把字节读进 Dart 堆,调用方可直接用
-  /// `FileImage` 解码),复制成功即删除旧文件。
+  /// `FileImage` 解码),复制成功即删除旧文件。历史版本可能缓存过 HTML 错误页,
+  /// 这类文件在命中时删除,让调用方重新下载。
   static Future<File?> existingFile(String url) async {
     try {
       final f = await _file(url);
       if (await f.exists()) {
+        if (!await _hasImageMagic(f)) {
+          await _safeDelete(f);
+          return null;
+        }
         unawaited(_touchIfStale(f));
         return f;
       }
       // 存量迁移:旧版 base64Url 长名还能命中就返回,并复制到新名下。
       final legacy = await _legacyFile(url);
       if (legacy != null && await legacy.exists()) {
+        if (!await _hasImageMagic(legacy)) {
+          await _safeDelete(legacy);
+          return null;
+        }
         final root = await _root();
         if (!await root.exists()) await root.create(recursive: true);
         final target = await _file(url);
         try {
           final copied = await legacy.copy(target.path);
           unawaited(_touchIfStale(copied));
-          unawaited(() async {
-            try {
-              await legacy.delete();
-            } catch (_) {}
-          }());
+          unawaited(_safeDelete(legacy));
           return copied;
         } catch (_) {
           return legacy; // 复制失败仍返回旧文件,下次读取再试迁移。
@@ -140,19 +157,76 @@ class DiskImageCache {
     }
   }
 
+  /// 删除某 URL 的缓存(含旧版长名),使解码失败的文件可以重新下载。
+  static Future<void> invalidate(String url) async {
+    try {
+      final f = await _file(url);
+      await _safeDelete(f);
+      final legacy = await _legacyFile(url);
+      if (legacy != null) await _safeDelete(legacy);
+      final root = await _root();
+      _totalByRoot.remove(root.path);
+    } catch (_) {}
+  }
+
   /// 写某 URL 的字节到盘(幂等;失败静默,不影响渲染)。
-  /// 先写临时文件再 rename(原子替换):进程被杀时不留半截文件 —— 坏字节会
-  /// 让 read 永远"成功"返回无法解码的数据且无自愈路径。
+  ///
+  /// 只接受可识别魔数的图片:错误页/半截 HTML 绝不被缓存成"图片"。先写
+  /// 唯一临时文件再 rename(原子替换),进程被杀时不留半截文件;失败分支
+  /// 删除临时文件,首次写入时顺带清扫过期 `.tmp`。
   static Future<void> write(String url, Uint8List bytes) async {
+    if (bytes.isEmpty || !looksLikeImageBytes(bytes)) return;
     try {
       final root = await _root();
       if (!await root.exists()) await root.create(recursive: true);
+      _sweepTempOnce(root);
       final target = await _file(url);
-      final tmp = File('${target.path}.tmp');
-      await tmp.writeAsBytes(bytes, flush: true);
-      await tmp.rename(target.path);
+      final suffix = _random.nextInt(0x7fffffff).toRadixString(16);
+      final tmp = File(
+        '${target.path}.${DateTime.now().microsecondsSinceEpoch}-$suffix.tmp',
+      );
+      try {
+        await tmp.writeAsBytes(bytes, flush: true);
+        await tmp.rename(target.path);
+      } finally {
+        await _safeDelete(tmp);
+      }
       _accountWrite(root, bytes.length);
     } catch (_) {}
+  }
+
+  /// 清理缓存根目录里过期的写入临时文件,返回删除数量。
+  static Future<int> cleanupTempFiles({
+    Duration olderThan = _tempMaxAge,
+    DateTime? now,
+  }) async {
+    if (olderThan.isNegative) {
+      throw ArgumentError.value(olderThan, 'olderThan', '不能为负数');
+    }
+    try {
+      final root = await _root();
+      if (!await root.exists()) return 0;
+      final cutoff = (now ?? DateTime.now()).subtract(olderThan);
+      var removed = 0;
+      await for (final entity in root.list(followLinks: false)) {
+        if (entity is! File || !entity.path.endsWith('.tmp')) continue;
+        try {
+          if ((await entity.lastModified()).isAfter(cutoff)) continue;
+          await entity.delete();
+          removed++;
+        } on FileSystemException {
+          // 正在写的临时文件下一轮再处理。
+        }
+      }
+      return removed;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  static void _sweepTempOnce(Directory root) {
+    if (!_tempSweptRoots.add(root.path)) return;
+    unawaited(cleanupTempFiles().then<void>((_) {}, onError: (_) {}));
   }
 
   /// 刷新文件 mtime,作为近似 LRU 的最近使用信号。只有距上次刷新超过
@@ -163,6 +237,28 @@ class DiskImageCache {
       if (DateTime.now().difference(stat.modified) < _touchInterval) return;
       await f.setLastModified(DateTime.now());
     } catch (_) {}
+  }
+
+  static Future<void> _safeDelete(File f) async {
+    try {
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+  }
+
+  /// 读取文件头校验图片魔数;打不开/不是图片返回 false。
+  static Future<bool> _hasImageMagic(File f) async {
+    RandomAccessFile? raf;
+    try {
+      raf = await f.open();
+      final header = await raf.read(16);
+      return looksLikeImageBytes(header);
+    } catch (_) {
+      return false;
+    } finally {
+      try {
+        await raf?.close();
+      } catch (_) {}
+    }
   }
 
   /// 记账本次写入;同一根目录串行执行。首次记账时扫描一次现有文件总量
@@ -228,7 +324,8 @@ class DiskImageCache {
       for (final f in files) {
         stats[f] = await f.lastModified();
       }
-      final byOldest = stats.keys.toList()..sort((a, b) => stats[a]!.compareTo(stats[b]!));
+      final byOldest = stats.keys.toList()
+        ..sort((a, b) => stats[a]!.compareTo(stats[b]!));
       for (final f in byOldest) {
         if (total <= maxTotalBytes) break;
         try {

@@ -27,6 +27,9 @@ class CardStudioDraftSnapshot {
   final String? generatedAvatarPrompt;
   final String? lastSummary;
 
+  /// 已由此草稿持有的图片引用;null = 旧格式,恢复后需要补建持有清单。
+  final List<String>? heldAssetHashes;
+
   /// 最近一个逻辑步的真实输入 token;null = 还没有上报过用量。
   final int? lastRequestInputTokens;
 
@@ -48,14 +51,25 @@ class CardStudioDraftSnapshot {
     this.draftAvatarPrompt,
     this.generatedAvatarPrompt,
     this.lastSummary,
+    this.heldAssetHashes,
     this.lastRequestInputTokens,
     this.lastRequestCachedInputTokens = 0,
     this.contextEstimateTokens = 0,
   });
+
+  /// 快照两侧卡面出现的全部图片;旧基线也持有,避免外部换图后草稿无法审阅。
+  Set<String> get requiredAssetHashes => {
+    if (baseCard.avatarHash?.isNotEmpty ?? false) baseCard.avatarHash!,
+    if (baseCard.backgroundHash?.isNotEmpty ?? false) baseCard.backgroundHash!,
+    if (draftCard.avatarHash?.isNotEmpty ?? false) draftCard.avatarHash!,
+    if (draftCard.backgroundHash?.isNotEmpty ?? false)
+      draftCard.backgroundHash!,
+  };
 }
 
 /// 编码草稿;任何不可序列化的值都会抛异常,由调用方按写入失败处理。
-Map<String, dynamic> encodeCardStudioDraft(CardStudioDraftSnapshot snapshot) => {
+Map<String, dynamic> encodeCardStudioDraft(CardStudioDraftSnapshot snapshot) =>
+    {
       'target': snapshot.targetCharacterId,
       'base': _encodeSide(snapshot.baseCard, snapshot.baseEntries),
       'draft': _encodeSide(snapshot.draftCard, snapshot.draftEntries),
@@ -65,6 +79,7 @@ Map<String, dynamic> encodeCardStudioDraft(CardStudioDraftSnapshot snapshot) => 
       'draftAvatarPrompt': snapshot.draftAvatarPrompt,
       'generatedAvatarPrompt': snapshot.generatedAvatarPrompt,
       'lastSummary': snapshot.lastSummary,
+      'heldAssetHashes': snapshot.heldAssetHashes,
       'lastRequestInputTokens': snapshot.lastRequestInputTokens,
       'lastRequestCachedInputTokens': snapshot.lastRequestCachedInputTokens,
       'contextEstimateTokens': snapshot.contextEstimateTokens,
@@ -104,9 +119,9 @@ CardStudioDraftSnapshot? decodeCardStudioDraft(Map<String, dynamic> payload) {
       entries: entries,
       sessionLog: sessionLog,
       draftAvatarPrompt: _optionalString(payload['draftAvatarPrompt']),
-      generatedAvatarPrompt:
-          _optionalString(payload['generatedAvatarPrompt']),
+      generatedAvatarPrompt: _optionalString(payload['generatedAvatarPrompt']),
       lastSummary: _optionalString(payload['lastSummary']),
+      heldAssetHashes: _stringList(payload['heldAssetHashes']),
       // 用量是展示元数据,坏值只回落默认,不因此丢弃整份草稿。
       lastRequestInputTokens: _optionalTokenCount(
         payload['lastRequestInputTokens'],
@@ -125,33 +140,32 @@ CardStudioDraftSnapshot? decodeCardStudioDraft(Map<String, dynamic> payload) {
 Map<String, dynamic> _encodeSide(
   CharacterCard card,
   List<WorldbookEntry> entries,
-) =>
-    {
-      'card': _encodeCard(card),
-      'entries': [for (final entry in entries) entry.toMap()],
-    };
+) => {
+  'card': _encodeCard(card),
+  'entries': [for (final entry in entries) entry.toMap()],
+};
 
 Map<String, dynamic> _encodeCard(CharacterCard card) => {
-      'name': card.name,
-      'description': card.description,
-      'personality': card.personality,
-      'scenario': card.scenario,
-      'firstMessage': card.firstMessage,
-      'mesExample': card.mesExample,
-      'systemPrompt': card.systemPrompt,
-      'postHistoryInstructions': card.postHistoryInstructions,
-      'creatorNotes': card.creatorNotes,
-      'depthPrompt': card.depthPrompt,
-      'alternateGreetings': card.alternateGreetings,
-      'tags': card.tags,
-      'creator': card.creator,
-      'characterVersion': card.characterVersion,
-      'talkativeness': card.talkativeness,
-      'fav': card.fav,
-      'bubbleStyle': card.bubbleStyle?.toJson(),
-      'avatar': card.avatarBase64,
-      'background': card.backgroundBase64,
-    };
+  'name': card.name,
+  'description': card.description,
+  'personality': card.personality,
+  'scenario': card.scenario,
+  'firstMessage': card.firstMessage,
+  'mesExample': card.mesExample,
+  'systemPrompt': card.systemPrompt,
+  'postHistoryInstructions': card.postHistoryInstructions,
+  'creatorNotes': card.creatorNotes,
+  'depthPrompt': card.depthPrompt,
+  'alternateGreetings': card.alternateGreetings,
+  'tags': card.tags,
+  'creator': card.creator,
+  'characterVersion': card.characterVersion,
+  'talkativeness': card.talkativeness,
+  'fav': card.fav,
+  'bubbleStyle': card.bubbleStyle?.toJson(),
+  'avatarHash': card.avatarHash,
+  'backgroundHash': card.backgroundHash,
+};
 
 CharacterCard? _decodeCard(Object? raw) {
   if (raw is! Map) return null;
@@ -188,8 +202,8 @@ CharacterCard? _decodeCard(Object? raw) {
     talkativeness: _string(map['talkativeness']),
     fav: map['fav'] == true,
     bubbleStyle: bubble,
-    avatarBase64: _optionalString(map['avatar']),
-    backgroundBase64: _optionalString(map['background']),
+    avatarHash: _optionalString(map['avatarHash']),
+    backgroundHash: _optionalString(map['backgroundHash']),
   );
 }
 
@@ -209,24 +223,25 @@ List<WorldbookEntry>? _decodeEntries(Object? raw) {
 }
 
 Map<String, dynamic> _encodeDecisions(ReviewDecisions decisions) => {
-      'fields': {
-        for (final entry in decisions.fields.entries)
-          entry.key: {
-            'accepted': entry.value.accepted,
-            if (entry.value.editedText != null)
-              'edited': entry.value.editedText,
-          },
+  'fields': {
+    for (final entry in decisions.fields.entries)
+      entry.key: {
+        'accepted': entry.value.accepted,
+        if (entry.value.editedText != null) 'edited': entry.value.editedText,
+        if (entry.value.editedList != null)
+          'editedList': entry.value.editedList,
       },
-      'entries': {
-        for (final entry in decisions.entries.entries)
-          entry.key: {
-            'accepted': entry.value.accepted,
-            if (entry.value.editedEntry != null)
-              'edited': entry.value.editedEntry!.toMap(),
-          },
+  },
+  'entries': {
+    for (final entry in decisions.entries.entries)
+      entry.key: {
+        'accepted': entry.value.accepted,
+        if (entry.value.editedEntry != null)
+          'edited': entry.value.editedEntry!.toMap(),
       },
-      'avatarAccepted': decisions.avatarAccepted,
-    };
+  },
+  'avatarAccepted': decisions.avatarAccepted,
+};
 
 ReviewDecisions? _decodeDecisions(Object? raw) {
   if (raw is! Map) return null;
@@ -240,6 +255,7 @@ ReviewDecisions? _decodeDecisions(Object? raw) {
     fields[item.key as String] = FieldDecision(
       accepted: value['accepted'] != false,
       editedText: _optionalString(value['edited']),
+      editedList: _stringList(value['editedList']),
     );
   }
   final entries = <String, EntryDecision>{};
@@ -271,11 +287,11 @@ ReviewDecisions? _decodeDecisions(Object? raw) {
 }
 
 Map<String, dynamic> _encodeEntry(CardStudioEntry entry) => {
-      'kind': entry.kind.name,
-      'text': entry.text,
-      'tools': entry.tools,
-      'step': entry.step,
-    };
+  'kind': entry.kind.name,
+  'text': entry.text,
+  'tools': entry.tools,
+  'step': entry.step,
+};
 
 List<CardStudioEntry>? _decodeEntriesLog(Object? raw) {
   if (raw is! List) return null;
@@ -329,7 +345,6 @@ String? _optionalString(Object? raw) {
   return raw is String ? raw : null;
 }
 
-int? _optionalTokenCount(Object? raw) =>
-    raw is int && raw >= 0 ? raw : null;
+int? _optionalTokenCount(Object? raw) => raw is int && raw >= 0 ? raw : null;
 
 int _tokenCount(Object? raw) => raw is int && raw >= 0 ? raw : 0;

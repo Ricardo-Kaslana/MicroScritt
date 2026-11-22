@@ -4,13 +4,14 @@
 /// 宽窗使用固定名片侧栏 + 独立滚动正文,窄窗收为顶部名片,所有字段保持可选择。
 library;
 
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../data/image_codec.dart';
 import '../../models/character_card.dart';
 import '../../models/worldbook_entry.dart';
+import '../../state/providers.dart';
+import '../common/app_sheet.dart';
+import '../common/hash_image.dart';
 import '../common/section_header.dart';
 import '../theme/app_theme.dart';
 
@@ -20,13 +21,12 @@ Future<void> showCardPreview(
   required CharacterCard card,
   required List<WorldbookEntry> entries,
 }) {
-  return showModalBottomSheet<void>(
-    context: context,
+  return showAppSheet<void>(
+    context,
     isScrollControlled: true,
-    useSafeArea: true,
     showDragHandle: true,
     backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-    constraints: const BoxConstraints(maxWidth: 1040),
+    maxWidth: 1040,
     builder: (_) => FractionallySizedBox(
       heightFactor: 0.94,
       child: CardPreviewSheet(card: card, entries: entries),
@@ -54,7 +54,7 @@ class CardPreviewSheet extends StatelessWidget {
       for (final tag in card.tags)
         if (tag.trim().isNotEmpty) tag.trim(),
     ];
-    final avatar = safeBase64Decode(card.avatarBase64);
+    final avatar = card.avatarHash;
     final basics = <(String, String)>[
       if (card.description.trim().isNotEmpty) ('描述', card.description),
       if (card.personality.trim().isNotEmpty) ('性格', card.personality),
@@ -185,7 +185,7 @@ class _PreviewAppBar extends StatelessWidget {
             ),
             child: Icon(
               Icons.auto_awesome_rounded,
-              size: 17,
+              size: 16,
               color: scheme.primary,
             ),
           ),
@@ -218,7 +218,7 @@ class _PreviewAppBar extends StatelessWidget {
           IconButton(
             tooltip: '关闭',
             onPressed: () => Navigator.pop(context),
-            icon: const Icon(Icons.close_rounded),
+            icon: const Icon(Icons.close),
           ),
         ],
       ),
@@ -249,7 +249,7 @@ class _PreviewScrollView extends StatelessWidget {
 class _IdentityCard extends StatelessWidget {
   final String name;
   final List<String> tags;
-  final Uint8List? avatar;
+  final String? avatar;
   final int entryCount;
   final int greetingCount;
   final bool compact;
@@ -338,8 +338,8 @@ class _IdentityCard extends StatelessWidget {
   }
 }
 
-class _AvatarCover extends StatelessWidget {
-  final Uint8List? avatar;
+class _AvatarCover extends ConsumerWidget {
+  final String? avatar;
   final double width;
   final double height;
 
@@ -350,9 +350,16 @@ class _AvatarCover extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
-    final bytes = avatar;
+    final hash = avatar;
+    final image = hash == null
+        ? null
+        : hashImageProvider(
+            ref.read(databaseProvider).images,
+            hash,
+            cacheWidth: kLargeImageWidth,
+          );
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
       child: Container(
@@ -360,13 +367,22 @@ class _AvatarCover extends StatelessWidget {
         width: width,
         height: height,
         color: scheme.surfaceContainerHighest,
-        child: bytes == null
+        child: image == null
             ? Icon(
                 Icons.person_outline_rounded,
                 size: 42,
                 color: scheme.onSurfaceVariant,
               )
-            : Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true),
+            : Image(
+                image: image,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => Icon(
+                  Icons.broken_image_outlined,
+                  size: 42,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
       ),
     );
   }

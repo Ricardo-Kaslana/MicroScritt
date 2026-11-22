@@ -1,93 +1,77 @@
-/// 消息行(`messages` 表)的持久化:追加、窗口读取、图片分块与导入落库。
+/// 消息行(`messages` 表)的持久化:追加、窗口读取与导入落库。
 ///
-/// 消息只追加、seq 单调;图片字节永不随列表查询整列加载(Android
-/// CursorWindow 上限 2MB),一律按 id 分块读取。
+/// 消息只追加、seq 单调;消息行只保存图片资产哈希,业务写与引用计数同事务。
 library;
 
 import 'dart:collection';
+import 'dart:typed_data';
 
 import 'package:sqflite/sqflite.dart';
+import '../models/image_ref.dart';
 import '../models/message.dart';
 import 'database.dart';
 
 /// 消息仓储:单行追加、显示/组装双口径窗口读取与内存缓存。
 ///
-/// 缓存按 `(Database, sessionId, includeImages)` 跨实例共享,任一实例的写
-/// 路径都会精确失效对应会话;窗口读取不进缓存(形状由调用方游标决定)。
+/// 缓存按 `(Database, sessionId)` 跨实例共享,任一实例的写路径都会精确失效
+/// 对应会话;窗口读取不进缓存(形状由调用方游标决定)。
 class MessageRepository {
   final AppDatabase db;
 
-  /// 内存级读取缓存:按 `(Database, sessionId, includeImages)` 缓存某会话按 seq
-  /// 排序的完整消息列表,避免同一轮生成(send → _generateReply → 后台维护)里对
-  /// 同一会话重复执行全表查询与行映射。
+  /// 内存级读取缓存:缓存某会话按 seq 排序的完整消息列表,避免同一轮生成
+  /// (send → _generateReply → 后台维护)里重复执行全表查询与行映射。
   ///
-  /// **跨实例共享**(static):本项目多处会临时 `MessageRepository(db)` 建实例
-  /// (chat_controller 走单例 provider,但导出/compact_service/测试常另建实例)。
-  /// 若缓存是实例级,一个实例的写入无法让另一实例的读取失效,会产生陈旧读取
-  /// (测试即抓到了这一点)。故缓存以底层 sqflite `Database` 对象为键做 static
-  /// 共享 —— 任一实例的写路径都精确失效该 (db,sessionId) 的所有读者。
-  ///
-  /// 正确性要点:
-  /// - `Message` 是不可变对象,返回的列表按不可变只读使用(chat_controller 把
-  ///   它存进 state 后从不原地增删改),因此可直接共享同一 List 实例;
-  /// - 所有写路径(append/delete/deleteFrom/updateContent/clearSession/insertSystem/
-  ///   markCompacted/insertSystemAndCompact)都会失效该 (db,sessionId) 的缓存,
-  ///   保证下次读从库重新取、不返回陈旧数据;
-  /// - 角色的级联删除(character/session 删除)会绕过本仓库直删 messages 表,
-  ///   但被删会话的 sessionId 永不复用(自增主键),遗留的陈旧缓存条目不可达。
+  /// **跨实例共享**(static):任一实例的写路径都精确失效该 (db,sessionId)
+  /// 的所有读者。`Message` 不可变,缓存列表也只按不可变快照共享。
   static final LinkedHashMap<_MessageCacheKey, List<Message>> _cache =
       LinkedHashMap<_MessageCacheKey, List<Message>>();
 
-  /// 容量 12:缓存的意义是"同一轮生成/同一次交互里的重复读",活跃会话
-  /// 同一时刻不过一两个;再大只会让重度多会话实例常驻几十份全量消息列表。
-  /// 逐出按插入序(FIFO),被逐出的会话下次读照常回库重建。
+  /// 容量 12:只服务同轮交互里的重复读,逐出按插入序(FIFO)。
   static const int _cacheCap = 12;
 
   MessageRepository(this.db);
 
   static void _invalidate(Database db, int sessionId) {
+    // 代次让「失效前派发、提交后才返回」的读不把旧快照回填缓存。
+    _cacheGeneration++;
     _cache.removeWhere((k, _) => k.db == db && k.sessionId == sessionId);
   }
 
-  static List<Message>? _peek(Database db, int sessionId, bool includeImages) =>
-      _cache[_MessageCacheKey(db, sessionId, includeImages)];
+  static int _cacheGeneration = 0;
 
-  static void _store(
-    Database db,
-    int sessionId,
-    bool includeImages,
-    List<Message> messages,
-  ) {
+  /// 供不经过本仓库的写路径(会话/角色级联删除)失效缓存。
+  static void invalidateSession(Database db, int sessionId) =>
+      _invalidate(db, sessionId);
+
+  static List<Message>? _peek(Database db, int sessionId) =>
+      _cache[_MessageCacheKey(db, sessionId)];
+
+  static void _store(Database db, int sessionId, List<Message> messages) {
     if (_cache.length >= _cacheCap) {
       _cache.remove(_cache.keys.first);
     }
-    _cache[_MessageCacheKey(db, sessionId, includeImages)] = messages;
+    _cache[_MessageCacheKey(db, sessionId)] = messages;
   }
+
+  static String? _localHash(String? hash) =>
+      hash == null || hash.isEmpty ? null : hash;
 
   /// 追加一条消息,返回落库后的完整行(id/seq 已定)。
   ///
-  /// seq 的读-写在同一事务内完成:单连接下事务串行,消除"读 MAX(seq) 后
-  /// 并发插入拿到相同 seq"的非原子窗口。
-  ///
-  /// 事务成功后把该会话的轻量缓存**替换为追加后的新列表**(替换而非原地
-  /// 改动:旧列表实例保持冻结,持有旧快照的 ChatState/组装输入不受影响)——
-  /// 发送管线每轮「落库 → bySession 刷新 state」的第二跳由此从整表重读
-  /// (append 使缓存失效后必然回库)变成一次缓存命中,每轮成本从
-  /// O(会话长度) 降为 O(1),会话越长收益越大。轻量缓存行按 [bySession]
-  /// 同口径剥掉 image_base64(置 has_image 标志,字节走惰性单条读取);
-  /// 带图缓存条目无法原地补行(图片字节逐条回填),连同失效等下次读库。
-  /// 缓存本就不在(首次/被逐出)时维持旧行为:仅失效,等下次读库重建。
+  /// seq 计算、资产引用增加与消息插入在同一事务内完成;任一步失败都会回滚,
+  /// 不产生已指向业务行但未计数(或已计数但无业务行)的资产。
   Future<Message> append({
     required int sessionId,
     required String role,
     required String content,
-    String? imageBase64,
+    String? imageHash,
     String? imageUrl,
     String? imagePrompt,
     MessageKind kind = MessageKind.chat,
     String? refId,
   }) async {
     late final Message appended;
+    final hash = _localHash(imageHash);
     await db.db.transaction((txn) async {
       final next = Sqflite.firstIntValue(
         await txn.rawQuery(
@@ -95,6 +79,7 @@ class MessageRepository {
           [sessionId],
         ),
       )!;
+      if (hash != null) await db.images.acquire(txn, hash);
       final id = await txn.insert('messages', {
         'session_id': sessionId,
         'role': role,
@@ -102,7 +87,7 @@ class MessageRepository {
         'seq': next,
         'kind': kind.wire,
         if (refId != null) 'ref_id': refId,
-        if (imageBase64 != null) 'image_base64': imageBase64,
+        if (hash != null) 'image_hash': hash,
         if (imageUrl != null) 'image_url': imageUrl,
         if (imagePrompt != null) 'image_prompt': imagePrompt,
       });
@@ -112,10 +97,9 @@ class MessageRepository {
         role: role,
         content: content,
         seq: next,
-        imageBase64: imageBase64,
+        imageHash: hash,
         imageUrl: imageUrl,
         imagePrompt: imagePrompt,
-        hasImage: imageBase64 != null && imageBase64.isNotEmpty,
         kind: kind,
         refId: refId,
       );
@@ -124,76 +108,36 @@ class MessageRepository {
     return appended;
   }
 
-  /// append 成功后的缓存维护(只在事务成功后调用)。轻量条目替换为
-  /// 「旧列表 + 追加行」的新实例;带图条目整体失效。
+  /// append 成功后的缓存维护(只在事务成功后调用)。
   static void _refreshCacheAfterAppend(
     Database db,
     int sessionId,
     Message appended,
   ) {
-    final lightKey = _MessageCacheKey(db, sessionId, false);
-    final cached = _cache[lightKey];
-    if (cached != null) {
-      final image = appended.imageBase64;
-      // 轻量口径与 bySession 的 SQL 投影逐字段对齐:不携带 base64 字节,
-      // has_image = image_base64 非空,image_url 原样保留。
-      final row = Message(
-        id: appended.id,
-        sessionId: appended.sessionId,
-        role: appended.role,
-        content: appended.content,
-        seq: appended.seq,
-        isCompacted: appended.isCompacted,
-        compactOf: appended.compactOf,
-        imageUrl: appended.imageUrl,
-        imagePrompt: appended.imagePrompt,
-        hasImage: image != null && image.isNotEmpty,
-        kind: appended.kind,
-        refId: appended.refId,
-      );
-      _cache[lightKey] = [...cached, row];
-    }
-    _cache.remove(_MessageCacheKey(db, sessionId, true));
+    final key = _MessageCacheKey(db, sessionId);
+    final cached = _cache[key];
+    if (cached != null) _cache[key] = [...cached, appended];
   }
 
-  // 轻量投影:不取 `image_base64`,只带 `has_image` 标志;图片字节由
-  // [imageBase64For] 按需单条读取。
   static const String _messageProjection =
-      'id, session_id, role, content, seq, is_compacted, compact_of, image_url, image_prompt, '
-      "kind, ref_id, image_base64 IS NOT NULL AND image_base64 != '' AS has_image";
+      'id, session_id, role, content, seq, is_compacted, compact_of, '
+      'image_hash, image_url, image_prompt, kind, ref_id';
 
-  /// 某会话的全部消息,按 seq 升序。
-  ///
-  /// 默认轻量:每张图片 2~4MB 的 base64,全量读会让聊天每次刷新都搬几十 MB,
-  /// 故只回 has_image 标志,渲染层经 [imageBase64For] 按需读取。导出等确需
-  /// 完整数据的调用方传 `includeImages: true`,图片同样逐条分块回填、不整列读。
-  Future<List<Message>> bySession(
-    int sessionId, {
-    bool includeImages = false,
-  }) async {
-    final cached = _peek(db.db, sessionId, includeImages);
+  /// 某会话的全部消息,按 seq 升序;哈希是轻量元数据,随列表直接返回。
+  Future<List<Message>> bySession(int sessionId) async {
+    final cached = _peek(db.db, sessionId);
     if (cached != null) return cached;
+    final generation = _cacheGeneration;
     final dbRows = await db.db.rawQuery(
       'SELECT $_messageProjection '
       'FROM messages WHERE session_id = ? ORDER BY seq',
       [sessionId],
     );
-    var rows = dbRows.map(Message.fromMap).toList();
-    if (includeImages) {
-      // 不能整列 bulk SELECT image_base64:Android 的 CursorWindow 上限 2MB,
-      // 任一行超限整批查询即抛 Row too big(见 [imageBase64For]),只能逐条回填。
-      final full = <Message>[];
-      for (final m in rows) {
-        final id = m.id;
-        full.add(
-          m.hasImage && id != null
-              ? m.copyWith(imageBase64: await imageBase64For(id))
-              : m,
-        );
-      }
-      rows = full;
+    final rows = dbRows.map(Message.fromMap).toList();
+    // 查询期间发生过任何失效:结果可能早于某个提交,丢弃本次回填。
+    if (generation == _cacheGeneration) {
+      _store(db.db, sessionId, rows);
     }
-    _store(db.db, sessionId, includeImages, rows);
     return rows;
   }
 
@@ -328,192 +272,322 @@ class MessageRepository {
     return messages.reversed.toList();
   }
 
-  /// base64 分块读取的块大小(字符)。必须远小于 Android CursorWindow 的
-  /// 2MB 上限 —— 每块查询只回**一行**,1MB 字符(ASCII base64 一字符一字节)
-  /// 给窗口留足余量;相比旧的 512K 少一半往返,重启后逐张图的分块读取更快。
-  static const int _imageChunkChars = 1024 * 1024;
-
-  /// 按消息 id 读取单条的 image_base64(轻量查询后渲染层的按需加载入口)。
-  ///
-  /// Android 的 SQLite 游标窗口(CursorWindow)上限 2MB,单次 SELECT 整列时
-  /// 超限的行会整行抛 Row too big(生图常 2~4MB base64;写库不受影响,只有
-  /// 读取会炸)。因此先查长度,再用 substr 分块读取、Dart 侧拼接,任何平台的
-  /// 单次返回都远低于窗口上限。
-  Future<String?> imageBase64For(int id) async {
-    final len = await _imageLength(id);
-    if (len == null) return null;
-    final buffer = StringBuffer();
-    for (var start = 1; start <= len; start += _imageChunkChars) {
-      final chunk = await db.db.rawQuery(
-        'SELECT substr(image_base64, ?, ?) AS piece FROM messages WHERE id = ? LIMIT 1',
-        [start, _imageChunkChars, id],
-      );
-      buffer.write(chunk.first['piece'] as String? ?? '');
-    }
-    return buffer.toString();
-  }
-
-  /// 流式读取图片 base64:与 [imageBase64For] 同一分块策略,但逐块 yield,
-  /// 供会话归档导出直接写给文件,避免把整张图(乃至整会话)拼进内存。
-  Stream<String> imageBase64Chunks(
-    int id, {
-    int chunkChars = _imageChunkChars,
-  }) async* {
-    final len = await _imageLength(id);
-    if (len == null) return;
-    for (var start = 1; start <= len; start += chunkChars) {
-      final chunk = await db.db.rawQuery(
-        'SELECT substr(image_base64, ?, ?) AS piece FROM messages WHERE id = ? LIMIT 1',
-        [start, chunkChars, id],
-      );
-      final piece = chunk.first['piece'] as String?;
-      if (piece != null && piece.isNotEmpty) yield piece;
-    }
-  }
-
-  Future<int?> _imageLength(int id) async {
-    final lenRows = await db.db.rawQuery(
-      'SELECT length(image_base64) AS len FROM messages WHERE id = ? LIMIT 1',
-      [id],
+  /// 向下分页:取 `seq > [afterSeq]` 且 `seq < [beforeSeq]`(可选上限)的
+  /// 聊天行,按 seq 升序返回。供后台 agent 在定位到某条消息后读取其后文
+  /// (readHistory 的邻近窗口),与向上分页共用同一过滤口径。
+  Future<List<Message>> bySessionPageAfter(
+    int sessionId, {
+    required int afterSeq,
+    int? beforeSeq,
+    required int limit,
+  }) async {
+    final rows = await db.db.rawQuery(
+      'SELECT $_messageProjection '
+      'FROM messages WHERE session_id = ? AND seq > ? AND seq < ? '
+      "AND COALESCE(kind, 'chat') = 'chat' AND role != 'system' "
+      'ORDER BY seq ASC LIMIT ?',
+      [sessionId, afterSeq, beforeSeq ?? _seqCeiling, limit],
     );
-    if (lenRows.isEmpty) return null;
-    return lenRows.first['len'] as int?;
+    return rows.map(Message.fromMap).toList();
   }
 
-  /// 删除单条消息(UI 长按删除)。seq 允许留洞,组装管线只按顺序读。
+  /// 无上限分页的哨兵值(sqflite 绑定 int,不用 double.infinity)。
+  static const int _seqCeiling = 1 << 62;
+
+  /// 删除单条消息(UI 长按删除),并在同一事务释放其图片资产引用。
   Future<void> delete(int id) async {
-    final rows = await db.db.query(
-      'messages',
-      columns: ['session_id'],
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
-    if (rows.isNotEmpty) _invalidate(db.db, rows.first['session_id'] as int);
-    await db.db.delete('messages', where: 'id = ?', whereArgs: [id]);
-  }
-
-  /// 删除单条消息并返回可恢复快照(聊天页"撤销删除"用)。
-  ///
-  /// 快照取全部可写列;图片字节经 [imageBase64For] 分块回填 —— 整行 SELECT
-  /// 带 image_base64 在 Android 上会因 CursorWindow 2MB 上限抛 Row too big。
-  /// 行不存在时返回 null(已删/并发删除),调用方不弹撤销。
-  Future<DeletedMessageSnapshot?> deleteWithSnapshot(int id) async {
-    final rows = await db.db.query(
-      'messages',
-      columns: const [
-        'id',
-        'session_id',
-        'role',
-        'content',
-        'seq',
-        'is_compacted',
-        'compact_of',
-        'image_url',
-        'image_prompt',
-        'kind',
-        'ref_id',
-      ],
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
-    if (rows.isEmpty) return null;
-    final row = rows.first;
-    final sessionId = row['session_id'] as int;
-    final image = await imageBase64For(id);
-    _invalidate(db.db, sessionId);
-    await db.db.delete('messages', where: 'id = ?', whereArgs: [id]);
-    return DeletedMessageSnapshot(
-      sessionId: sessionId,
-      role: row['role'] as String? ?? 'user',
-      content: row['content'] as String? ?? '',
-      seq: row['seq'] as int,
-      isCompacted: (row['is_compacted'] as int? ?? 0) != 0,
-      compactOf: row['compact_of'] as int?,
-      imageBase64: image,
-      imageUrl: row['image_url'] as String?,
-      imagePrompt: row['image_prompt'] as String?,
-      kind: row['kind'] as String? ?? 'chat',
-      refId: row['ref_id'] as String?,
-    );
-  }
-
-  /// 恢复 [deleteWithSnapshot] 删除的消息。
-  ///
-  /// 原 seq 已被撤销窗口内新落库的行占用时改排到末尾 —— seq 只保证会话内
-  /// 单调,重复 seq 会让排序/组装出现歧义,宁可变位置也不留脏数据。
-  Future<void> restoreDeleted(DeletedMessageSnapshot snapshot) async {
-    _invalidate(db.db, snapshot.sessionId);
-    final occupied = Sqflite.firstIntValue(
-      await db.db.rawQuery(
-        'SELECT COUNT(*) FROM messages WHERE session_id = ? AND seq = ?',
-        [snapshot.sessionId, snapshot.seq],
-      ),
-    );
-    var seq = snapshot.seq;
-    if ((occupied ?? 0) > 0) {
-      seq = Sqflite.firstIntValue(
-        await db.db.rawQuery(
-          'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?',
-          [snapshot.sessionId],
-        ),
-      )!;
-    }
-    await db.db.insert('messages', {
-      'session_id': snapshot.sessionId,
-      'role': snapshot.role,
-      'content': snapshot.content,
-      'seq': seq,
-      'is_compacted': snapshot.isCompacted ? 1 : 0,
-      'compact_of': snapshot.compactOf,
-      'image_base64': snapshot.imageBase64,
-      'image_url': snapshot.imageUrl,
-      'image_prompt': snapshot.imagePrompt,
-      'kind': snapshot.kind,
-      'ref_id': snapshot.refId,
+    int? sessionId;
+    await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        columns: ['session_id', 'image_hash'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+      final row = rows.first;
+      sessionId = row['session_id'] as int;
+      await txn.delete('messages', where: 'id = ?', whereArgs: [id]);
+      final hash = _localHash(row['image_hash'] as String?);
+      if (hash != null) await db.images.release(txn, hash);
     });
+    final deletedSession = sessionId;
+    if (deletedSession != null) _invalidate(db.db, deletedSession);
   }
 
-  /// 清空某条消息的图片(全屏查看器的"删除图片"):base64、URL 与描述一并置空,
-  /// 正文保留(等价于"只删图不删话")。
+  /// 删除单条消息并返回只含哈希的可恢复快照(聊天页"撤销删除"用)。
+  ///
+  /// 删除会在事务内释放业务引用;正常撤销窗口短于零引用资产的回收宽限期,
+  /// 恢复时可按快照哈希重新获取引用。行不存在时返回 null。
+  Future<DeletedMessageSnapshot?> deleteWithSnapshot(int id) async {
+    final snapshot = await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        columns: const [
+          'id',
+          'session_id',
+          'role',
+          'content',
+          'seq',
+          'is_compacted',
+          'compact_of',
+          'image_hash',
+          'image_url',
+          'image_prompt',
+          'kind',
+          'ref_id',
+        ],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      final row = rows.first;
+      await txn.delete('messages', where: 'id = ?', whereArgs: [id]);
+      final hash = _localHash(row['image_hash'] as String?);
+      if (hash != null) await db.images.release(txn, hash);
+      return DeletedMessageSnapshot(
+        sessionId: row['session_id'] as int,
+        role: row['role'] as String? ?? 'user',
+        content: row['content'] as String? ?? '',
+        seq: row['seq'] as int,
+        isCompacted: (row['is_compacted'] as int? ?? 0) != 0,
+        compactOf: row['compact_of'] as int?,
+        imageHash: hash,
+        imageUrl: row['image_url'] as String?,
+        imagePrompt: row['image_prompt'] as String?,
+        kind: row['kind'] as String? ?? 'chat',
+        refId: row['ref_id'] as String?,
+      );
+    });
+    if (snapshot != null) _invalidate(db.db, snapshot.sessionId);
+    return snapshot;
+  }
+
+  /// 批量删除当前会话的多条消息,并返回同一事务生成的恢复快照。
+  ///
+  /// 不属于 [sessionId] 或已不存在的 id 忽略;每条的图片引用随删除释放。
+  /// 查询按 200 个 id 分块,避免 SQLite 变量上限;结果按 seq 升序返回,便于
+  /// 撤销时按原顺序恢复。快照只含哈希,不复制图片字节。
+  Future<List<DeletedMessageSnapshot>> deleteManyWithSnapshots(
+    int sessionId,
+    Iterable<int> ids,
+  ) async {
+    final unique = ids.toSet().toList(growable: false);
+    if (unique.isEmpty) return const [];
+    final snapshots = <DeletedMessageSnapshot>[];
+    await db.db.transaction((txn) async {
+      for (var offset = 0; offset < unique.length; offset += 200) {
+        final end = offset + 200 < unique.length ? offset + 200 : unique.length;
+        final chunk = unique.sublist(offset, end);
+        final placeholders = List.filled(chunk.length, '?').join(',');
+        final rows = await txn.query(
+          'messages',
+          columns: const [
+            'id',
+            'session_id',
+            'role',
+            'content',
+            'seq',
+            'is_compacted',
+            'compact_of',
+            'image_hash',
+            'image_url',
+            'image_prompt',
+            'kind',
+            'ref_id',
+          ],
+          where: 'session_id = ? AND id IN ($placeholders)',
+          whereArgs: [sessionId, ...chunk],
+          orderBy: 'seq ASC',
+        );
+        for (final row in rows) {
+          await txn.delete(
+            'messages',
+            where: 'id = ?',
+            whereArgs: [row['id'] as int],
+          );
+          final hash = _localHash(row['image_hash'] as String?);
+          if (hash != null) await db.images.release(txn, hash);
+          snapshots.add(_snapshotFromRow(row));
+        }
+      }
+    });
+    if (snapshots.isEmpty) return const [];
+    snapshots.sort((a, b) => a.seq.compareTo(b.seq));
+    _invalidate(db.db, sessionId);
+    return snapshots;
+  }
+
+  /// 恢复 [deleteManyWithSnapshots] 的结果,单事务内重建全部行与图片引用。
+  ///
+  /// 按 seq 升序恢复:原位置空着就保持,被撤销窗口内新落库的行占用时排到
+  /// 末尾,批内不会再撞同一 seq。会话已切换时调用方应拒绝(控制器已校验)。
+  Future<void> restoreManyDeleted(
+    List<DeletedMessageSnapshot> snapshots,
+  ) async {
+    if (snapshots.isEmpty) return;
+    final sessionId = snapshots.first.sessionId;
+    for (final snapshot in snapshots) {
+      if (snapshot.sessionId != sessionId) {
+        throw ArgumentError('批量恢复的消息必须属于同一会话');
+      }
+    }
+    final ordered = List<DeletedMessageSnapshot>.of(snapshots)
+      ..sort((a, b) => a.seq.compareTo(b.seq));
+    await db.db.transaction((txn) async {
+      var nextSeq =
+          Sqflite.firstIntValue(
+            await txn.rawQuery(
+              'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages '
+              'WHERE session_id = ?',
+              [sessionId],
+            ),
+          ) ??
+          0;
+      for (final snapshot in ordered) {
+        final occupied = Sqflite.firstIntValue(
+          await txn.rawQuery(
+            'SELECT COUNT(*) FROM messages WHERE session_id = ? AND seq = ?',
+            [sessionId, snapshot.seq],
+          ),
+        );
+        var seq = snapshot.seq;
+        if ((occupied ?? 0) > 0) {
+          seq = nextSeq;
+          nextSeq++;
+        } else if (snapshot.seq >= nextSeq) {
+          nextSeq = snapshot.seq + 1;
+        }
+        final hash = _localHash(snapshot.imageHash);
+        if (hash != null) await db.images.acquire(txn, hash);
+        await txn.insert('messages', {
+          'session_id': sessionId,
+          'role': snapshot.role,
+          'content': snapshot.content,
+          'seq': seq,
+          'is_compacted': snapshot.isCompacted ? 1 : 0,
+          'compact_of': snapshot.compactOf,
+          'image_hash': hash,
+          'image_url': snapshot.imageUrl,
+          'image_prompt': snapshot.imagePrompt,
+          'kind': snapshot.kind,
+          'ref_id': snapshot.refId,
+        });
+      }
+    });
+    _invalidate(db.db, sessionId);
+  }
+
+  static DeletedMessageSnapshot _snapshotFromRow(Map<String, Object?> row) =>
+      DeletedMessageSnapshot(
+        sessionId: row['session_id'] as int,
+        role: row['role'] as String? ?? 'user',
+        content: row['content'] as String? ?? '',
+        seq: row['seq'] as int,
+        isCompacted: (row['is_compacted'] as int? ?? 0) != 0,
+        compactOf: row['compact_of'] as int?,
+        imageHash: _localHash(row['image_hash'] as String?),
+        imageUrl: row['image_url'] as String?,
+        imagePrompt: row['image_prompt'] as String?,
+        kind: row['kind'] as String? ?? 'chat',
+        refId: row['ref_id'] as String?,
+      );
+
+  /// 恢复 [deleteWithSnapshot] 删除的消息,并在同一事务重新获取图片引用。
+  ///
+  /// 原 seq 已被撤销窗口内新落库的行占用时改排到末尾,避免重复 seq。
+  Future<void> restoreDeleted(DeletedMessageSnapshot snapshot) async {
+    await db.db.transaction((txn) async {
+      final occupied = Sqflite.firstIntValue(
+        await txn.rawQuery(
+          'SELECT COUNT(*) FROM messages WHERE session_id = ? AND seq = ?',
+          [snapshot.sessionId, snapshot.seq],
+        ),
+      );
+      var seq = snapshot.seq;
+      if ((occupied ?? 0) > 0) {
+        seq = Sqflite.firstIntValue(
+          await txn.rawQuery(
+            'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?',
+            [snapshot.sessionId],
+          ),
+        )!;
+      }
+      final hash = _localHash(snapshot.imageHash);
+      if (hash != null) await db.images.acquire(txn, hash);
+      await txn.insert('messages', {
+        'session_id': snapshot.sessionId,
+        'role': snapshot.role,
+        'content': snapshot.content,
+        'seq': seq,
+        'is_compacted': snapshot.isCompacted ? 1 : 0,
+        'compact_of': snapshot.compactOf,
+        'image_hash': hash,
+        'image_url': snapshot.imageUrl,
+        'image_prompt': snapshot.imagePrompt,
+        'kind': snapshot.kind,
+        'ref_id': snapshot.refId,
+      });
+    });
+    _invalidate(db.db, snapshot.sessionId);
+  }
+
+  /// 清空某条消息的图片:哈希、URL 与描述一并置空并释放旧引用,正文保留。
   Future<void> clearImage(int id) async {
-    final rows = await db.db.query(
-      'messages',
-      columns: ['session_id'],
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
-    if (rows.isNotEmpty) _invalidate(db.db, rows.first['session_id'] as int);
-    await db.db.update(
-      'messages',
-      {'image_base64': null, 'image_url': null, 'image_prompt': null},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    int? sessionId;
+    var changed = 0;
+    await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        columns: ['session_id', 'image_hash'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+      final row = rows.first;
+      sessionId = row['session_id'] as int;
+      changed = await txn.update(
+        'messages',
+        {'image_hash': null, 'image_url': null, 'image_prompt': null},
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      if (changed > 0) {
+        final hash = _localHash(row['image_hash'] as String?);
+        if (hash != null) await db.images.release(txn, hash);
+      }
+    });
+    final updatedSession = sessionId;
+    if (changed > 0 && updatedSession != null) {
+      _invalidate(db.db, updatedSession);
+    }
   }
 
-  /// 会话文本搜索(聊天页搜索入口)。
+  /// 会话文本搜索(聊天页搜索入口 + 后台 agent 取证)。
   ///
   /// 口径与聊天流一致:`role != 'system'` 且 `kind = 'chat'` —— 压缩摘要与
   /// 附件旁路行不参与(它们本就不渲染);已折叠的原消息仍会命中(聊天流照常
-  /// 显示)。只投影文本列,绝不带 `image_base64`,单次 LIMIT 封顶,避免长会话
-  /// 把搜索结果整批搬进内存。SQLite LIKE 默认对 ASCII 大小写不敏感,中文等
+  /// 显示)。只投影文本列,不携带图片哈希以外的资产数据,单次 LIMIT 封顶,避免长会话
+  /// 把搜索结果整批搬进内存。[beforeSeq] 供后台 agent 把结果钳制在本轮可读
+  /// 窗口内。SQLite LIKE 默认对 ASCII 大小写不敏感,中文等
   /// 无大小写语义。`%`/`_`/`\` 按字面量转义,用户输入不被当作通配符。
   Future<List<MessageSearchHit>> searchInSession(
     int sessionId,
     String query, {
     int limit = 200,
+    int? beforeSeq,
   }) async {
     final term = query.trim();
     if (term.isEmpty) return const [];
     final rows = await db.db.rawQuery(
       'SELECT id, role, content, seq FROM messages '
       "WHERE session_id = ? AND role != 'system' AND COALESCE(kind, 'chat') = 'chat' "
-      "AND content != '' AND content LIKE ? ESCAPE '\\' "
+      "AND content != '' AND content LIKE ? ESCAPE '\\' AND seq < ? "
       'ORDER BY seq DESC LIMIT ?',
-      [sessionId, '%${_escapeLike(term)}%', limit],
+      [sessionId, '%${_escapeLike(term)}%', beforeSeq ?? _seqCeiling, limit],
     );
     return [
       for (final r in rows)
@@ -530,6 +604,28 @@ class MessageRepository {
       .replaceAll(r'\', r'\\')
       .replaceAll('%', r'\%')
       .replaceAll('_', r'\_');
+
+  /// 桌面端消息导航的全量 user 消息索引:只取定位坐标与单行摘要,不受
+  /// 显示窗口裁剪(窗口只装尾部若干行,导航卡却要覆盖整段历史)。
+  ///
+  /// 摘要按字符截断到 160:卡片是单行省略展示,更长正文对 UI 无用,却会让
+  /// 长会话的索引查询把整份转录搬进内存。空正文(图片消息)由 UI 兜底文案。
+  Future<List<UserMessageRef>> userMessagesForNavigation(int sessionId) async {
+    final rows = await db.db.rawQuery(
+      'SELECT id, seq, substr(content, 1, 160) AS preview FROM messages '
+      "WHERE session_id = ? AND COALESCE(kind, 'chat') = 'chat' "
+      "AND role = 'user' ORDER BY seq",
+      [sessionId],
+    );
+    return [
+      for (final row in rows)
+        UserMessageRef(
+          messageId: row['id'] as int,
+          seq: row['seq'] as int,
+          preview: singleLinePreview(row['preview'] as String? ?? ''),
+        ),
+    ];
+  }
 
   /// 按 id 读取定位目标的最小坐标(聊天页搜索跳转用)。不取正文/图片,
   /// 一条主键查询即可判断「消息还在不在、属于哪个会话、是否聊天流可见行」。
@@ -553,6 +649,113 @@ class MessageRepository {
     );
   }
 
+  /// 用远程 URL 下载到的字节修复一条消息的缺失本地资产。
+  ///
+  /// 只有内容哈希与消息引用的 hash 完全一致才修复,远程内容已变化时绝不把
+  /// 业务行改指向另一张图。元数据缺失或计数意外为零时补一次引用;正常引用
+  /// 不动计数。返回是否完成修复。
+  Future<bool> repairImageAsset(int id, Uint8List bytes) async {
+    final ref = await db.images.putBytes(bytes, compress: false);
+    int? sessionId;
+    final repaired = await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        columns: ['session_id', 'image_hash'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return false;
+      final expected = _localHash(rows.first['image_hash'] as String?);
+      if (expected == null || expected != ref.hash) return false;
+      final assets = await txn.query(
+        'image_assets',
+        columns: ['ref_count'],
+        where: 'hash = ?',
+        whereArgs: [ref.hash],
+        limit: 1,
+      );
+      if (assets.isNotEmpty && (assets.first['ref_count'] as int? ?? 0) == 0) {
+        await db.images.acquire(txn, ref.hash);
+      }
+      sessionId = rows.first['session_id'] as int;
+      return true;
+    });
+    if (repaired && sessionId != null) _invalidate(db.db, sessionId!);
+    return repaired;
+  }
+
+  /// 把远程 URL 取到的字节资产化,让原本只有 URL 的消息改走本地资产。
+  ///
+  /// 只在消息当前没有本地哈希、且 `image_url` 仍是 [url] 时写回;保留 URL
+  /// 作为本地资产缺失时的回退。已有哈希的消息一律不动 —— 远程内容可能已
+  /// 变化,不能把消息改指向另一张图。返回消息是否已指向该本地资产;坏图或
+  /// 超限字节返回 false,不影响调用方的 URL 回退渲染。
+  Future<bool> adoptRemoteImage(int id, String url, Uint8List bytes) async {
+    final before = await db.db.query(
+      'messages',
+      columns: ['image_hash', 'image_url'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (before.isEmpty) return false;
+    if (_localHash(before.first['image_hash'] as String?) != null) return false;
+    if (before.first['image_url'] != url) return false;
+
+    final ImageRef ref;
+    try {
+      // URL 回退会再次拿到**原图**:必须按原字节寻址,压缩后哈希永远对不上
+      // 修复路径(归档导入/repair 都绕过压缩)。
+      ref = await db.images.putBytes(bytes, compress: false);
+    } on FormatException {
+      return false;
+    }
+    int? sessionId;
+    final adopted = await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        columns: ['session_id', 'image_hash', 'image_url'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return false;
+      final row = rows.first;
+      if (row['image_url'] != url) return false;
+      final existing = _localHash(row['image_hash'] as String?);
+      sessionId = row['session_id'] as int;
+      if (existing != null) {
+        if (existing != ref.hash) return false;
+        // 内容已经是期望的那张:并发回填可能先一步写完,只补缺失的计数,
+        // 不重复 acquire。
+        final assets = await txn.query(
+          'image_assets',
+          columns: ['ref_count'],
+          where: 'hash = ?',
+          whereArgs: [ref.hash],
+          limit: 1,
+        );
+        if (assets.isNotEmpty &&
+            (assets.first['ref_count'] as int? ?? 0) == 0) {
+          await db.images.acquire(txn, ref.hash);
+        }
+        return true;
+      }
+      final changed = await txn.update(
+        'messages',
+        {'image_hash': ref.hash},
+        where: 'id = ? AND image_hash IS NULL AND image_url = ?',
+        whereArgs: [id, url],
+      );
+      if (changed == 0) return false;
+      await db.images.acquire(txn, ref.hash);
+      return true;
+    });
+    if (adopted && sessionId != null) _invalidate(db.db, sessionId!);
+    return adopted;
+  }
+
   /// 单条消息的生图原始描述(图片重新生成用;无描述/无此消息返回 null)。
   Future<String?> imagePromptFor(int id) async {
     final rows = await db.db.query(
@@ -566,40 +769,60 @@ class MessageRepository {
     return rows.first['image_prompt'] as String?;
   }
 
-  /// 原地替换某条消息的图片(重新生成)。条件更新:id 与原始描述都未变、且该行
-  /// 仍有图片时才写入 —— 期间的删图/删消息/导入改写不会复活旧图。新 URL 原样
-  /// 写入(下载成功时同时保留为回退);返回是否实际更新。
+  /// 原地替换某条消息的图片(重新生成)。条件检查、增加新引用、更新业务行、
+  /// 释放旧引用在同一事务完成;条件不匹配时不获取新引用,失败时整体回滚。
   ///
-  /// [newImagePrompt] 提供时一并改写该行的生图描述(后台重跑换了场景描述仍原地
-  /// 换图);条件判断用的始终是替换前的 [expectedPrompt]。
+  /// [newImagePrompt] 提供时一并改写描述,条件判断始终使用替换前的
+  /// [expectedPrompt]。返回是否实际更新。
   Future<bool> replaceImage(
     int id, {
-    required String? imageBase64,
+    required String? imageHash,
     required String? imageUrl,
     required String expectedPrompt,
     String? newImagePrompt,
   }) async {
-    final rows = await db.db.query(
-      'messages',
-      columns: ['session_id'],
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
-    if (rows.isEmpty) return false;
-    final changed = await db.db.update(
-      'messages',
-      {
-        'image_base64': imageBase64,
-        'image_url': imageUrl,
-        if (newImagePrompt != null) 'image_prompt': newImagePrompt,
-      },
-      where:
-          'id = ? AND image_prompt = ? AND (image_base64 IS NOT NULL OR image_url IS NOT NULL)',
-      whereArgs: [id, expectedPrompt],
-    );
-    if (changed > 0) _invalidate(db.db, rows.first['session_id'] as int);
-    return changed > 0;
+    final newHash = _localHash(imageHash);
+    int? sessionId;
+    final replaced = await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        columns: ['session_id', 'image_hash', 'image_url', 'image_prompt'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return false;
+      final row = rows.first;
+      final oldHash = _localHash(row['image_hash'] as String?);
+      if (row['image_prompt'] != expectedPrompt ||
+          (oldHash == null && row['image_url'] == null)) {
+        return false;
+      }
+      sessionId = row['session_id'] as int;
+      if (newHash != null) await db.images.acquire(txn, newHash);
+      final changed = await txn.update(
+        'messages',
+        {
+          'image_hash': newHash,
+          'image_url': imageUrl,
+          if (newImagePrompt != null) 'image_prompt': newImagePrompt,
+        },
+        where:
+            'id = ? AND image_prompt = ? AND (image_hash IS NOT NULL OR image_url IS NOT NULL)',
+        whereArgs: [id, expectedPrompt],
+      );
+      if (changed == 0) {
+        if (newHash != null) await db.images.release(txn, newHash);
+        return false;
+      }
+      if (oldHash != null) await db.images.release(txn, oldHash);
+      return true;
+    });
+    final updatedSession = sessionId;
+    if (replaced && updatedSession != null) {
+      _invalidate(db.db, updatedSession);
+    }
+    return replaced;
   }
 
   /// 覆盖某条消息的内容(UI 编辑消息)。保留 role/seq/图片,只改写文本。
@@ -611,45 +834,93 @@ class MessageRepository {
       whereArgs: [id],
       limit: 1,
     );
-    if (rows.isNotEmpty) _invalidate(db.db, rows.first['session_id'] as int);
     await db.db.update(
       'messages',
       {'content': content},
       where: 'id = ?',
       whereArgs: [id],
     );
+    // 提交后再失效:提前失效会给并发读回填旧快照的机会(提交后无人再失效)。
+    if (rows.isNotEmpty) _invalidate(db.db, rows.first['session_id'] as int);
   }
 
   /// 删除某条消息及其之后的所有消息(UI 重新生成时的"剪断尾巴")。
-  /// 返回被删除的条数。
+  /// 返回被删除的条数;每行的图片引用都在同一事务释放。
   Future<int> deleteFrom(int id) async {
-    // 只取需要的两列:整行 SELECT 会连 image_base64 一起搬进 CursorWindow,
-    // 对图片消息"重新生成"时在 Android 会抛 Row too big(2MB 上限)。
-    final target = await db.db.query(
-      'messages',
-      columns: ['session_id', 'seq'],
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-    if (target.isEmpty) return 0;
-    final sessionId = target.first['session_id'] as int;
-    final seq = target.first['seq'] as int;
-    _invalidate(db.db, sessionId);
-    return db.db.delete(
-      'messages',
-      where: 'session_id = ? AND seq >= ?',
-      whereArgs: [sessionId, seq],
-    );
+    int? sessionId;
+    final removed = await db.db.transaction((txn) async {
+      final target = await txn.query(
+        'messages',
+        columns: ['session_id', 'seq'],
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      if (target.isEmpty) return 0;
+      final targetSession = target.first['session_id'] as int;
+      sessionId = targetSession;
+      final seq = target.first['seq'] as int;
+      final rows = await txn.query(
+        'messages',
+        columns: ['image_hash'],
+        where: 'session_id = ? AND seq >= ? AND image_hash IS NOT NULL',
+        whereArgs: [targetSession, seq],
+      );
+      // 摘要行也满足 seq >= 条件,但它是被折叠原文的唯一出口:连它一起删会
+      // 让 is_compacted=1 的历史永久退出上下文(后续压缩只看未折叠行)。
+      // 删除前收集摘要 id,删除后把存活且指向它们的折叠行恢复为未折叠 ——
+      // 被删摘要覆盖的原文重新进入活跃窗口,可被下一次压缩重新摘要。
+      final removedSummaries = await txn.query(
+        'messages',
+        columns: ['id'],
+        where: "session_id = ? AND seq >= ? AND role = 'system'",
+        whereArgs: [targetSession, seq],
+      );
+      final count = await txn.delete(
+        'messages',
+        where: 'session_id = ? AND seq >= ?',
+        whereArgs: [targetSession, seq],
+      );
+      if (removedSummaries.isNotEmpty) {
+        final ids = [for (final row in removedSummaries) row['id'] as int];
+        final placeholders = List.filled(ids.length, '?').join(',');
+        await txn.update(
+          'messages',
+          {'is_compacted': 0, 'compact_of': null},
+          where: 'compact_of IN ($placeholders)',
+          whereArgs: ids,
+        );
+      }
+      for (final row in rows) {
+        final hash = _localHash(row['image_hash'] as String?);
+        if (hash != null) await db.images.release(txn, hash);
+      }
+      return count;
+    });
+    final deletedSession = sessionId;
+    if (deletedSession != null) _invalidate(db.db, deletedSession);
+    return removed;
   }
 
-  /// 清空某会话的全部消息(含压缩摘要与原文,`/clear` 命令用)。seq 重新从 0 开始。
+  /// 清空某会话的全部消息(含压缩摘要与原文),并释放全部图片引用。
   Future<void> clearSession(int sessionId) async {
+    await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        columns: ['image_hash'],
+        where: 'session_id = ? AND image_hash IS NOT NULL',
+        whereArgs: [sessionId],
+      );
+      await txn.delete(
+        'messages',
+        where: 'session_id = ?',
+        whereArgs: [sessionId],
+      );
+      for (final row in rows) {
+        final hash = _localHash(row['image_hash'] as String?);
+        if (hash != null) await db.images.release(txn, hash);
+      }
+    });
     _invalidate(db.db, sessionId);
-    await db.db.delete(
-      'messages',
-      where: 'session_id = ?',
-      whereArgs: [sessionId],
-    );
   }
 
   /// 未被压缩折叠的附件行(attachments 去重记账用):返回按 seq 升序的
@@ -684,8 +955,7 @@ class MessageRepository {
     required int sessionId,
     required String content,
   }) async {
-    _invalidate(db.db, sessionId);
-    return db.db.transaction((txn) async {
+    final id = await db.db.transaction((txn) async {
       final next = Sqflite.firstIntValue(
         await txn.rawQuery(
           'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?',
@@ -699,6 +969,8 @@ class MessageRepository {
         'seq': next,
       });
     });
+    _invalidate(db.db, sessionId);
+    return id;
   }
 
   /// 把 [ids] 标记为已压缩折叠并指向摘要行 [compactOf]。
@@ -716,9 +988,6 @@ class MessageRepository {
       whereArgs: [ids.first],
       limit: 1,
     );
-    if (sample.isNotEmpty) {
-      _invalidate(db.db, sample.first['session_id'] as int);
-    }
     final batch = db.db.batch();
     for (final id in ids) {
       batch.update(
@@ -729,21 +998,24 @@ class MessageRepository {
       );
     }
     await batch.commit(noResult: true);
+    if (sample.isNotEmpty) {
+      _invalidate(db.db, sample.first['session_id'] as int);
+    }
   }
 
   /// 会话导入的分块落库(流式归档用):列映射与 [importMessages] 一致,
-  /// seq 从 [seqStart] 起连续。每块一个事务,调用方每 8~16 条提交一次,
-  /// 峰值内存只与块内消息的图片大小相关,与归档总大小无关。
+  /// seq 从 [seqStart] 起连续。每块一个事务,消息哈希与资产引用同事务写入。
   Future<List<int>> insertMessageChunk({
     required int sessionId,
     required List<Message> messages,
     required int seqStart,
   }) async {
     if (messages.isEmpty) return const [];
-    _invalidate(db.db, sessionId);
-    return db.db.transaction((txn) async {
+    final ids = await db.db.transaction((txn) async {
       final batch = txn.batch();
       for (final (i, m) in messages.indexed) {
+        final hash = _localHash(m.imageHash);
+        if (hash != null) await db.images.acquire(txn, hash);
         batch.insert('messages', {
           'session_id': sessionId,
           'role': m.role,
@@ -753,7 +1025,7 @@ class MessageRepository {
           'kind': m.kind.wire,
           if (m.refId != null) 'ref_id': m.refId,
           if (m.imageUrl != null) 'image_url': m.imageUrl,
-          if (m.imageBase64 != null) 'image_base64': m.imageBase64,
+          if (hash != null) 'image_hash': hash,
           if (m.imagePrompt != null) 'image_prompt': m.imagePrompt,
         });
       }
@@ -763,6 +1035,8 @@ class MessageRepository {
           if (id is int) id,
       ];
     });
+    _invalidate(db.db, sessionId);
+    return ids;
   }
 
   /// 流式导入结束后统一换算 `compact_of`:归档里是**消息数组内索引**,
@@ -774,35 +1048,37 @@ class MessageRepository {
     required List<(int rowIndex, int compactIndex)> links,
   }) async {
     if (links.isEmpty) return;
-    _invalidate(db.db, sessionId);
     final batch = db.db.batch();
     for (final (rowIndex, compactIndex) in links) {
       if (rowIndex < 0 || rowIndex >= rowIds.length) continue;
       if (compactIndex < 0 || compactIndex >= rowIds.length) continue;
+      final target = rowIds[compactIndex];
+      final row = rowIds[rowIndex];
+      if (target <= 0 || row <= 0) continue;
       batch.update(
         'messages',
-        {'compact_of': rowIds[compactIndex]},
+        {'compact_of': target},
         where: 'id = ?',
-        whereArgs: [rowIds[rowIndex]],
+        whereArgs: [row],
       );
     }
     await batch.commit(noResult: true);
+    _invalidate(db.db, sessionId);
   }
 
-  /// 会话导入:按列表顺序把消息落到全新会话 —— seq 重排为从 0 开始的连续
-  /// 序列(新会话内自洽即可),图片 base64 原样落列。入参 [Message.compactOf]
-  /// 是**归档数组内索引**(v4 导出语义):先批量插入拿到各行新 id,再把
-  /// compact_of 换算回"摘要行新 id"(与生产写入 markCompacted 的行 id 语义
-  /// 一致);越界索引按无指向处理。单事务完成。
+  /// 会话导入:按列表顺序把消息落到全新会话,seq 重排为从 0 开始的连续
+  /// 序列;图片哈希与引用计数在同一事务写入。入参 [Message.compactOf] 是
+  /// **归档数组内索引**,批量插入后再换算成新行 id;越界索引按无指向处理。
   Future<void> importMessages({
     required int sessionId,
     required List<Message> messages,
   }) async {
     if (messages.isEmpty) return;
-    _invalidate(db.db, sessionId);
     await db.db.transaction((txn) async {
       final batch = txn.batch();
       for (final (i, m) in messages.indexed) {
+        final hash = _localHash(m.imageHash);
+        if (hash != null) await db.images.acquire(txn, hash);
         batch.insert('messages', {
           'session_id': sessionId,
           'role': m.role,
@@ -812,7 +1088,7 @@ class MessageRepository {
           'kind': m.kind.wire,
           if (m.refId != null) 'ref_id': m.refId,
           if (m.imageUrl != null) 'image_url': m.imageUrl,
-          if (m.imageBase64 != null) 'image_base64': m.imageBase64,
+          if (hash != null) 'image_hash': hash,
           if (m.imagePrompt != null) 'image_prompt': m.imagePrompt,
         });
       }
@@ -831,6 +1107,7 @@ class MessageRepository {
         );
       }
     });
+    _invalidate(db.db, sessionId);
   }
 
   /// 摘要写入 + 原文标记压缩原子完成(消除原先两写之间的失败窗口:
@@ -841,8 +1118,7 @@ class MessageRepository {
     required String content,
     required List<int> compactIds,
   }) async {
-    _invalidate(db.db, sessionId);
-    return db.db.transaction((txn) async {
+    final summaryId = await db.db.transaction((txn) async {
       final next = Sqflite.firstIntValue(
         await txn.rawQuery(
           'SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?',
@@ -867,31 +1143,29 @@ class MessageRepository {
       await batch.commit(noResult: true);
       return summaryId;
     });
+    _invalidate(db.db, sessionId);
+    return summaryId;
   }
 }
 
-/// 消息列表缓存键:(Database, sessionId, includeImages) 决定取哪个库的哪种视图。
-/// 用底层 sqflite `Database` 对象区分不同连接(测试通常各开一个 in-memory 库),
-/// 避免跨库串味;同一应用的同一库内则跨 `MessageRepository` 实例共享。
+/// 消息列表缓存键:(Database, sessionId) 决定取哪个库的哪个会话。
+/// 用底层 sqflite `Database` 对象区分不同连接,避免跨库串味。
 class _MessageCacheKey {
   final Database db;
   final int sessionId;
-  final bool includeImages;
-  const _MessageCacheKey(this.db, this.sessionId, this.includeImages);
+  const _MessageCacheKey(this.db, this.sessionId);
 
   @override
   bool operator ==(Object other) =>
       other is _MessageCacheKey &&
       identical(other.db, db) &&
-      other.sessionId == sessionId &&
-      other.includeImages == includeImages;
+      other.sessionId == sessionId;
 
   @override
-  int get hashCode =>
-      Object.hash(identityHashCode(db), sessionId, includeImages);
+  int get hashCode => Object.hash(identityHashCode(db), sessionId);
 }
 
-/// 被删除消息的恢复快照(撤销删除用);图片字节为 null 表示无图。
+/// 被删除消息的恢复快照(撤销删除用);只保存资产哈希,不保存图片字节。
 class DeletedMessageSnapshot {
   final int sessionId;
   final String role;
@@ -901,7 +1175,7 @@ class DeletedMessageSnapshot {
   final int seq;
   final bool isCompacted;
   final int? compactOf;
-  final String? imageBase64;
+  final String? imageHash;
   final String? imageUrl;
   final String? imagePrompt;
   final String kind;
@@ -914,11 +1188,36 @@ class DeletedMessageSnapshot {
     required this.seq,
     required this.isCompacted,
     required this.compactOf,
-    required this.imageBase64,
+    required this.imageHash,
     required this.imageUrl,
     required this.imagePrompt,
     required this.kind,
     required this.refId,
+  });
+}
+
+/// 把正文压成单行摘要:换行/连续空白折叠为一个空格,避免导航卡片里出现
+/// 阶梯状排版。索引查询与窗口内同步合并共用同一口径。
+String singleLinePreview(String content) =>
+    content.replaceAll(_previewWhitespaceRe, ' ').trim();
+
+final RegExp _previewWhitespaceRe = RegExp(r'\s+');
+
+/// 桌面消息导航的一条 user 消息引用:定位坐标 + 单行摘要。
+///
+/// 刻意只带 [messageId]/[seq]/[preview] 三个字段 —— 导航卡列出的是**全量
+/// 历史**,按完整 [Message] 投影在长会话里会让一次悬停展开前就搬运整份转录。
+class UserMessageRef {
+  final int messageId;
+  final int seq;
+
+  /// 去换行/压缩空白后的正文前缀(最多 160 字符);图片消息可能为空串。
+  final String preview;
+
+  const UserMessageRef({
+    required this.messageId,
+    required this.seq,
+    required this.preview,
   });
 }
 

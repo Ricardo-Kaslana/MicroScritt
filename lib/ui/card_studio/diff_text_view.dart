@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../engine/card_studio/card_diff.dart';
+import '../common/diff_colors.dart';
 
 class DiffTextView extends StatefulWidget {
   final TextDiff diff;
@@ -50,9 +51,7 @@ class _DiffTextViewState extends State<DiffTextView> {
           child: SelectionArea(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (final line in visible) _DiffLineRow(line: line),
-              ],
+              children: [for (final line in visible) _DiffLineRow(line: line)],
             ),
           ),
         ),
@@ -73,12 +72,11 @@ class _DiffLineRow extends StatelessWidget {
   final FoldedDiffLine line;
   const _DiffLineRow({required this.line});
 
-  static const Color _added = Color(0xFF2E7D32);
-  static const Color _removed = Color(0xFFC62828);
-
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final added = DiffColors.added(scheme);
+    final removed = DiffColors.removed(scheme);
     final collapsed = line.collapsedCount;
     if (collapsed != null) {
       return Container(
@@ -86,15 +84,19 @@ class _DiffLineRow extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
         child: Text(
           '… $collapsed 行未变 …',
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
         ),
       );
     }
     final (gutter, color, background) = switch (line.kind) {
-      DiffLineKind.added => ('+', _added, _added.withValues(alpha: 0.10)),
-      DiffLineKind.removed => ('-', _removed, _removed.withValues(alpha: 0.08)),
+      DiffLineKind.added => ('+', added, DiffColors.addedBackground(scheme)),
+      DiffLineKind.removed => (
+        '-',
+        removed,
+        DiffColors.removedBackground(scheme),
+      ),
       DiffLineKind.same => (' ', scheme.onSurfaceVariant, Colors.transparent),
     };
     return Container(

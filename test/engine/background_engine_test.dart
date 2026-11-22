@@ -34,6 +34,7 @@ class _JsonBackend implements LlmBackend {
 class _RecordingBackend implements LlmBackend {
   final String text;
   LlmRequest? lastRequest;
+  int calls = 0;
   _RecordingBackend(this.text);
 
   @override
@@ -41,6 +42,7 @@ class _RecordingBackend implements LlmBackend {
 
   @override
   Stream<LlmEvent> generate(LlmRequest request) async* {
+    calls++;
     lastRequest = request;
     yield TextDelta(text);
     yield const DoneEvent();
@@ -62,34 +64,30 @@ void main() {
 <background_task>Background maintenance contract: the output format and rules for this run.
 You are the background state-maintenance agent for a roleplay session. After each assistant reply you inspect the latest conversation and emit ONE machine-readable JSON object of state changes. You are not a chat participant: never write prose, never reply to the user, never explain.
 
-# Output contract (hard rules)
-- Reply with a single JSON object and NOTHING else.
-- No markdown fences, no preamble, no trailing commentary, no thinking tags.
-- Use exactly the keys listed in the output shape, valid JSON only (double quotes, no trailing commas). A key may be null only where null is explicitly allowed below.
+# Output contract
+- Output exactly one JSON object and nothing else: no markdown fences, no preamble, no commentary, no thinking tags.
+- Use only the keys in the output shape, valid JSON only (double quotes, no trailing commas). A key may be null only where the shape explicitly allows it.
 
 # Output shape for this run
 {"variables": {"<key>": "<value>", ...}, "removeVariables": ["<exact existing key>", ...], "imagePrompts": ["<scene description 1>", ..., "<scene description 2>"]}
 
-# How to read the context sections
-- The recent_conversation section is the ONLY source of truth for the current image scene; it is read-only context, not a source of variable updates.
-- Any memory, character, worldbook_background or image_guide section that appears below is durable, read-only background: never contradict it, never copy it into your output, and never invent facts that fight it. These sections may be absent — work with what is present.
+# How to read the context
+- recent_conversation is read-only context and the ONLY source of truth for the current image scene; it is never a source of variable updates.
+- Any memory, character, worldbook_background or image_guide section below is durable, read-only background: never contradict it, never copy it into your output, never invent facts that fight it. Sections may be absent — work with what is present.
 
 # variables
-- Variables are the session's durable state board: short key-value pairs for facts that persist and can change across the story (location, time, condition, goals, relationships, possessions, ongoing effects). They are not a per-scene summary.
-- Update variables ONLY from the variable_delta section, the unprocessed turns for this run.
-- Never replay old changes from the read-only recent_conversation section.
-- Emit only the keys whose value CHANGED in variable_delta, as {"key": new_value}.
-- YOU MAY AND SHOULD CREATE NEW KEYS: when variable_delta establishes a durable fact of this kind that no existing key covers, add it with a short, stable key and reuse that exact key in later runs. Prefer updating an existing key over creating a near-duplicate or synonym, and do not track transient scene details that will not matter again.
-- Preserve existing keys exactly, including whitespace; keys must not be empty or whitespace-only.
-- Values must be JSON scalars: strings, finite numbers or booleans; never null, objects or arrays.
-- Always include the variables object. Do NOT restate unchanged keys; use {} when nothing changed.
-- To delete a key, list its EXACT existing key in removeVariables. Remove only when variable_delta shows the fact it tracks has ended, been left behind, or been permanently superseded. Never remove a key merely because it is absent from variable_delta or because the context looks cluttered; prefer updating it to a neutral value when the key still describes state.
-- Only existing keys listed under variable_access.deletable may be removed; readonly keys must never be updated or removed. All other existing keys may be updated but never removed. New keys may always be created.
+- Variables are the session's durable state board: short key-value pairs for facts that persist and change across the story (location, time, condition, goals, relationships, possessions, ongoing effects). Not a per-scene summary.
+- variable_delta holds this run's unprocessed turns and is the ONLY source of variable changes; never replay old changes from recent_conversation.
+- Emit only keys whose value CHANGED in variable_delta, as {"key": new_value}. Always include the variables object; use {} when nothing changed.
+- Create new keys when variable_delta establishes a durable fact of this kind that no existing key covers: keep the key short and stable, reuse that exact key in later runs, and prefer updating an existing key over creating a near-duplicate or synonym. Do not track transient scene details that will not matter again.
+- Preserve existing keys exactly, including whitespace; keys must not be empty or whitespace-only. Values are JSON scalars: strings, finite numbers or booleans; never null, objects or arrays.
+- Delete only via removeVariables with the key's EXACT existing name, and only when variable_delta shows the fact has ended, been left behind, or been permanently superseded. Never delete because a key is absent from variable_delta or the board looks cluttered; if the key still describes state, update it to a neutral value instead.
+- variable_access governs EXISTING keys: only deletable keys may be removed; readonly keys must never be updated or removed; all other existing keys may be updated but never removed. New keys are unrestricted.
 - A key must never appear in both variables and removeVariables. At most 5 removals per run; use [] when none.
 
 # image
-- Always fill this field — never null, never a generic or stale image. Describe the CURRENT scene read from the recent_conversation section: who is present, where, the action, lighting and mood.
-- Reproduce each character's established appearance EXACTLY as pinned by the image_guide (and the character / memory sections when present); never alter what those fix. Vary only scene-specific pose, expression, action and mood.
+- Always fill this field: never null, never generic, never stale. Describe the CURRENT scene from recent_conversation — who is present, where, the action, lighting and mood.
+- Reproduce each character's established appearance EXACTLY as pinned by the image_guide (and the character / memory sections when present); vary only scene-specific pose, expression, action and mood.
 - Write it as the English NovelAI tag format defined in the image_guide: one comma-separated tag string, not a sentence.
 
 - The user wants 2 images: return exactly 2 DIFFERENT tag strings in "imagePrompts", each a distinct framing (shot size / angle / composition / focus / mood) of the SAME current scene, mutually consistent and each independently usable.</background_task>
@@ -494,12 +492,12 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
       expect(body(prompt, 'recent_conversation'), 'assistant: Current scene at the tavern');
       expect(body(prompt, 'variable_delta'), 'user: Earlier unprocessed damage\nassistant: You lost two hit points');
       expect(jsonDecode(body(prompt, 'variables')), variables);
-      expect(prompt, contains('Update variables ONLY from the variable_delta section'));
-      expect(prompt, contains('Never replay old changes from the read-only recent_conversation'));
+      expect(prompt, contains("variable_delta holds this run's unprocessed turns and is the ONLY source of variable changes"));
+      expect(prompt, contains('never replay old changes from recent_conversation'));
       expect(prompt, contains('Preserve existing keys exactly, including whitespace'));
       expect(prompt, contains('strings, finite numbers or booleans; never null, objects or arrays'));
       final imageRules = prompt.split('# image').last.split('</background_task>').first;
-      expect(imageRules, contains('CURRENT scene read from the recent_conversation'));
+      expect(imageRules, contains('CURRENT scene from recent_conversation'));
       expect(imageRules, isNot(contains('variable_delta')));
     });
 
@@ -513,12 +511,12 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
       ));
       final prompt = backend.lastRequest!.systemPrompt;
       expect(prompt, contains('durable state board'));
-      expect(prompt, contains('They are not a per-scene summary'));
-      expect(prompt, contains('YOU MAY AND SHOULD CREATE NEW KEYS'));
+      expect(prompt, contains('Not a per-scene summary'));
+      expect(prompt, contains('Create new keys when variable_delta establishes a durable fact'));
       expect(prompt, contains('that no existing key covers'));
-      expect(prompt, contains('Prefer updating an existing key over creating a near-duplicate'));
-      expect(prompt, contains('do not track transient scene details'));
-      expect(prompt, contains('New keys may always be created.'));
+      expect(prompt, contains('prefer updating an existing key over creating a near-duplicate'));
+      expect(prompt, contains('Do not track transient scene details'));
+      expect(prompt, contains('New keys are unrestricted.'));
       expect(prompt, contains('a key you add that is not listed here creates a new variable'));
       expect(prompt, contains('New keys are always allowed and are not restricted here'));
     });
@@ -584,9 +582,9 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
         'readonly': ['b'],
       }));
       expect(prompt, contains('"removeVariables"'));
-      expect(prompt, contains('Only existing keys listed under variable_access.deletable'));
+      expect(prompt, contains('variable_access governs EXISTING keys'));
       expect(prompt, contains('At most 5 removals per run'));
-      expect(prompt, contains('Never remove a key merely because it is absent from variable_delta'));
+      expect(prompt, contains('Never delete because a key is absent from variable_delta'));
     });
   });
 
@@ -678,6 +676,144 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
       expect(prompt, contains('超长已截断'));
       expect(prompt, isNot(contains(longDirection)));
       expect(prompt, isNot(contains(longPrompt)));
+    });
+  });
+
+  group('single-image prompt revision', () {
+    test('builds the revision sections and parses the new prompt', () async {
+      final backend = _RecordingBackend(
+        '{"imagePrompt":"silver hair, close-up portrait, rain"}',
+      );
+      final result = ok(
+        await BackgroundEngine(backend).runImagePromptRevision(
+          model: 'm',
+          currentPrompt: 'blonde hair, wide shot, rain',
+          direction: 'make her hair silver and the shot closer',
+          history: const [
+            Message(
+              sessionId: 1,
+              role: 'user',
+              content: 'She steps into the rain',
+              seq: 0,
+            ),
+            Message(
+              sessionId: 1,
+              role: 'assistant',
+              content: 'The street glistens',
+              seq: 1,
+            ),
+          ],
+          imageGuide: 'fixed appearance: 1girl, blue eyes',
+          character: const CharacterCard(name: 'Alice'),
+          memory: 'They met in the rain.',
+        ),
+      );
+
+      expect(result.imagePrompt, 'silver hair, close-up portrait, rain');
+      expect(result.variableUpdates, isEmpty);
+      expect(result.variableRemovals, isEmpty);
+      final prompt = backend.lastRequest!.systemPrompt;
+      expect(prompt, contains('<background_image_revision>'));
+      expect(prompt, isNot(contains('<background_task>')));
+      expect(prompt, contains('<image_prompt_to_revise>'));
+      expect(prompt, contains('blonde hair, wide shot, rain'));
+      expect(prompt, contains('<image_revision_request>'));
+      expect(prompt, contains('make her hair silver and the shot closer'));
+      expect(prompt, contains('<image_guide>'));
+      expect(prompt, contains('fixed appearance: 1girl, blue eyes'));
+      expect(prompt, contains('<character>'));
+      expect(prompt, contains('Name: Alice'));
+      expect(prompt, contains('<memory>'));
+      expect(prompt, contains('They met in the rain.'));
+      expect(prompt, contains('<recent_conversation>'));
+      expect(prompt, contains('user: She steps into the rain'));
+      expect(prompt, contains('assistant: The street glistens'));
+      // 修订契约是英文 tag,不是句子/多个描述。
+      expect(prompt, contains('comma-separated English tag string'));
+    });
+
+    test(
+      'accepts imagePrompts[0] and retries while the field is missing',
+      () async {
+        final backend = _ScriptedBackend([
+          [const TextDelta('{"imagePrompt":null}'), const DoneEvent()],
+          [
+            const TextDelta('{"imagePrompts":["fixed scene"]}'),
+            const DoneEvent(),
+          ],
+        ]);
+        final result = ok(
+          await BackgroundEngine(backend).runImagePromptRevision(
+            model: 'm',
+            currentPrompt: 'old scene',
+            direction: 'brighter',
+            history: const [],
+          ),
+        );
+        expect(result.imagePrompt, 'fixed scene');
+        expect(backend.calls, 2);
+      },
+    );
+
+    test(
+      'gives up after three attempts when imagePrompt stays invalid',
+      () async {
+        final backend = _ScriptedBackend([
+          [const TextDelta('{"imagePrompt":""}'), const DoneEvent()],
+          [const TextDelta('{"imagePrompt":"null"}'), const DoneEvent()],
+          [const TextDelta('{}'), const DoneEvent()],
+        ]);
+        final outcome = await BackgroundEngine(backend).runImagePromptRevision(
+          model: 'm',
+          currentPrompt: 'old scene',
+          direction: 'brighter',
+          history: const [],
+        );
+        expect(outcome, isA<BackgroundRunFailure>());
+        expect(
+          (outcome as BackgroundRunFailure).reason,
+          BackgroundFailureReason.parseFailure,
+        );
+        expect(outcome.detail, contains('imagePrompt'));
+        expect(backend.calls, 3);
+      },
+    );
+
+    test('cancellation short-circuits without retrying', () async {
+      final backend = _RecordingBackend('{"imagePrompt":"fixed"}');
+      final outcome = await BackgroundEngine(backend).runImagePromptRevision(
+        model: 'm',
+        currentPrompt: 'old scene',
+        direction: 'brighter',
+        history: const [],
+        shouldCancel: () => true,
+      );
+      expect(outcome, isA<BackgroundRunFailure>());
+      expect(
+        (outcome as BackgroundRunFailure).reason,
+        BackgroundFailureReason.cancelled,
+      );
+      expect(backend.calls, 1);
+    });
+
+    test('truncates an overlong old prompt and direction', () async {
+      final longPrompt =
+          'P' * (BackgroundEngine.maxRerunPreviousImageChars + 20);
+      final longDirection =
+          'D' * (BackgroundEngine.maxRerunDirectionChars + 20);
+      final backend = _RecordingBackend('{"imagePrompt":"fixed"}');
+      ok(
+        await BackgroundEngine(backend).runImagePromptRevision(
+          model: 'm',
+          currentPrompt: longPrompt,
+          direction: longDirection,
+          history: const [],
+        ),
+      );
+      final prompt = backend.lastRequest!.systemPrompt;
+      expect(prompt, contains('超长已截断'));
+      expect(prompt, isNot(contains(longPrompt)));
+      expect(prompt, isNot(contains(longDirection)));
     });
   });
 
@@ -797,16 +933,16 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
       expect(prompt, isNot(contains('Hidden lore.')));
       // 生图指令要求画面源自最近对话、锚定于记忆。
       expect(prompt, contains('<recent_conversation>'));
-      expect(prompt, contains('recent_conversation section is the ONLY source of truth'));
+      expect(prompt, contains('recent_conversation is read-only context and the ONLY source of truth'));
     });
 
-    test('超长记忆/角色卡/世界书按各自上限截断保开头', () async {
+    test('超长记忆/角色卡按各自上限截断,世界书完整注入', () async {
       final longMemory = 'M' * (BackgroundEngine.maxBackgroundMemoryChars + 500);
       final longDescription = 'D' * (BackgroundEngine.maxBackgroundCharacterChars + 500);
       final longWorldbook = WorldbookEntry(
         characterId: 1,
         background: true,
-        content: 'W' * (BackgroundEngine.maxBackgroundWorldbookEntryChars + 500),
+        content: 'W' * 5000,
       );
       final backend = _RecordingBackend('{"imagePrompt":"a scene"}');
       await BackgroundEngine(backend).run(
@@ -819,26 +955,19 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
         worldbook: [longWorldbook],
       );
       final prompt = backend.lastRequest!.systemPrompt;
-      // 记忆整段截断到上限;世界书改为**逐条**截断,单条超长夹到单条上限
-      // (不再是旧的总量 800 一刀切)。
+      // 记忆与角色卡仍按各自上限截断;世界书不设上限,5000 字整段进入上下文。
       expect(prompt, contains('M' * BackgroundEngine.maxBackgroundMemoryChars));
       expect(prompt, isNot(contains('M' * (BackgroundEngine.maxBackgroundMemoryChars + 1))));
-      expect(prompt, contains('W' * BackgroundEngine.maxBackgroundWorldbookEntryChars));
-      expect(
-        prompt,
-        isNot(contains('W' * (BackgroundEngine.maxBackgroundWorldbookEntryChars + 1))),
-      );
-      // 角色卡含标签前缀,整体截断到上限:超长描述的尾巴被裁掉,并带截断标记。
+      expect(prompt, contains('W' * 5000));
       expect(prompt, isNot(contains(longDescription)));
       expect(prompt, contains('超长已截断'));
     });
 
-    test('多条世界书逐条截断,position 靠后的外貌条目不被前面清零', () async {
-      // 回归:此前只按总量截拼接后的整块,第一条吃光预算后靠后条目整段消失 ——
-      // 用户勾选多条角色外貌设定时只有最前一条进上下文,生图丢了后面角色的定妆。
-      // 现改为逐条截断(每条夹到 maxBackgroundWorldbookEntryChars),两条都完整存活。
-      final a = 'A' * BackgroundEngine.maxBackgroundWorldbookEntryChars; // 恰好满额,不触发标记
-      final b = 'B' * BackgroundEngine.maxBackgroundWorldbookEntryChars;
+    test('多条世界书完整注入,不受逐条或总量上限影响', () async {
+      // 后台世界书注入不设上限:勾选几条就完整进入几条,position 靠后的
+      // 外貌条目同样不会被前面的内容挤掉。
+      final a = 'A' * 3000;
+      final b = 'B' * 3000;
       final backend = _RecordingBackend('{"imagePrompt":"a scene"}');
       await BackgroundEngine(backend).run(
         model: 'm',
@@ -851,16 +980,17 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
         ],
       );
       final prompt = backend.lastRequest!.systemPrompt;
-      // 两条各自满额进入(旧逻辑下第二条会被清零)。
+      // 两条各 3000 字(单条与总量都超过旧上限)完整进入,无截断标记。
       expect(prompt, contains(a));
       expect(prompt, contains(b));
-      // 2000 字仍在总量 4000 以内,无截断标记。
       expect(prompt, isNot(contains('超长已截断')));
     });
 
-    test('世界书逐条截断后仍受总量兜底', () async {
-      // 单条超上限 → 各自夹到单条上限;拼合后若仍超总量 → 总量兜底再截一次。
-      final big = 'C' * (BackgroundEngine.maxBackgroundWorldbookEntryChars + 400);
+    test('大批世界书读取不受总量兜底', () async {
+      // 5 × 2000 = 10000 字远超旧总量上限,全部完整进入上下文。
+      final contents = [
+        for (var i = 0; i < 5; i++) String.fromCharCode(65 + i) * 2000,
+      ];
       final backend = _RecordingBackend('{"imagePrompt":"a scene"}');
       await BackgroundEngine(backend).run(
         model: 'm',
@@ -868,13 +998,15 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
         history: const [],
         features: const BackgroundFeatures(variables: false, image: true),
         worldbook: [
-          for (var i = 0; i < 5; i++)
-            WorldbookEntry(characterId: 1, background: true, position: i, content: big),
+          for (var i = 0; i < contents.length; i++)
+            WorldbookEntry(characterId: 1, background: true, position: i, content: contents[i]),
         ],
       );
       final prompt = backend.lastRequest!.systemPrompt;
-      // 5 × 1000 = 5000 > 总量 4000 → 尾部被总量截断,带标记。
-      expect(prompt, contains('超长已截断'));
+      for (final content in contents) {
+        expect(prompt, contains(content));
+      }
+      expect(prompt, isNot(contains('超长已截断')));
     });
   });
 
@@ -918,7 +1050,7 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
     final prompt = backend.lastRequest!.systemPrompt;
     expect(prompt, contains('<image_guide>'));
     expect(prompt, contains('1girl, silver hair, violet eyes, black coat'));
-    expect(prompt, contains('never alter what those'));
+    expect(prompt, contains('vary only scene-specific pose'));
     // 多张时同样要求贴合指导。
     expect(prompt, contains('established appearance EXACTLY as pinned by the'));
     // 不传记忆时不出现记忆锚定段(锚定段是只读注入,不自行读库)。
@@ -1227,6 +1359,112 @@ Use them as the baseline to revise rather than text to copy; keep the establishe
     );
     expect(missing, isA<BackgroundRunFailure>());
     expect((missing as BackgroundRunFailure).reason, BackgroundFailureReason.parseFailure);
+  });
+
+  test(
+    'image guide regenerate prompt carries full transcript + draft, capping the draft',
+    () async {
+      // 全量重生成:角色卡 + 全部活跃对话 + 常驻世界书 + 既有指导草稿一并送入;
+      // 既有指导超长时截断保留开头(与记忆重生成同规格)。
+      final backend = _RecordingBackend(
+        '{"imageGuide":"1girl, silver hair; 1girl, red eyes"}',
+      );
+      final engine = BackgroundEngine(backend);
+      final longDraft =
+          '${'tag-'.padRight(BackgroundEngine.maxImageGuideChars, 'x')}ZZTAILZZ';
+      await engine.runImageGuideRegenerate(
+        model: 'm',
+        character: const CharacterCard(name: 'Alice', description: 'knight'),
+        worldbook: const [
+          WorldbookEntry(
+            characterId: 1,
+            keys: [],
+            constant: true,
+            content: 'The city always rains.',
+          ),
+        ],
+        history: [
+          const Message(
+            sessionId: 1,
+            role: 'user',
+            content: 'A new character Luna appears',
+            seq: 0,
+          ),
+          const Message(
+            sessionId: 1,
+            role: 'assistant',
+            content: 'Luna has red eyes',
+            seq: 1,
+          ),
+          // 附件行与 system 摘要不进重生成转录。
+          Message(
+            sessionId: 1,
+            role: 'user',
+            content: '<system-reminder>lore</system-reminder>',
+            seq: 2,
+            kind: MessageKind.attachment,
+            refId: 'wb:1',
+          ),
+          const Message(
+            sessionId: 1,
+            role: 'system',
+            content: 'summary row',
+            seq: 3,
+          ),
+        ],
+        currentGuide: longDraft,
+      );
+      final prompt = backend.lastRequest!.systemPrompt;
+      expect(prompt, contains('recomposing the image direction guide'));
+      expect(prompt, contains('FIXED appearance'));
+      expect(prompt, contains('Full conversation transcript'));
+      expect(prompt, contains('user: A new character Luna appears'));
+      expect(prompt, contains('assistant: Luna has red eyes'));
+      expect(prompt, isNot(contains('system-reminder')));
+      expect(prompt, isNot(contains('summary row')));
+      expect(prompt, contains('Existing image guide'));
+      expect(prompt, contains(longDraft.substring(0, 200)));
+      expect(prompt, contains('已截断'));
+      expect(prompt, isNot(contains('ZZTAILZZ')));
+      expect(prompt, contains('Name: Alice'));
+      expect(prompt, contains('The city always rains.'));
+      final result = ok(
+        await engine.runImageGuideRegenerate(
+          model: 'm',
+          character: const CharacterCard(name: 'Alice'),
+          history: const [],
+        ),
+      );
+      expect(result.imageGuide, '1girl, silver hair; 1girl, red eyes');
+    },
+  );
+
+  test('active-round constant worldbook is injected in full (no cap)', () async {
+    // 后台世界书注入不设上限:常驻条目完整进入初始化请求,不做逐条或总量截断。
+    final contents = [
+      for (var i = 0; i < 5; i++) String.fromCharCode(65 + i) * 2000,
+    ];
+    final backend = _RecordingBackend('{"imageGuide":"1girl"}');
+    await BackgroundEngine(backend).runImageGuideInit(
+      model: 'm',
+      character: const CharacterCard(name: 'Alice'),
+      worldbook: [
+        for (var i = 0; i < contents.length; i++)
+          WorldbookEntry(
+            characterId: 1,
+            keys: const [],
+            constant: true,
+            position: i,
+            content: contents[i],
+          ),
+      ],
+    );
+    final prompt = backend.lastRequest!.systemPrompt;
+    // 5 × 2000 = 10000 字全部进入,无截断标记。
+    for (final content in contents) {
+      expect(prompt, contains(content));
+    }
+    expect(prompt, isNot(contains('超长已截断')));
   });
 
   test('applies valid fields even when another field is malformed (C2)', () async {

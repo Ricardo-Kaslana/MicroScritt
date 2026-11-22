@@ -8,6 +8,7 @@ import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/image_config_repository.dart';
 import 'package:microscritt/data/llm_provider_repository.dart';
 import 'package:microscritt/data/user_repository.dart';
+import 'package:microscritt/models/app_settings.dart';
 import 'package:microscritt/models/image_config.dart';
 import 'package:microscritt/models/llm_provider.dart';
 import 'package:microscritt/state/providers.dart';
@@ -67,12 +68,74 @@ void main() {
     expect(find.text('内容与扩展'), findsOneWidget);
     expect(find.text('全局提示词'), findsOneWidget);
     expect(find.text('Hooks'), findsOneWidget);
+    await scrollToListSection(tester, scrollable, '图片与存储');
+    await scrollToListSection(tester, scrollable, '整理存储');
+    await settleProviders(tester);
     await tester.scrollUntilVisible(
       find.text('关于'),
       200,
       scrollable: scrollable,
     );
     expect(find.text('关于'), findsOneWidget);
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('2.0x 字号下外观分段压进卡片且不横向滚动', (tester) async {
+    tester.view.physicalSize = const Size(320, 800);
+    tester.view.devicePixelRatio = 1.0;
+    tester.platformDispatcher.textScaleFactorTestValue = 2.0;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(harness());
+    await tester.pump();
+    await settleProviders(tester);
+
+    expect(find.text('外观'), findsOneWidget);
+    final selector = find.byType(SegmentedButton<AppThemeMode>);
+    expect(selector, findsOneWidget);
+    // 卡片内宽 = 320 − 页面左右 32 − 卡片左右 padding 28 = 260。旧实现把
+    // 自然宽约 392 的分段塞进横向滚动区,用户需要左右拖动才能看全;现在
+    // 等分铺满,文字超出时在段内换行,按钮可以变高但宽度不得溢出。
+    expect(tester.getSize(selector).width, lessThanOrEqualTo(260));
+    expect(tester.takeException(), isNull);
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('图片与存储指标行与设置页其它行同密度同字号', (tester) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(harness());
+    await tester.pump();
+    await settleProviders(tester);
+
+    final scrollable = find.byType(Scrollable).first;
+    // 先滚到存储卡的操作按钮,让指标行进入构建范围;统计是真实异步查询,
+    // 等它落地后再断言字号。
+    await scrollToListSection(tester, scrollable, '整理存储');
+    for (var i = 0; i < 20 && find.text('数据库').evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+    }
+    await scrollToListSection(tester, scrollable, '数据库');
+    final databaseTile = find.ancestor(
+      of: find.text('数据库'),
+      matching: find.byType(ListTile),
+    );
+    expect(databaseTile, findsOneWidget);
+    final tile = tester.widget<ListTile>(databaseTile);
+    // 与设置页其它 ListTile 行一致:不启用 dense(行高/基线不打折),
+    // 右侧值用 bodyMedium(14) 与下拉值同级;标题 16/说明 14 由主题提供。
+    expect(tile.dense, isNot(true));
+    final trailing = tile.trailing! as Text;
+    expect(trailing.style?.fontSize, 14);
+    expect(tester.takeException(), isNull);
     await tester.runAsync(() => db.db.close());
   });
 
@@ -328,6 +391,41 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('user screen asks before leaving the edit page', (tester) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(harness());
+    await tester.pump();
+
+    await tester.tap(find.text('用户管理'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(UserScreen), findsOneWidget);
+
+    // 用户表单状态由表单私有持有,返回前统一确认;取消留在本页。
+    // 设置页后台仍有异步加载动画,不能用 pumpAndSettle。
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('离开用户设置?'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(UserScreen), findsOneWidget);
+
+    // 确认离开后才回到设置页。
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('离开'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(UserScreen), findsNothing);
+    expect(find.text('用户管理'), findsOneWidget);
+    await tester.runAsync(() => db.db.close());
+  });
+
   testWidgets(
     'LLM section shows provider tiles with models and current model',
     (tester) async {
@@ -408,11 +506,7 @@ void main() {
     });
     await tester.pumpWidget(harness());
     await settleProviders(tester);
-    await scrollToListSection(
-      tester,
-      find.byType(Scrollable).first,
-      'LLM 后端',
-    );
+    await scrollToListSection(tester, find.byType(Scrollable).first, 'LLM 后端');
     await settleProviders(tester);
     await scrollToListSection(
       tester,
@@ -439,11 +533,7 @@ void main() {
     });
     await tester.pumpWidget(harness());
     await settleProviders(tester);
-    await scrollToListSection(
-      tester,
-      find.byType(Scrollable).first,
-      'LLM 后端',
-    );
+    await scrollToListSection(tester, find.byType(Scrollable).first, 'LLM 后端');
     await settleProviders(tester);
     // 区块标题刚进入视口时,下方空态卡片可能还在构建窗口外;再滚一屏让
     // 空态进入实现树后再断言。
@@ -485,8 +575,8 @@ void main() {
       await tester.pumpWidget(harness());
       await settleProviders(tester);
 
-final scrollable = find.byType(Scrollable).first;
-    await scrollToListSection(tester, scrollable, '添加 Provider');
+      final scrollable = find.byType(Scrollable).first;
+      await scrollToListSection(tester, scrollable, '添加 Provider');
       // scrollUntilVisible 可能在按钮刚进入缓存区时停下(center 仍在屏外),先滚到视口
       // 中央并 pump 一帧,确保 tap 命中。
       await Scrollable.ensureVisible(

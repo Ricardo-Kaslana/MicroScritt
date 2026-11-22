@@ -161,7 +161,7 @@ void main() {
     );
 
     // 侧栏在左;消息列表铺满右窗(桌面滚动条因此贴窗口最右缘),行内容
-    // 收敛到右窗内居中的 880 会话列 —— 用户气泡外框右缘 = 列右缘。
+    // 收敛到右窗内居中的会话列(1600 时列宽 880) —— 用户气泡外框右缘 = 列右缘。
     final sidebarRect = tester.getRect(find.byType(ChatSessionSidebar));
     expect(sidebarRect.width, kChatSidebarWidth);
     final listRect = tester.getRect(find.byType(MessageList));
@@ -169,7 +169,7 @@ void main() {
     expect(listRect.right, closeTo(1600, 1));
     final columnRight =
         kChatSidebarWidth +
-        (1600 - kChatSidebarWidth + kChatColumnMaxWidth) / 2;
+        (1600 - kChatSidebarWidth + chatColumnMaxWidth(1600)) / 2;
     final userBubble = tester
         .widgetList<ChatBubbleFrame>(
           find.descendant(

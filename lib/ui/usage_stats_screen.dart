@@ -13,6 +13,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/llm_units.dart';
 import '../models/usage_stats.dart';
 import '../state/providers.dart';
+import 'common/async_section.dart';
+import 'common/empty_state.dart';
 import 'common/export_helper.dart';
 import 'common/section_header.dart';
 import 'widgets/usage_charts.dart';
@@ -74,10 +76,12 @@ class _UsageStatsScreenState extends ConsumerState<UsageStatsScreen> {
           ),
         ],
       ),
-      body: stats.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, _) => _ErrorState(error: error, onRetry: _refresh),
-        data: (data) => RefreshIndicator(
+      body: AsyncSection<UsageStatsBundle>(
+        value: stats,
+        compact: false,
+        errorTitle: '统计加载失败',
+        onRetry: () => _refresh(),
+        builder: (context, data) => RefreshIndicator(
           onRefresh: _refresh,
           // 桌面宽屏限制内容宽度并居中:图表有足够画幅,又不至于把折线
           // 拉成超宽横幅;手机宽度下约束自然不生效。
@@ -129,18 +133,11 @@ class _StatsBody extends StatelessWidget {
         ],
         if (summary.requests == 0) ...[
           const SizedBox(height: 12),
-          const SurfaceCard(
-            child: Row(
-              children: [
-                Icon(Icons.hourglass_empty, size: 18),
-                SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    '暂无用量记录。完成一次对话后,这里会累计 Token、请求次数与缓存命中率。',
-                  ),
-                ),
-              ],
-            ),
+          const EmptyState(
+            compact: true,
+            icon: Icons.query_stats,
+            title: '暂无用量记录',
+            message: '完成一次对话后,这里会累计 Token、请求次数与缓存命中率。',
           ),
         ],
         const SizedBox(height: 16),
@@ -180,9 +177,7 @@ class _StatsBody extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 8),
-              UsageLineChart(
-                data: usageSeriesForDays(bundle.daily, rangeDays),
-              ),
+              UsageLineChart(data: usageSeriesForDays(bundle.daily, rangeDays)),
               const SizedBox(height: 20),
               Text(
                 '模型用量 · 最近 $rangeDays 天',
@@ -332,7 +327,7 @@ class _MetricRow extends StatelessWidget {
             color: scheme.primary.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(9),
           ),
-          child: Icon(icon, size: 17, color: scheme.primary),
+          child: Icon(icon, size: 16, color: scheme.primary),
         ),
         const SizedBox(width: 12),
         Expanded(
@@ -416,42 +411,6 @@ class _RangeSwitch extends StatelessWidget {
       showSelectedIcon: false,
       style: const ButtonStyle(visualDensity: VisualDensity.compact),
       onSelectionChanged: (selection) => onChanged(selection.first),
-    );
-  }
-}
-
-class _ErrorState extends StatelessWidget {
-  final Object error;
-  final Future<void> Function() onRetry;
-
-  const _ErrorState({required this.error, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.error_outline, size: 36, color: scheme.error),
-            const SizedBox(height: 12),
-            Text('统计加载失败', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 6),
-            Text(
-              '$error',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 16),
-            FilledButton(onPressed: onRetry, child: const Text('重试')),
-          ],
-        ),
-      ),
     );
   }
 }

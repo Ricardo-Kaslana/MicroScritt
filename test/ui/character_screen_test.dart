@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:microscritt/data/card_studio_draft_file.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/ui_prefs_file.dart';
@@ -18,14 +19,20 @@ import 'package:microscritt/models/ui_prefs.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/character_screen.dart';
 import 'package:microscritt/ui/common/export_helper.dart';
+import 'package:microscritt/ui/common/section_header.dart';
 import 'package:microscritt/ui/widgets/character_deck.dart';
 import 'package:path/path.dart' as p;
 import '../import/png_chunk_reader_test.dart' show buildPngWithText;
 import '../support/fake_file_picker.dart';
+import '../support/image_fixtures.dart';
 import '../support/test_database.dart';
 
-Widget _harness(AppDatabase db) => ProviderScope(
-  overrides: [databaseProvider.overrideWithValue(db)],
+Widget _harness(AppDatabase db, {CardStudioDraftFile? draftFile}) => ProviderScope(
+  overrides: [
+    databaseProvider.overrideWithValue(db),
+    if (draftFile != null)
+      cardStudioDraftFileProvider.overrideWithValue(draftFile),
+  ],
   child: const MaterialApp(home: CharacterScreen()),
 );
 
@@ -81,13 +88,13 @@ Future<void> _pumpAvatarUntilImage(WidgetTester tester) async {
   }
 }
 
-/// 列表预览当前实际使用的图片字节(拆开 cacheWidth 生成的 ResizeImage)。
+/// 列表预览当前实际使用的原图字节(拆开降采样 ResizeImage)。
 Uint8List? _renderedAvatarBytes(WidgetTester tester) {
   final finder = find.byType(Image);
   if (finder.evaluate().isEmpty) return null;
   final provider = tester.widget<Image>(finder.first).image;
   final base = provider is ResizeImage ? provider.imageProvider : provider;
-  return base is MemoryImage ? base.bytes : null;
+  return base is FileImage ? base.file.readAsBytesSync() : null;
 }
 
 void main() {
@@ -124,12 +131,12 @@ void main() {
     expect(find.text('a knight'), findsOneWidget);
     // 无头像时预览区显示名字首字
     expect(find.text('A'), findsOneWidget);
-    expect(find.byType(Card), findsOneWidget);
+    expect(find.byType(SurfaceCard), findsOneWidget);
 
     await tester.tap(find.byTooltip('更多操作'));
     await tester.pumpAndSettle();
     expect(find.text('编辑角色卡'), findsOneWidget);
-    expect(find.text('世界书'), findsOneWidget);
+    expect(find.text('世界书管理'), findsOneWidget);
     expect(find.text('导出角色卡'), findsOneWidget);
     expect(find.text('导出角色卡(JSON)'), findsNothing);
     expect(find.text('导出角色卡(PNG)'), findsNothing);
@@ -246,41 +253,16 @@ void main() {
     }
   });
 
-  testWidgets('card preview shows the avatar image when base64 is set', (
+  testWidgets('card preview shows the avatar file for an asset hash', (
     tester,
   ) async {
     late final AppDatabase db;
     await tester.runAsync(() async {
       db = await openTestDb();
-      final b64 = await _pngBase64(64, 84);
+      final avatar = await putTestImageHash(db, width: 64, height: 84);
       await CharacterRepository(
         db,
-      ).insert(CharacterCard(name: 'Pixel', avatarBase64: b64));
-    });
-    await tester.pumpWidget(_harness(db));
-    await _pumpUntilLoaded(tester);
-    // 头像按 id 惰性加载,轮询到 Image 出现(不再是占位首字)。
-    await _pumpAvatarUntilImage(tester);
-
-    expect(find.byType(Image), findsOneWidget);
-    expect(find.text('P'), findsNothing); // 有头像就不再显示占位首字
-    await tester.runAsync(() => db.db.close());
-  });
-
-  testWidgets('card preview shows a data-URI (data:image) avatar', (
-    tester,
-  ) async {
-    late final AppDatabase db;
-    await tester.runAsync(() async {
-      db = await openTestDb();
-      // 常见角色卡把头像存成完整 data URI;以前 base64Decode 直接抛 → 渐变占位。
-      final rawB64 = await _pngBase64(64, 84);
-      await CharacterRepository(db).insert(
-        CharacterCard(
-          name: 'Pixel',
-          avatarBase64: 'data:image/png;base64,$rawB64',
-        ),
-      );
+      ).insert(CharacterCard(name: 'Pixel', avatarHash: avatar));
     });
     await tester.pumpWidget(_harness(db));
     await _pumpUntilLoaded(tester);
@@ -291,7 +273,7 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('list preview refreshes when the card avatar changes', (
+  testWidgets('list preview refreshes when the card avatar hash changes', (
     tester,
   ) async {
     late final AppDatabase db;
@@ -300,18 +282,20 @@ void main() {
     late final String avatarB;
     await tester.runAsync(() async {
       db = await openTestDb();
-      avatarA = await _pngBase64(32, 42);
-      avatarB = await _pngBase64(64, 84);
+      avatarA = await putTestImageHash(db, width: 32, height: 42);
+      avatarB = await putTestImageHash(db, width: 64, height: 84);
       cardId = await CharacterRepository(
         db,
-      ).insert(CharacterCard(name: 'Pixel', avatarBase64: avatarA));
+      ).insert(CharacterCard(name: 'Pixel', avatarHash: avatarA));
     });
     await tester.pumpWidget(_harness(db));
     await _pumpUntilLoaded(tester);
     await _pumpAvatarUntilImage(tester);
-    expect(_renderedAvatarBytes(tester), base64Decode(avatarA));
+    expect(
+      _renderedAvatarBytes(tester),
+      db.images.fileFor(avatarA).readAsBytesSync(),
+    );
 
-    // 模拟编辑屏保存换头像:更新头像列,并像保存流程一样失效列表与头像 provider。
     await tester.runAsync(() async {
       final repo = CharacterRepository(db);
       final card = await repo.get(cardId);
@@ -323,8 +307,7 @@ void main() {
     container.invalidate(characterAvatarProvider(cardId));
     container.invalidate(charactersProvider);
 
-    // 不回退成占位/灰块,直接等预览换成新图(旧实现会一直停在 avatarA)。
-    final expected = base64Decode(avatarB);
+    final expected = db.images.fileFor(avatarB).readAsBytesSync();
     for (
       var i = 0;
       i < 40 && !listEquals(_renderedAvatarBytes(tester), expected);
@@ -670,20 +653,16 @@ void main() {
   });
 
   testWidgets(
-    'card preview falls back to the avatar_base64 column when data_json lacks it',
+    'card preview uses the avatar asset when data_json lacks it',
     (tester) async {
       late final AppDatabase db;
       await tester.runAsync(() async {
         db = await openTestDb();
         final rawB64 = await _pngBase64(64, 84);
-        // 手工写入:avatar 只落在 characters.avatar_base64 列,data_json 里没有 avatar。
-        await db.db.insert('characters', {
-          'name': 'Legacy',
-          'avatar_base64': rawB64,
-          'data_json':
-              '{"name":"Legacy","description":"","personality":"","scenario":'
-              '"","first_mes":"","mes_example":"","system_prompt":"","post_history_instructions":"","creator_notes":""}',
-        });
+        final ref = await db.images.putBytes(base64Decode(rawB64));
+        await CharacterRepository(db).insert(
+          CharacterCard(name: 'Legacy', avatarHash: ref.hash),
+        );
       });
       await tester.pumpWidget(_harness(db));
       await _pumpUntilLoaded(tester);
@@ -695,15 +674,26 @@ void main() {
     },
   );
 
-  testWidgets('delete menu item removes the character after confirmation', (
+  testWidgets('delete removes the character and its card-studio draft', (
     tester,
   ) async {
     late final AppDatabase db;
+    late final CardStudioDraftFile draftFile;
+    late final int characterId;
     await tester.runAsync(() async {
       db = await openTestDb();
-      await CharacterRepository(db).insert(const CharacterCard(name: 'Bob'));
+      characterId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Bob'));
+      final dir = await Directory.systemTemp.createTemp('character-delete-draft-');
+      addTearDown(() async {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      });
+      draftFile = CardStudioDraftFile(dir.path);
+      await draftFile.write(characterId, const {'marker': true});
+      expect(await draftFile.read(characterId), isNotNull);
     });
-    await tester.pumpWidget(_harness(db));
+    await tester.pumpWidget(_harness(db, draftFile: draftFile));
     await _pumpUntilLoaded(tester);
 
     await tester.tap(find.byTooltip('更多操作'));
@@ -711,8 +701,6 @@ void main() {
     await tester.tap(find.text('删除角色'));
     await tester.pumpAndSettle();
 
-    // 确认对话框出现,点确认删除。invalidate 触发的重载:轮询到 charactersProvider
-    // 拿到不含 Bob 的新数据为止(先抽帧启动再等真实 I/O)。
     expect(find.text('删除角色?'), findsOneWidget);
     await tester.runAsync(() async {
       await tester.tap(find.text('删除').last);
@@ -720,9 +708,7 @@ void main() {
         tester.element(find.byType(CharacterScreen)),
       );
       for (var i = 0; i < 60; i++) {
-        await Future<void>.delayed(
-          const Duration(milliseconds: 50),
-        ); // 真实时间,喂给 DB isolate
+        await Future<void>.delayed(const Duration(milliseconds: 50));
         await tester.pump();
         final st = container.read(charactersProvider);
         final stillThere = st.value?.any((c) => c.card.name == 'Bob') ?? true;
@@ -734,7 +720,10 @@ void main() {
 
     expect(find.text('Bob'), findsNothing);
     expect(find.text('暂无角色'), findsOneWidget);
-    await tester.runAsync(() => db.db.close());
+    await tester.runAsync(() async {
+      expect(await draftFile.read(characterId), isNull);
+      await db.db.close();
+    });
   });
 
   testWidgets('imported PNG card shows its own image as the preview avatar', (
@@ -750,7 +739,9 @@ void main() {
         'data': {'name': 'Pixel'},
       });
       final png = buildPngWithText('ccv3', base64.encode(utf8.encode(json)));
-      final card = CharacterCardImporter.fromBytes(png);
+      final parsed = CharacterCardImporter.fromBytes(png);
+      final avatar = await putTestImageHash(db, width: 64, height: 84);
+      final card = parsed.replacingAvatar(avatar);
       await CharacterRepository(
         db,
       ).insertWithWorldbook(card, WorldbookImporter.extract(card));

@@ -4,7 +4,6 @@
 /// 轻量构造,后端类 Provider 从当前配置派生,配置为空返回 null 由调用方提示。
 library;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import '../models/backend_config.dart';
@@ -18,7 +17,6 @@ import '../data/card_studio_draft_file.dart';
 import '../data/character_repository.dart';
 import '../data/database.dart';
 import '../data/hook_repository.dart';
-import '../data/image_codec.dart';
 import '../data/regex_script_repository.dart';
 import '../data/image_config_repository.dart';
 import '../data/image_plugin_repository.dart';
@@ -185,23 +183,20 @@ final charactersProvider = FutureProvider<List<CharacterRecord>>(
   (ref) => ref.watch(characterRepositoryProvider).all(hydrateOversized: true),
 );
 
-/// 角色卡列表预览图:按 id 惰性读头像列并离主线程解码(大卡 base64 解码
-/// 会掉帧)。编辑保存后必须 invalidate 对应 id —— 列表项 State 会被复用,
-/// 仅刷新 [charactersProvider] 不会重读头像(旧实现要导出重导入才换图)。
-/// 读取/解码失败一律回 null(占位图),不让超大历史行触发 Riverpod 自动重试。
-final characterAvatarProvider = FutureProvider.autoDispose
-    .family<Uint8List?, int>((ref, id) async {
-      try {
-        final base64 = await ref
-            .watch(characterRepositoryProvider)
-            .avatarBase64For(id);
-        if (base64 == null || base64.isEmpty) return null;
-        final bytes = await compute(safeBase64Decode, base64);
-        return bytes == null || bytes.isEmpty ? null : bytes;
-      } catch (_) {
-        return null;
-      }
-    });
+/// 角色卡列表头像 hash:按 id 惰性读取，UI 以文件路径作为 ImageCache 键。
+/// 编辑保存后必须 invalidate 对应 id；读取失败回 null(占位图)。
+final characterAvatarProvider = FutureProvider.autoDispose.family<String?, int>(
+  (ref, id) async {
+    try {
+      final hash = await ref
+          .watch(characterRepositoryProvider)
+          .avatarHashFor(id);
+      return hash == null || hash.isEmpty ? null : hash;
+    } catch (_) {
+      return null;
+    }
+  },
+);
 
 /// 应用级偏好(主题等)。main() 从 app_settings 表恢复。
 final appSettingsProvider = StateProvider<AppSettings>(
@@ -260,9 +255,10 @@ Future<void> persistChatBackgroundBlur({
   required AppSettings current,
   required double blur,
 }) async {
+  final updated = current.copyWith(chatBackgroundBlur: blur);
+  await repo.save(updated);
   stateSetter(blur);
-  appSettingsSetter(current.copyWith(chatBackgroundBlur: blur));
-  await repo.save(current.copyWith(chatBackgroundBlur: blur));
+  appSettingsSetter(updated);
 }
 
 /// 切换后台 agent 开关并落库。stateSetter 用于写入 backgroundEnabledProvider
@@ -277,9 +273,10 @@ Future<void> persistBackgroundEnabled({
   required AppSettings current,
   required bool enabled,
 }) async {
+  final updated = current.copyWith(backgroundEnabled: enabled);
+  await repo.save(updated);
   stateSetter(enabled);
-  appSettingsSetter(current.copyWith(backgroundEnabled: enabled));
-  await repo.save(current.copyWith(backgroundEnabled: enabled));
+  appSettingsSetter(updated);
 }
 
 /// 更新推理等级并落库。
@@ -312,9 +309,10 @@ Future<void> persistBackgroundFeature({
   required AppSettings current,
 }) async {
   final next = mutate(current.features);
+  final updated = current.copyWith(features: next);
+  await repo.save(updated);
   featureSetter(next);
-  appSettingsSetter(current.copyWith(features: next));
-  await repo.save(current.copyWith(features: next));
+  appSettingsSetter(updated);
 }
 
 /// 更新后台 agent 专用模型并落库。modelId 为 llm_models 表中的整型 id;
@@ -327,8 +325,8 @@ Future<void> persistBackgroundModel({
   required AppSettings current,
 }) async {
   final next = current.copyWith(backgroundModelId: modelId);
-  appSettingsSetter(next);
   await repo.save(next);
+  appSettingsSetter(next);
 }
 
 /// 更新后台 agent 请求的推理强度并落库(schema v48)。与专用模型一样是后台
@@ -340,8 +338,8 @@ Future<void> persistBackgroundReasoningLevel({
   required AppSettings current,
 }) async {
   final next = current.copyWith(backgroundReasoningLevel: level);
-  appSettingsSetter(next);
   await repo.save(next);
+  appSettingsSetter(next);
 }
 
 /// 后台引擎合并按钮的四态循环:启停与运行模式一次写入。
@@ -356,13 +354,13 @@ Future<void> persistBackgroundEngineState({
   required AppSettingsRepository repo,
   required AppSettings current,
 }) async {
-  enabledSetter(enabled);
   final next = current.copyWith(
     backgroundEnabled: enabled,
     backgroundMode: mode,
   );
-  appSettingsSetter(next);
   await repo.save(next);
+  enabledSetter(enabled);
+  appSettingsSetter(next);
 }
 
 /// 切换后台变量删除前确认严格模式并落库。
@@ -373,8 +371,32 @@ Future<void> persistBackgroundDeletionConfirm({
   required AppSettings current,
 }) async {
   final next = current.copyWith(backgroundDeletionConfirm: enabled);
-  appSettingsSetter(next);
   await repo.save(next);
+  appSettingsSetter(next);
+}
+
+/// 切换 Agentic 变量注入主写附件开关并落库。
+Future<void> persistBackgroundVariableInjection({
+  required bool enabled,
+  required void Function(AppSettings) appSettingsSetter,
+  required AppSettingsRepository repo,
+  required AppSettings current,
+}) async {
+  final next = current.copyWith(backgroundVariableInjection: enabled);
+  await repo.save(next);
+  appSettingsSetter(next);
+}
+
+/// 切换 Agentic 下一步建议开关并落库。
+Future<void> persistBackgroundNextSuggestions({
+  required bool enabled,
+  required void Function(AppSettings) appSettingsSetter,
+  required AppSettingsRepository repo,
+  required AppSettings current,
+}) async {
+  final next = current.copyWith(backgroundNextSuggestions: enabled);
+  await repo.save(next);
+  appSettingsSetter(next);
 }
 
 /// 切换后台 agent 上下文锚定段开关(角色卡/记忆)并落库。
@@ -392,8 +414,8 @@ Future<void> persistBackgroundAnchor({
       : current.copyWith(
           backgroundMemoryAnchor: !current.backgroundMemoryAnchor,
         );
-  appSettingsSetter(next);
   await repo.save(next);
+  appSettingsSetter(next);
 }
 
 /// 角色的会话列表(含消息数与最后一条预览),供会话列表屏展示。

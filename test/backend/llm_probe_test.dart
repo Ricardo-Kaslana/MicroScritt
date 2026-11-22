@@ -91,4 +91,48 @@ void main() {
     expect(report.stage.detail, isNot(contains(key)));
     expect(report.stage.kind?.label, '鉴权失败');
   });
+
+  test('Anthropic 探测透传 max_tokens 与非空 system,并关闭自建 client', () async {
+    // Anthropic 的 max_tokens 必填、system 不接受空串:探测不带就会 100% 误报
+    // 配置缺失。成功路径也必须关闭每次新建的 client,否则设置页反复探测会泄漏。
+    late Map<String, dynamic> body;
+    final client = _CloseTrackingClient((req) async {
+      body = jsonDecode(req.body) as Map<String, dynamic>;
+      const sse = 'event: content_block_delta\n'
+          'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"pong"}}\n\n'
+          'event: message_stop\n'
+          'data: {"type":"message_stop"}\n\n';
+      return http.Response.bytes(utf8.encode(sse), 200);
+    });
+    final probe = LlmProbe(
+      config: const BackendConfig(
+        provider: BackendProvider.anthropic,
+        baseUrl: 'https://x',
+        apiKey: 'k',
+        model: 'm',
+        maxTokens: 4096,
+      ),
+      clientFactory: () => client,
+    );
+
+    final report = await probe.run();
+
+    expect(report.ok, isTrue);
+    expect(body['max_tokens'], 4096);
+    expect(body['system'], isNotEmpty);
+    // 自建 client 至少被关闭一次(探测自己负责成功路径,取消时的后端兜底
+    // 可能先一步关过;真实 http.Client 的 close 幂等)。
+    expect(client.closes, greaterThanOrEqualTo(1));
+  });
+}
+
+/// 记录 close 次数的 MockClient:探测成功路径也必须释放自建 client。
+class _CloseTrackingClient extends MockClient {
+  int closes = 0;
+  _CloseTrackingClient(super.fn);
+  @override
+  void close() {
+    closes++;
+    super.close();
+  }
 }

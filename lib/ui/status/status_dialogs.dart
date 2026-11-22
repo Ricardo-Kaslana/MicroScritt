@@ -1,7 +1,8 @@
-/// 桌面状态工作台的居中对话框:后台世界书多选与变量回收站。
+/// 状态面板的共用对话框:后台世界书多选、变量回收站与「应用到上下文」确认。
 ///
 /// 桌面端不再复用移动端的底部弹层:宽窗下选择/回收站都以带固定标题栏与
-/// 动作栏的居中对话框呈现,确认前不落库。
+/// 动作栏的居中对话框呈现,确认前不落库;移动记忆页与桌面工作台则共用
+/// 同一份应用记忆确认文案。
 library;
 
 import 'package:flutter/material.dart';
@@ -10,7 +11,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/variable.dart';
 import '../../models/worldbook_entry.dart';
 import '../../state/providers.dart';
+import '../common/app_dialog_frame.dart';
 import '../common/app_search_field.dart';
+import '../common/app_snack_bar.dart';
+import '../common/async_section.dart';
 import '../common/confirm_dialog.dart';
 import '../common/empty_state.dart';
 import 'status_widgets.dart';
@@ -41,109 +45,36 @@ Future<void> showVariableTrashDialog(
   );
 }
 
-/// 两类桌面对话框共用的外框:标题栏 + 可选次栏 + 内容 + 动作栏。
+/// 「应用到上下文」确认框;返回 true 表示用户确认。
 ///
-/// 高度随内容收缩,最高 70% 屏高:条目少时不留半屏空白,条目多时在
-/// 对话框内部滚动。列表需配 `shrinkWrap: true` 才能按内容量出高度。
-class _StatusDialogFrame extends StatelessWidget {
-  final String title;
-  final String? subtitle;
-  final List<Widget> headerActions;
-  final Widget? secondaryBar;
-  final Widget child;
-  final List<Widget> actions;
-
-  const _StatusDialogFrame({
-    required this.title,
-    this.subtitle,
-    this.headerActions = const [],
-    this.secondaryBar,
-    required this.child,
-    this.actions = const [],
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final height = MediaQuery.sizeOf(context).height * 0.7;
-    return Dialog(
-      insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 32),
-      backgroundColor: scheme.surface,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
-        side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+/// 第 0 条记忆整体换新会改变提示前缀,缓存只能重新预热,因此不静默执行。
+/// 文案与两处入口(移动记忆页 / 桌面工作台)保持一致。
+Future<bool> confirmApplyMemoryToContext(
+  BuildContext context, {
+  required bool pending,
+}) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('应用到上下文?'),
+      content: Text(
+        pending
+            ? '库中记忆已修改,上下文开头仍是旧版本。应用后记忆整体换新,提示前缀会变化(缓存重新预热);改动的差异此前已以通知送达。'
+            : '上下文里的记忆已是最新,应用只会重新组装一次上下文。仍要继续吗?',
       ),
-      child: ConstrainedBox(
-        key: const ValueKey('status_dialog_frame'),
-        constraints: BoxConstraints(maxWidth: 640, maxHeight: height),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 8, 10),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        if (subtitle != null) ...[
-                          const SizedBox(height: 3),
-                          Text(
-                            subtitle!,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  ...headerActions,
-                  IconButton(
-                    tooltip: '关闭',
-                    icon: const Icon(Icons.close, size: 20),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                ],
-              ),
-            ),
-            Divider(
-              height: 0.5,
-              thickness: 0.5,
-              color: scheme.outlineVariant.withValues(alpha: 0.6),
-            ),
-            if (secondaryBar != null) secondaryBar!,
-            Flexible(child: child),
-            if (actions.isNotEmpty) ...[
-              Divider(
-                height: 0.5,
-                thickness: 0.5,
-                color: scheme.outlineVariant.withValues(alpha: 0.6),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: actions,
-                ),
-              ),
-            ],
-          ],
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('取消'),
         ),
-      ),
-    );
-  }
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('应用'),
+        ),
+      ],
+    ),
+  );
+  return confirmed ?? false;
 }
 
 class _WorldbookPickerDialog extends StatefulWidget {
@@ -203,7 +134,8 @@ class _WorldbookPickerDialogState extends State<_WorldbookPickerDialog> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final filtered = _filtered;
-    return _StatusDialogFrame(
+    return AppDialogFrame(
+      frameKey: const ValueKey('status_dialog_frame'),
       title: '后台世界书条目',
       subtitle:
           '已选 ${_selected.length} / ${widget.entries.length} 条进入后台上下文'
@@ -276,85 +208,89 @@ class _WorldbookPickerDialogState extends State<_WorldbookPickerDialog> {
                 final e = filtered[i];
                 final selected = _selected.contains(e.id);
                 final expanded = _expanded.contains(e.id);
-                return InkWell(
-                  key: ValueKey('worldbook_pick_${e.id}'),
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: () => _toggleSelected(e.id),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 10, 4, 10),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.only(top: 1),
-                          child: Icon(
-                            selected
-                                ? Icons.check_circle
-                                : Icons.radio_button_unchecked,
-                            size: 22,
-                            color: selected ? scheme.primary : scheme.outline,
+                return Semantics(
+                  button: true,
+                  checked: selected,
+                  child: InkWell(
+                    key: ValueKey('worldbook_pick_${e.id}'),
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () => _toggleSelected(e.id),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 10, 4, 10),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(top: 1),
+                            child: Icon(
+                              selected
+                                  ? Icons.check_circle
+                                  : Icons.radio_button_unchecked,
+                              size: 22,
+                              color: selected ? scheme.primary : scheme.outline,
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Flexible(
-                                    child: Text(
-                                      e.displayLabel,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: theme.textTheme.bodyLarge,
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        e.displayLabel,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: theme.textTheme.bodyLarge,
+                                      ),
                                     ),
-                                  ),
-                                  if (!e.enabled) ...[
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      '已停用',
-                                      style: theme.textTheme.labelSmall
-                                          ?.copyWith(color: scheme.error),
-                                    ),
+                                    if (!e.enabled) ...[
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        '已停用',
+                                        style: theme.textTheme.labelSmall
+                                            ?.copyWith(color: scheme.error),
+                                      ),
+                                    ],
                                   ],
-                                ],
-                              ),
-                              const SizedBox(height: 2),
-                              if (expanded)
-                                ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxHeight: 220,
-                                  ),
-                                  child: SingleChildScrollView(
-                                    child: Text(
-                                      e.content,
-                                      style: theme.textTheme.bodySmall,
+                                ),
+                                const SizedBox(height: 2),
+                                if (expanded)
+                                  ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      maxHeight: 220,
+                                    ),
+                                    child: SingleChildScrollView(
+                                      child: Text(
+                                        e.content,
+                                        style: theme.textTheme.bodySmall,
+                                      ),
+                                    ),
+                                  )
+                                else
+                                  Text(
+                                    e.content,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: scheme.onSurfaceVariant,
                                     ),
                                   ),
-                                )
-                              else
-                                Text(
-                                  e.content,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    color: scheme.onSurfaceVariant,
-                                  ),
-                                ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                        IconButton(
-                          tooltip: expanded ? '收起预览' : '展开预览',
-                          visualDensity: VisualDensity.compact,
-                          icon: Icon(
-                            expanded ? Icons.expand_less : Icons.expand_more,
-                            size: 20,
+                          IconButton(
+                            tooltip: expanded ? '收起预览' : '展开预览',
+                            visualDensity: VisualDensity.compact,
+                            icon: Icon(
+                              expanded ? Icons.expand_less : Icons.expand_more,
+                              size: 20,
+                            ),
+                            onPressed: () => _toggleExpanded(e.id),
                           ),
-                          onPressed: () => _toggleExpanded(e.id),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 );
@@ -384,10 +320,9 @@ class _VariableTrashDialog extends ConsumerWidget {
         .restore(sessionId, entry.id!);
     if (!context.mounted) return;
     _refresh(ref);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(restored ? '已恢复「${entry.key}」并设为受保护' : '同名变量仍存在,无法恢复'),
-      ),
+    showAppSnack(
+      context,
+      restored ? '已恢复「${entry.key}」并设为受保护' : '同名变量仍存在,无法恢复',
     );
   }
 
@@ -409,9 +344,7 @@ class _VariableTrashDialog extends ConsumerWidget {
     if (!context.mounted) return;
     _refresh(ref);
     if (removed) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('已彻底删除「${entry.key}」')));
+      showAppSnack(context, '已彻底删除「${entry.key}」');
     }
   }
 
@@ -428,9 +361,7 @@ class _VariableTrashDialog extends ConsumerWidget {
         .clearTrash(sessionId);
     if (!context.mounted) return;
     _refresh(ref);
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('已清空回收站($removed 条)')));
+    showAppSnack(context, '已清空回收站($removed 条)');
   }
 
   @override
@@ -439,7 +370,8 @@ class _VariableTrashDialog extends ConsumerWidget {
     final scheme = theme.colorScheme;
     final trash = ref.watch(variableTrashProvider(sessionId));
     final count = trash.maybeWhen(data: (list) => list.length, orElse: () => 0);
-    return _StatusDialogFrame(
+    return AppDialogFrame(
+      frameKey: const ValueKey('status_dialog_frame'),
       title: '已删除的变量',
       subtitle: '恢复后自动设为受保护,避免再次被后台删除;彻底删除后不可恢复。',
       headerActions: [
@@ -460,8 +392,10 @@ class _VariableTrashDialog extends ConsumerWidget {
           child: const Text('关闭'),
         ),
       ],
-      child: trash.when(
-        data: (list) => list.isEmpty
+      child: AsyncSection<List<VariableTrashEntry>>(
+        value: trash,
+        onRetry: () => _refresh(ref),
+        builder: (context, list) => list.isEmpty
             ? const EmptyState(
                 compact: true,
                 icon: Icons.delete_outline,
@@ -513,9 +447,6 @@ class _VariableTrashDialog extends ConsumerWidget {
                   );
                 },
               ),
-        error: (e, _) =>
-            Padding(padding: const EdgeInsets.all(16), child: Text('$e')),
-        loading: () => const Center(child: CircularProgressIndicator()),
       ),
     );
   }

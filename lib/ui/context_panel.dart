@@ -253,7 +253,8 @@ IconData _segmentIcon(String key) => switch (key) {
   'summary' => Icons.compress,
   'attachments' => Icons.attach_file,
   'rewrite' => Icons.edit_note,
-  // 变量只进后台 agent 上下文,主写快照不产出 variables 分段。
+  // 变量默认不进主写快照,不产出 variables 分段;Agentic 注入的选中键
+  // 以附件行出现在「附件」段。
   _ => Icons.article_outlined,
 };
 
@@ -350,7 +351,10 @@ class _SegmentTileState extends State<_SegmentTile> {
                 const SizedBox(width: 6),
                 AnimatedRotation(
                   turns: _effective ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 200),
+                  duration: motionDurationOf(
+                    context,
+                    const Duration(milliseconds: 200),
+                  ),
                   child: Icon(
                     Icons.expand_more,
                     size: 18,
@@ -531,7 +535,10 @@ class _SubEntryTileState extends State<_SubEntryTile> {
                     ),
                     AnimatedRotation(
                       turns: _effective ? 0.5 : 0,
-                      duration: const Duration(milliseconds: 200),
+                      duration: motionDurationOf(
+                        context,
+                        const Duration(milliseconds: 200),
+                      ),
                       child: Icon(
                         Icons.expand_more,
                         size: 16,
@@ -546,7 +553,10 @@ class _SubEntryTileState extends State<_SubEntryTile> {
             // 跳过),只留标签胶囊;展开时全文从 0 向下平滑长出(含顶部小间隙)。
             _AnimatedReveal(
               visible: _effective,
-              duration: const Duration(milliseconds: 200),
+              duration: motionDurationOf(
+                context,
+                const Duration(milliseconds: 200),
+              ),
               childBuilder: (context) => Padding(
                 padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
                 child: Column(
@@ -889,7 +899,10 @@ class _HistoryTruncationTileState extends State<_HistoryTruncationTile> {
                 ),
                 AnimatedRotation(
                   turns: _expanded ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 200),
+                  duration: motionDurationOf(
+                    context,
+                    const Duration(milliseconds: 200),
+                  ),
                   child: Icon(
                     Icons.expand_more,
                     size: 18,

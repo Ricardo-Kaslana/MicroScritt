@@ -1,4 +1,4 @@
-// 消息仓储:追加/分块读、压缩折叠、分页检索与进程内缓存。
+// 消息仓储:图片资产引用、压缩折叠、分页检索与进程内缓存。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/message_repository.dart';
@@ -6,9 +6,12 @@ import 'package:microscritt/data/session_repository.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/models/message.dart';
+import '../support/image_fixture.dart';
 import '../support/test_database.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   late AppDatabase db;
   late MessageRepository messages;
   late SessionRepository sessions;
@@ -20,6 +23,8 @@ void main() {
     sessions = SessionRepository(db);
     characters = CharacterRepository(db);
   });
+
+  tearDown(() => db.db.close());
 
   test('appends messages and returns them ordered by seq', () async {
     final charId = await characters.insert(const CharacterCard(name: 'A'));
@@ -37,52 +42,134 @@ void main() {
     expect(all[1].seq, 1);
   });
 
-  test('appends and reads a message with image base64', () async {
+  test('searchInSession is literal, newest-first, and respects beforeSeq', () async {
     final charId = await characters.insert(const CharacterCard(name: 'A'));
     final sessionId = await sessions.create(charId, 's1');
-    await db.db.insert('messages', {
-      'session_id': sessionId,
-      'role': 'assistant',
-      'content': '',
-      'seq': 0,
-      'image_base64': 'aGVsbG8=',
-    });
-    final all = await messages.bySession(sessionId, includeImages: true);
-    expect(all.single.imageBase64, 'aGVsbG8=');
+    await messages.append(sessionId: sessionId, role: 'user', content: 'the dragon wakes');
+    await messages.append(sessionId: sessionId, role: 'assistant', content: 'The DRAGON sleeps');
+    await messages.append(sessionId: sessionId, role: 'user', content: '100% sure');
+    await messages.append(sessionId: sessionId, role: 'assistant', content: 'later dragon');
+
+    final all = await messages.searchInSession(sessionId, 'dragon');
+    expect(all.map((h) => h.seq).toList(), [3, 1, 0]);
+    // seq < 3 只保留前两次命中
+    final capped = await messages.searchInSession(sessionId, 'dragon', beforeSeq: 3);
+    expect(capped.map((h) => h.seq).toList(), [1, 0]);
+    // LIKE 通配符按字面量处理
+    expect((await messages.searchInSession(sessionId, '%')).single.seq, 2);
+  });
+
+  test('bySessionPageAfter returns forward rows inside the optional bound', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    await messages.append(sessionId: sessionId, role: 'user', content: 'm0');
+    await messages.append(sessionId: sessionId, role: 'assistant', content: 'm1');
+    await messages.append(sessionId: sessionId, role: 'user', content: 'm2');
+    await messages.append(sessionId: sessionId, role: 'assistant', content: 'm3');
+
+    final after = await messages.bySessionPageAfter(sessionId, afterSeq: 0, limit: 2);
+    expect(after.map((m) => m.content).toList(), ['m1', 'm2']);
+    final bounded = await messages.bySessionPageAfter(
+      sessionId,
+      afterSeq: 0,
+      beforeSeq: 3,
+      limit: 10,
+    );
+    expect(bounded.map((m) => m.content).toList(), ['m1', 'm2']);
   });
 
   test(
-    'imageBase64For reads oversized base64 in chunks (Android CursorWindow limit)',
+    'appends and reads an image hash while acquiring its asset reference',
     () async {
       final charId = await characters.insert(const CharacterCard(name: 'A'));
       final sessionId = await sessions.create(charId, 's1');
-      // 2MB+12345:超过 Android CursorWindow 单行 2MB 上限的量级,且跨过 1MB
-      // 分块的多个边界。桌面 ffi 无此限制,这里验证分块拼接的完整性与边界。
-      final big = 'A' * (2 * 1024 * 1024 + 12345);
-      final id = await db.db.insert('messages', {
-        'session_id': sessionId,
-        'role': 'assistant',
-        'content': '',
-        'seq': 0,
-        'image_base64': big,
-      });
+      final hash = await putTestImage(db);
+      expect(await imageRefCount(db, hash), 0);
 
-      expect(await messages.imageBase64For(id), big);
+      final appended = await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: '',
+        imageHash: hash,
+      );
 
-      // 流式导出用的分块流:拼接结果与整体读取一致,且每块不超过 1MB。
-      final pieces = await messages.imageBase64Chunks(id).toList();
-      expect(pieces.join(), big);
-      expect(pieces.length, greaterThan(1));
-      expect(pieces.every((piece) => piece.length <= 1024 * 1024), isTrue);
-
-      // 导出路径(includeImages)同样经分块回填,不整列 bulk SELECT。
-      final full = await messages.bySession(sessionId, includeImages: true);
-      expect(full.single.imageBase64, big);
-      // 轻量视图只带 has_image 标志。
-      expect((await messages.bySession(sessionId)).single.hasImage, isTrue);
-      expect((await messages.bySession(sessionId)).single.imageBase64, isNull);
+      final all = await messages.bySession(sessionId);
+      expect(all.single.imageHash, hash);
+      expect(all.single.hasImage, isTrue);
+      expect(all.single.hasVisualImage, isTrue);
+      expect(appended.imageHash, hash);
+      expect(await imageRefCount(db, hash), 1);
+      expect(await db.images.fileFor(hash).readAsBytes(), testPngBytes());
     },
   );
+
+  test('repairImageAsset restores a missing file only on a hash match', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    final hash = await putTestImage(db);
+    final message = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageHash: hash,
+    );
+    await db.images.fileFor(hash).delete();
+
+    expect(await messages.repairImageAsset(message.id!, testPngBytes()), isTrue);
+    expect(await db.images.fileFor(hash).readAsBytes(), testPngBytes());
+    expect(await imageRefCount(db, hash), 1);
+    expect((await messages.bySession(sessionId)).single.imageHash, hash);
+  });
+
+  test('repairImageAsset never swaps in a different remote image', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    final hash = await putTestImage(db);
+    final message = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageHash: hash,
+    );
+    await db.images.fileFor(hash).delete();
+
+    expect(
+      await messages.repairImageAsset(
+        message.id!,
+        testPngBytes(alternate: true),
+      ),
+      isFalse,
+    );
+    expect(await db.images.fileFor(hash).exists(), isFalse);
+    expect((await messages.bySession(sessionId)).single.imageHash, hash);
+    expect(await imageRefCount(db, hash), 1);
+    expect(
+      await imageRefCount(db, testPngHash(alternate: true)),
+      0,
+    );
+  });
+
+  test('repairImageAsset restores a missing acquire when count is zero', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    final hash = await putTestImage(db);
+    final message = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageHash: hash,
+    );
+    await db.images.fileFor(hash).delete();
+    await db.db.update(
+      'image_assets',
+      {'ref_count': 0},
+      where: 'hash = ?',
+      whereArgs: [hash],
+    );
+
+    expect(await messages.repairImageAsset(message.id!, testPngBytes()), isTrue);
+    expect(await imageRefCount(db, hash), 1);
+  });
 
   test(
     'insertMessageChunk keeps seq continuous and linkCompactOf maps indexes',
@@ -105,6 +192,7 @@ void main() {
             ),
         ],
       );
+      final hash = await putTestImage(db);
       final secondIds = await messages.insertMessageChunk(
         sessionId: sessionId,
         seqStart: 3,
@@ -120,6 +208,7 @@ void main() {
             role: 'assistant',
             content: 'b',
             seq: 4,
+            imageHash: hash,
           ),
         ],
       );
@@ -138,6 +227,29 @@ void main() {
       expect(restored[0].compactOf, rowIds[3]);
       expect(restored[1].compactOf, rowIds[3]);
       expect(restored[2].compactOf, isNull);
+      expect(restored[4].imageHash, hash);
+      expect(await imageRefCount(db, hash), 1);
+    },
+  );
+
+  test(
+    'append rejects an unknown asset hash without inserting the message',
+    () async {
+      final charId = await characters.insert(const CharacterCard(name: 'A'));
+      final sessionId = await sessions.create(charId, 's1');
+      final missing = '0' * 64;
+
+      await expectLater(
+        messages.append(
+          sessionId: sessionId,
+          role: 'assistant',
+          content: '',
+          imageHash: missing,
+        ),
+        throwsStateError,
+      );
+      expect(await messages.bySession(sessionId), isEmpty);
+      expect(await db.db.query('image_assets'), isEmpty);
     },
   );
 
@@ -157,37 +269,27 @@ void main() {
     );
   });
 
-  test(
-    'append persists the original image prompt in light and full views',
-    () async {
-      final charId = await characters.insert(const CharacterCard(name: 'A'));
-      final sessionId = await sessions.create(charId, 's1');
-      final row = await messages.append(
-        sessionId: sessionId,
-        role: 'assistant',
-        content: '',
-        imageBase64: 'aGVsbG8=',
-        imagePrompt: '1girl, silver hair',
-      );
+  test('append persists the original image prompt and hash', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    final hash = await putTestImage(db);
+    final row = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageHash: hash,
+      imagePrompt: '1girl, silver hair',
+    );
 
-      expect(
-        (await messages.bySession(sessionId)).single.imagePrompt,
-        '1girl, silver hair',
-      );
-      expect(
-        (await messages.bySession(
-          sessionId,
-          includeImages: true,
-        )).single.imagePrompt,
-        '1girl, silver hair',
-      );
-      expect(await messages.imagePromptFor(row.id!), '1girl, silver hair');
-      expect(await messages.imagePromptFor(999), isNull);
-    },
-  );
+    final stored = (await messages.bySession(sessionId)).single;
+    expect(stored.imagePrompt, '1girl, silver hair');
+    expect(stored.imageHash, hash);
+    expect(await messages.imagePromptFor(row.id!), '1girl, silver hair');
+    expect(await messages.imagePromptFor(999), isNull);
+  });
 
   test(
-    'replaceImage swaps bytes under the expected prompt and invalidates caches',
+    'replaceImage swaps hashes and never acquires on a condition miss',
     () async {
       final charId = await characters.insert(const CharacterCard(name: 'A'));
       final sessionId = await sessions.create(charId, 's1');
@@ -198,37 +300,28 @@ void main() {
         imageUrl: 'https://img.example/old.png',
         imagePrompt: 'a cave',
       );
-      expect(
-        (await messages.bySession(sessionId)).single.imageUrl,
-        'https://img.example/old.png',
-      );
+      final hash = await putTestImage(db);
+      final rejectedHash = await putTestImage(db, alternate: true);
 
       expect(
         await messages.replaceImage(
           row.id!,
-          imageBase64: 'bmV3',
+          imageHash: hash,
           imageUrl: null,
           expectedPrompt: 'a cave',
         ),
         isTrue,
       );
-      final light = (await messages.bySession(sessionId)).single;
-      expect(light.imagePrompt, 'a cave');
-      expect(light.imageUrl, isNull, reason: '新图没有 URL 时旧 URL 不得残留');
-      expect(light.hasImage, isTrue);
-      expect(await messages.imageBase64For(row.id!), 'bmV3');
-      expect(
-        (await messages.bySession(
-          sessionId,
-          includeImages: true,
-        )).single.imageBase64,
-        'bmV3',
-      );
-      // 条件不匹配(描述已变/消息不存在)时不写入。
+      final stored = (await messages.bySession(sessionId)).single;
+      expect(stored.imagePrompt, 'a cave');
+      expect(stored.imageUrl, isNull, reason: '新图没有 URL 时旧 URL 不得残留');
+      expect(stored.imageHash, hash);
+      expect(await imageRefCount(db, hash), 1);
+
       expect(
         await messages.replaceImage(
           row.id!,
-          imageBase64: 'eA==',
+          imageHash: rejectedHash,
           imageUrl: null,
           expectedPrompt: 'other',
         ),
@@ -237,92 +330,99 @@ void main() {
       expect(
         await messages.replaceImage(
           999,
-          imageBase64: 'eA==',
+          imageHash: rejectedHash,
           imageUrl: null,
           expectedPrompt: 'a cave',
         ),
         isFalse,
       );
+      expect(await imageRefCount(db, rejectedHash), 0);
+      expect(stored.imageHash, hash);
     },
   );
 
   test(
-    'replaceImage can rewrite the stored prompt in the same conditional update',
+    'replaceImage rewrites the prompt and releases the old hash atomically',
     () async {
       final charId = await characters.insert(const CharacterCard(name: 'A'));
       final sessionId = await sessions.create(charId, 's1');
+      final oldHash = await putTestImage(db, alternate: true);
+      final newHash = await putTestImage(db);
       final row = await messages.append(
         sessionId: sessionId,
         role: 'assistant',
         content: '',
-        imageBase64: 'b2xk',
+        imageHash: oldHash,
         imagePrompt: 'a cave',
       );
+      expect(await imageRefCount(db, oldHash), 1);
 
-      // 后台重跑:换了场景描述仍原地换图,描述一并更新 —— 否则该消息的
-      // 「重新生成图片」会按旧描述重绘。
       expect(
         await messages.replaceImage(
           row.id!,
-          imageBase64: 'bmV3',
+          imageHash: newHash,
           imageUrl: 'https://img.example/new.png',
           expectedPrompt: 'a cave',
           newImagePrompt: 'a torch-lit hall',
         ),
         isTrue,
       );
-      final light = (await messages.bySession(sessionId)).single;
-      expect(light.imagePrompt, 'a torch-lit hall');
-      expect(light.imageUrl, 'https://img.example/new.png');
-      expect(await messages.imageBase64For(row.id!), 'bmV3');
+      final stored = (await messages.bySession(sessionId)).single;
+      expect(stored.imagePrompt, 'a torch-lit hall');
+      expect(stored.imageUrl, 'https://img.example/new.png');
+      expect(stored.imageHash, newHash);
+      expect(await imageRefCount(db, oldHash), 0);
+      expect(await imageRefCount(db, newHash), 1);
 
-      // 条件用的是**替换前**的描述:旧描述已失效,同一目标再来一次不写入。
       expect(
         await messages.replaceImage(
           row.id!,
-          imageBase64: 'eA==',
+          imageHash: newHash,
           imageUrl: null,
           expectedPrompt: 'a cave',
           newImagePrompt: 'x',
         ),
         isFalse,
       );
-      expect(await messages.imageBase64For(row.id!), 'bmV3');
-      expect(
-        (await messages.bySession(sessionId)).single.imagePrompt,
-        'a torch-lit hall',
-      );
+      expect((await messages.bySession(sessionId)).single.imageHash, newHash);
+      expect(await imageRefCount(db, newHash), 1);
     },
   );
 
   test(
-    'clearImage also drops the prompt so a stale batch cannot resurrect the image',
+    'clearImage clears all image fields and releases the old reference',
     () async {
       final charId = await characters.insert(const CharacterCard(name: 'A'));
       final sessionId = await sessions.create(charId, 's1');
+      final oldHash = await putTestImage(db, alternate: true);
+      final newHash = await putTestImage(db);
       final row = await messages.append(
         sessionId: sessionId,
         role: 'assistant',
         content: '',
-        imageBase64: 'aGVsbG8=',
+        imageHash: oldHash,
+        imageUrl: 'https://img.example/old.png',
         imagePrompt: 'a cave',
       );
 
       await messages.clearImage(row.id!);
 
-      final light = (await messages.bySession(sessionId)).single;
-      expect(light.hasImage, isFalse);
-      expect(light.imagePrompt, isNull);
-      expect(await messages.imageBase64For(row.id!), isNull);
+      final stored = (await messages.bySession(sessionId)).single;
+      expect(stored.hasImage, isFalse);
+      expect(stored.imageHash, isNull);
+      expect(stored.imageUrl, isNull);
+      expect(stored.imagePrompt, isNull);
+      expect(await imageRefCount(db, oldHash), 0);
       expect(
         await messages.replaceImage(
           row.id!,
-          imageBase64: 'bmV3',
+          imageHash: newHash,
           imageUrl: null,
           expectedPrompt: 'a cave',
         ),
         isFalse,
       );
+      expect(await imageRefCount(db, newHash), 0);
     },
   );
 
@@ -402,30 +502,69 @@ void main() {
     expect(after.single.content, 'keep');
   });
 
-  test('deleteWithSnapshot restores the row in place', () async {
+  test('delete releases one asset reference per removed message', () async {
     final charId = await characters.insert(const CharacterCard(name: 'A'));
     final sessionId = await sessions.create(charId, 's1');
-    await messages.append(sessionId: sessionId, role: 'user', content: 'keep');
-    await messages.append(
+    final hash = await putTestImage(db);
+    final first = await messages.append(
       sessionId: sessionId,
       role: 'assistant',
-      content: 'drop',
+      content: 'first',
+      imageHash: hash,
     );
+    final second = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: 'second',
+      imageHash: hash,
+    );
+    expect(await imageRefCount(db, hash), 2);
 
-    final all = await messages.bySession(sessionId);
-    final row = all.singleWhere((m) => m.content == 'drop');
-    final snapshot = await messages.deleteWithSnapshot(row.id!);
-    expect(snapshot, isNotNull);
-    expect(snapshot!.seq, row.seq);
-
-    expect((await messages.bySession(sessionId)).single.content, 'keep');
-    await messages.restoreDeleted(snapshot);
-
-    final after = await messages.bySession(sessionId);
-    expect(after.map((m) => m.content).toList(), ['keep', 'drop']);
-    expect(after.last.seq, row.seq);
-    expect(after.last.role, 'assistant');
+    await messages.delete(first.id!);
+    expect(await imageRefCount(db, hash), 1);
+    await messages.delete(second.id!);
+    expect(await imageRefCount(db, hash), 0);
+    expect(await db.images.exists(hash), isTrue, reason: '释放引用不物理删除文件');
   });
+
+  test(
+    'deleteWithSnapshot restores a hash-only image snapshot in place',
+    () async {
+      final charId = await characters.insert(const CharacterCard(name: 'A'));
+      final sessionId = await sessions.create(charId, 's1');
+      final hash = await putTestImage(db);
+      await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: 'keep',
+      );
+      await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: 'drop',
+        imageHash: hash,
+      );
+
+      final all = await messages.bySession(sessionId);
+      final row = all.singleWhere((m) => m.content == 'drop');
+      final snapshot = await messages.deleteWithSnapshot(row.id!);
+      expect(snapshot, isNotNull);
+      expect(snapshot!.seq, row.seq);
+      expect(snapshot.imageHash, hash);
+      expect(await imageRefCount(db, hash), 0);
+
+      expect((await messages.bySession(sessionId)).single.content, 'keep');
+      await messages.restoreDeleted(snapshot);
+
+      final after = await messages.bySession(sessionId);
+      expect(after.map((m) => m.content).toList(), ['keep', 'drop']);
+      expect(after.last.seq, row.seq);
+      expect(after.last.role, 'assistant');
+      expect(after.last.imageHash, hash);
+      expect(await imageRefCount(db, hash), 1);
+      expect(await db.images.fileFor(hash).readAsBytes(), testPngBytes());
+    },
+  );
 
   test(
     'restoreDeleted moves to the end when the original seq was reused',
@@ -487,21 +626,156 @@ void main() {
     expect(after.map((m) => m.content).toList(), ['m0', 'm1']);
   });
 
-  test('clearSession removes every message of a session', () async {
-    final charId = await characters.insert(const CharacterCard(name: 'A'));
-    final sessionId = await sessions.create(charId, 's1');
-    await messages.append(sessionId: sessionId, role: 'user', content: 'a');
-    await messages.append(
-      sessionId: sessionId,
-      role: 'assistant',
-      content: 'b',
-    );
-    await messages.insertSystem(sessionId: sessionId, content: 'summary');
+  test(
+    'deleteFrom restores rows folded by a deleted summary',
+    () async {
+      final charId = await characters.insert(const CharacterCard(name: 'A'));
+      final sessionId = await sessions.create(charId, 's1');
+      final m0 = await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: 'm0',
+      );
+      final m1 = await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: 'm1',
+      );
+      final target = await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: 'm2',
+      );
+      await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: 'm3',
+      );
+      // 软挡压缩在回复落库后追加摘要:摘要 seq 大于 target。
+      await messages.insertSystemAndCompact(
+        sessionId: sessionId,
+        content: 'summary',
+        compactIds: [m0.id!, m1.id!],
+      );
+      expect(
+        (await messages.activeWindow(sessionId)).map((m) => m.content).toList(),
+        ['m2', 'm3', 'summary'],
+      );
 
-    await messages.clearSession(sessionId);
+      await messages.deleteFrom(target.id!);
 
-    expect(await messages.bySession(sessionId), isEmpty);
-  });
+      final remaining = await messages.bySession(sessionId);
+      expect(remaining.map((m) => m.content).toList(), ['m0', 'm1']);
+      expect(remaining.every((m) => !m.isCompacted), isTrue);
+      expect(remaining.every((m) => m.compactOf == null), isTrue);
+      // 恢复后的历史重新进入组装窗口,可被下一次压缩承接。
+      expect(
+        (await messages.activeWindow(sessionId)).map((m) => m.content).toList(),
+        ['m0', 'm1'],
+      );
+    },
+  );
+
+  test(
+    'deleteFrom releases references for the target and all later rows',
+    () async {
+      final charId = await characters.insert(const CharacterCard(name: 'A'));
+      final sessionId = await sessions.create(charId, 's1');
+      final hash = await putTestImage(db);
+      await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: 'keep',
+      );
+      final target = await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: 'target',
+        imageHash: hash,
+      );
+      await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: 'tail',
+        imageHash: hash,
+      );
+      expect(await imageRefCount(db, hash), 2);
+
+      expect(await messages.deleteFrom(target.id!), 2);
+      expect((await messages.bySession(sessionId)).single.content, 'keep');
+      expect(await imageRefCount(db, hash), 0);
+    },
+  );
+
+  test(
+    'clearSession removes every message and releases every image reference',
+    () async {
+      final charId = await characters.insert(const CharacterCard(name: 'A'));
+      final sessionId = await sessions.create(charId, 's1');
+      final hash = await putTestImage(db);
+      await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: 'a',
+        imageHash: hash,
+      );
+      await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: 'b',
+        imageHash: hash,
+      );
+      await messages.insertSystem(sessionId: sessionId, content: 'summary');
+      expect(await imageRefCount(db, hash), 2);
+
+      await messages.clearSession(sessionId);
+
+      expect(await messages.bySession(sessionId), isEmpty);
+      expect(await imageRefCount(db, hash), 0);
+    },
+  );
+
+  test(
+    'replaceImage rolls back the new acquire when the update fails',
+    () async {
+      final charId = await characters.insert(const CharacterCard(name: 'A'));
+      final sessionId = await sessions.create(charId, 's1');
+      final oldHash = await putTestImage(db, alternate: true);
+      final newHash = await putTestImage(db);
+      final row = await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: '',
+        imageHash: oldHash,
+        imagePrompt: 'a cave',
+      );
+      await db.db.execute('''
+      CREATE TEMP TRIGGER abort_image_replace
+      BEFORE UPDATE ON messages
+      WHEN OLD.id = ${row.id} AND NEW.image_hash = '$newHash'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced image replace failure');
+      END
+    ''');
+
+      await expectLater(
+        messages.replaceImage(
+          row.id!,
+          imageHash: newHash,
+          imageUrl: null,
+          expectedPrompt: 'a cave',
+        ),
+        throwsA(
+          predicate<Object>(
+            (e) => e.toString().contains('forced image replace failure'),
+          ),
+        ),
+      );
+      expect((await messages.bySession(sessionId)).single.imageHash, oldHash);
+      expect(await imageRefCount(db, oldHash), 1);
+      expect(await imageRefCount(db, newHash), 0);
+    },
+  );
 
   test(
     'repeated reads without writes hit the memory cache (same instance)',
@@ -514,10 +788,6 @@ void main() {
       final second = await messages.bySession(sessionId);
       // 无写操作时,两次查询应命中同一缓存实例(等价不可变快照),不重复查库。
       expect(identical(first, second), isTrue);
-      // includeImages 变体独立缓存,互不影响。
-      final light = await messages.bySession(sessionId);
-      final full = await messages.bySession(sessionId, includeImages: true);
-      expect(identical(light, full), isFalse);
     },
   );
 
@@ -553,41 +823,34 @@ void main() {
   });
 
   test(
-    'append returns the persisted row and extends the cached list without a re-read',
+    'append returns the persisted row and extends the cached list',
     () async {
-      // append 返回落库后的完整行(id/seq 已定),并把轻量缓存替换为追加后的
-      // 新列表 —— 发送管线每轮「落库 → bySession」由整表重读变为缓存命中。
-      // 旧列表实例保持冻结(持有旧快照的调用方不受影响);轻量口径剥掉图片
-      // 字节只置标志;带图缓存条目失效,下次 includeImages 读库回填。
       final charId = await characters.insert(const CharacterCard(name: 'A'));
       final sessionId = await sessions.create(charId, 's1');
       await messages.append(sessionId: sessionId, role: 'user', content: 'a');
 
       final before = await messages.bySession(sessionId);
+      final hash = await putTestImage(db);
       final appended = await messages.append(
         sessionId: sessionId,
         role: 'assistant',
         content: 'b',
-        imageBase64: 'aGVsbG8=',
+        imageHash: hash,
         imageUrl: 'https://example.com/x.png',
       );
       expect(appended.id, isNotNull);
       expect(appended.seq, before.last.seq + 1);
-      expect(appended.hasImage, isTrue, reason: 'append 的返回行是完整行口径');
+      expect(appended.hasImage, isTrue);
 
       final after = await messages.bySession(sessionId);
       expect(after.length, before.length + 1);
       expect(after.last.id, appended.id);
       expect(identical(after, before), isFalse, reason: '缓存应替换为新列表实例');
       expect(before.length, 1, reason: '旧列表实例保持冻结,不被原地追加');
-      expect(after.last.imageBase64, isNull, reason: '轻量口径不携带图片字节');
+      expect(after.last.imageHash, hash);
       expect(after.last.hasImage, isTrue);
       expect(after.last.imageUrl, 'https://example.com/x.png');
 
-      final full = await messages.bySession(sessionId, includeImages: true);
-      expect(full.last.imageBase64, 'aGVsbG8=', reason: '带图缓存条目应已失效并回填字节');
-
-      // 缓存本就不在的会话(未被读过)append 后首次读,行为与旧行为一致。
       final sessionId2 = await sessions.create(charId, 's2');
       final appended2 = await messages.append(
         sessionId: sessionId2,
@@ -907,5 +1170,164 @@ void main() {
     expect((await messages.locate(system.id!))!.visible, isFalse);
     expect((await messages.locate(attachment.id!))!.visible, isFalse);
     expect(await messages.locate(999999), isNull);
+  });
+
+  test('adoptRemoteImage makes a URL-only message local', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    final message = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageUrl: 'https://example.com/a.png',
+    );
+    expect(message.imageHash, isNull);
+
+    expect(
+      await messages.adoptRemoteImage(
+        message.id!,
+        'https://example.com/a.png',
+        testPngBytes(),
+      ),
+      isTrue,
+    );
+
+    final stored = (await messages.bySession(sessionId)).single;
+    expect(stored.imageHash, testPngHash());
+    expect(stored.imageUrl, 'https://example.com/a.png');
+    expect(stored.hasImage, isTrue);
+    expect(await imageRefCount(db, testPngHash()), 1);
+    expect(
+      await db.images.fileFor(testPngHash()).readAsBytes(),
+      testPngBytes(),
+    );
+  });
+
+  test('adoptRemoteImage refuses a URL that changed while downloading', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    final message = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageUrl: 'https://example.com/b.png',
+    );
+
+    expect(
+      await messages.adoptRemoteImage(
+        message.id!,
+        'https://example.com/a.png',
+        testPngBytes(),
+      ),
+      isFalse,
+    );
+    expect((await messages.bySession(sessionId)).single.imageHash, isNull);
+    expect(await imageRefCount(db, testPngHash()), 0);
+    expect(await db.images.fileFor(testPngHash()).exists(), isFalse);
+  });
+
+  test('adoptRemoteImage never overwrites an existing local image', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    final hash = await putTestImage(db);
+    final message = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: '',
+      imageHash: hash,
+      imageUrl: 'https://example.com/a.png',
+    );
+
+    expect(
+      await messages.adoptRemoteImage(
+        message.id!,
+        'https://example.com/a.png',
+        testPngBytes(alternate: true),
+      ),
+      isFalse,
+    );
+    final stored = (await messages.bySession(sessionId)).single;
+    expect(stored.imageHash, hash);
+    expect(await imageRefCount(db, hash), 1);
+    expect(await imageRefCount(db, testPngHash(alternate: true)), 0);
+  });
+
+  test('deleteManyWithSnapshots releases refs and restores in order', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    final otherSession = await sessions.create(charId, 'other');
+    final hash = await putTestImage(db);
+    await messages.append(sessionId: sessionId, role: 'user', content: 'a');
+    final second = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: 'b',
+      imageHash: hash,
+    );
+    final third = await messages.append(
+      sessionId: sessionId,
+      role: 'user',
+      content: 'c',
+      imageHash: hash,
+    );
+    final foreign = await messages.append(
+      sessionId: otherSession,
+      role: 'user',
+      content: 'other',
+    );
+
+    final snapshots = await messages.deleteManyWithSnapshots(sessionId, {
+      second.id!,
+      third.id!,
+      foreign.id!,
+    });
+
+    expect(snapshots.map((s) => s.content).toList(), ['b', 'c']);
+    expect(
+      (await messages.bySession(sessionId)).map((m) => m.content).toList(),
+      ['a'],
+    );
+    expect(
+      (await messages.bySession(otherSession)).single.content,
+      'other',
+    );
+    expect(await imageRefCount(db, hash), 0);
+    expect(
+      await messages.deleteManyWithSnapshots(sessionId, {999999}),
+      isEmpty,
+    );
+
+    await messages.restoreManyDeleted(snapshots);
+    final restored = await messages.bySession(sessionId);
+    expect(restored.map((m) => m.content).toList(), ['a', 'b', 'c']);
+    expect(restored.map((m) => m.seq).toList(), [0, 1, 2]);
+    expect(await imageRefCount(db, hash), 2);
+  });
+
+  test('batch restore appends rows whose seq was taken during undo', () async {
+    final charId = await characters.insert(const CharacterCard(name: 'A'));
+    final sessionId = await sessions.create(charId, 's1');
+    await messages.append(sessionId: sessionId, role: 'user', content: 'a');
+    final second = await messages.append(
+      sessionId: sessionId,
+      role: 'assistant',
+      content: 'b',
+    );
+    final third = await messages.append(
+      sessionId: sessionId,
+      role: 'user',
+      content: 'c',
+    );
+    final snapshots = await messages.deleteManyWithSnapshots(sessionId, {
+      second.id!,
+      third.id!,
+    });
+    // 撤销窗口内新消息占用 seq 1;恢复的两条都必须排到它后面。
+    await messages.append(sessionId: sessionId, role: 'user', content: 'd');
+
+    await messages.restoreManyDeleted(snapshots);
+    final rows = await messages.bySession(sessionId);
+    expect(rows.map((m) => m.content).toList(), ['a', 'd', 'b', 'c']);
+    expect(rows.map((m) => m.seq).toList(), [0, 1, 2, 3]);
   });
 }

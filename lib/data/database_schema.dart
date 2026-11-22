@@ -13,8 +13,8 @@ Future<void> _createSchema(Database db) async {
       CREATE TABLE characters (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
-        avatar_base64 TEXT,
-        background_base64 TEXT,
+        avatar_hash TEXT,
+        background_hash TEXT,
         data_json TEXT NOT NULL
       )
     ''');
@@ -45,11 +45,23 @@ Future<void> _createSchema(Database db) async {
         seq INTEGER NOT NULL,
         is_compacted INTEGER NOT NULL DEFAULT 0,
         compact_of INTEGER,
-        image_base64 TEXT,
+        image_hash TEXT,
         image_url TEXT,
         image_prompt TEXT,
         kind TEXT NOT NULL DEFAULT 'chat',
         ref_id TEXT
+      )
+    ''');
+  // 图片字节在数据库外的内容寻址文件库;这里只保存元数据与业务引用计数。
+  await db.execute('''
+      CREATE TABLE image_assets (
+        hash TEXT PRIMARY KEY,
+        byte_size INTEGER NOT NULL,
+        mime TEXT NOT NULL,
+        width INTEGER NOT NULL,
+        height INTEGER NOT NULL,
+        ref_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
       )
     ''');
   await db.execute('''
@@ -234,6 +246,9 @@ Future<void> _createSchema(Database db) async {
         background_character_anchor INTEGER NOT NULL DEFAULT 1,
         background_memory_anchor INTEGER NOT NULL DEFAULT 1,
         background_deletion_confirm INTEGER NOT NULL DEFAULT 0,
+        compress_images INTEGER NOT NULL DEFAULT 0,
+        background_variable_injection INTEGER NOT NULL DEFAULT 0,
+        background_next_suggestions INTEGER NOT NULL DEFAULT 0,
         background_mode TEXT NOT NULL DEFAULT 'legacy'
       )
     ''');
@@ -241,7 +256,7 @@ Future<void> _createSchema(Database db) async {
       CREATE TABLE user_profile (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         name TEXT NOT NULL DEFAULT '',
-        avatar_base64 TEXT
+        avatar_hash TEXT
       )
     ''');
   await db.execute('''
@@ -299,11 +314,34 @@ Future<void> _createSchema(Database db) async {
   await db.execute(
     'CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq DESC)',
   );
+  // 回收只扫描已到期零引用资产,避免整理存储时全表扫描。
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_image_assets_reclaim '
+    'ON image_assets(ref_count, created_at)',
+  );
   // 统计索引:按时间聚合(热力图/趋势/近 N 天)与按模型聚合。
   await db.execute(
     'CREATE INDEX IF NOT EXISTS idx_usage_records_created ON usage_records(created_at)',
   );
   await db.execute(
     'CREATE INDEX IF NOT EXISTS idx_usage_records_model ON usage_records(model, created_at)',
+  );
+  // 高频筛选列:sessions 按角色列会话、worldbook 按角色取条目、
+  // llm_models 按 provider 取模型、image_providers 按插件查引用。
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_sessions_character_id '
+    'ON sessions(character_id)',
+  );
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_worldbook_entries_character_id '
+    'ON worldbook_entries(character_id)',
+  );
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_llm_models_provider_id '
+    'ON llm_models(provider_id)',
+  );
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_image_providers_plugin_id '
+    'ON image_providers(plugin_id)',
   );
 }

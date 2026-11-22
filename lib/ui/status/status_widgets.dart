@@ -13,46 +13,48 @@ import '../../models/memory.dart';
 import '../../models/variable.dart';
 import '../../state/chat_controller.dart';
 import '../../state/providers.dart';
+import '../common/motion.dart';
+import '../common/section_header.dart';
 import '../common/app_menu.dart';
+import '../common/app_snack_bar.dart';
 import '../common/background_summary.dart';
 import '../common/confirm_dialog.dart';
+import '../common/info_dialog.dart';
 import 'status_layout.dart';
 
 /// 变量删除前确认严格模式的说明弹层:开关行只留标题,完整规则收在这里。
 Future<void> showDeletionConfirmHelpDialog(BuildContext context) {
-  return showDialog<void>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('变量删除前确认'),
-      content: const Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '• 只作用于后台对变量的删除,新增与改值不受影响;'
-            '后台只能按明确的键名请求删除,单轮至多 5 个。',
-          ),
-          SizedBox(height: 6),
-          Text(
-            '• 开启(严格模式):删除请求先进入状态面板的「待确认删除」,'
-            '你确认后才移入回收站;忽略则变量保持原样。',
-          ),
-          SizedBox(height: 6),
-          Text('• 关闭:后台删除直接执行并移入回收站,可在回收站逐条恢复。'),
-          SizedBox(height: 10),
-          Text(
-            '「可改不可删」与「只读常量」的变量不会被删除;'
-            '人工编辑、删除或修改权限时,对应的待确认请求自动作废。',
-          ),
-        ],
-      ),
-      actions: [
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('知道了'),
-        ),
-      ],
-    ),
+  return showInfoDialog(
+    context,
+    title: '变量删除前确认',
+    bullets: const [
+      '• 只作用于后台对变量的删除,新增与改值不受影响;'
+          '后台只能按明确的键名请求删除,单轮至多 5 个。',
+      '• 开启(严格模式):删除请求先进入状态面板的「待确认删除」,'
+          '你确认后才移入回收站;忽略则变量保持原样。',
+      '• 关闭:后台删除直接执行并移入回收站,可在回收站逐条恢复。',
+    ],
+    note:
+        '「可改不可删」与「只读常量」的变量不会被删除;'
+        '人工编辑、删除或修改权限时,对应的待确认请求自动作废。',
+  );
+}
+
+/// Agentic 增强说明弹层:开关行只留标题,依赖条件与行为收在这里。
+Future<void> showAgenticEnhancementsHelpDialog(BuildContext context) {
+  return showInfoDialog(
+    context,
+    title: 'Agentic 增强',
+    bullets: const [
+      '• 变量注入主写:仅 Agentic 模式可用,且需先开启变量维护。'
+          '后台维护时会挑选若干变量,提交后按最终值在下一条用户输入前'
+          '以 system-reminder 附件注入主写上下文。',
+      '• 下一步建议:仅 Agentic 模式可用。后台收尾时给出 1–3 条'
+          '用户口吻的发言建议,聊天页自动弹底单;点击一条即作为你的消息发送,'
+          '关闭或忽略则丢弃本批。',
+      '• 两项默认关闭;当前模式或依赖不满足时开关置灰,已保存的选择会保留。',
+    ],
+    note: '两项都只影响下一次交互,不会改写已有的对话历史。',
   );
 }
 
@@ -145,9 +147,7 @@ class PendingVariableDeletions extends ConsumerWidget {
     final message = result.removed > 0
         ? '已移除「${proposal.key}」,可在「已删除」中恢复'
         : '「${proposal.key}」已变化或不再是可删状态,建议已失效';
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    showAppSnack(context, message);
   }
 
   /// 忽略单条建议:只删建议行,变量本身不动。
@@ -183,9 +183,7 @@ class PendingVariableDeletions extends ConsumerWidget {
     if (!context.mounted) return;
     _refresh(ref);
     final stale = result.stale > 0 ? ',${result.stale} 个建议已失效' : '';
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('已移除 ${result.removed} 个变量$stale')));
+    showAppSnack(context, '已移除 ${result.removed} 个变量$stale');
   }
 
   /// 忽略全部建议:只清空待确认列表,变量本身不动。
@@ -202,88 +200,82 @@ class PendingVariableDeletions extends ConsumerWidget {
       data: (list) {
         if (list.isEmpty) return const SizedBox.shrink();
         final scheme = Theme.of(context).colorScheme;
-        return Card(
+        return SurfaceCard(
           color: scheme.errorContainer.withValues(alpha: 0.35),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      Icons.fact_check_outlined,
-                      size: 18,
-                      color: scheme.error,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '后台建议删除的变量 (${list.length})',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '这些删除建议尚未执行:确认后移入回收站,可恢复。',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
+          padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.fact_check_outlined,
+                    size: 18,
+                    color: scheme.error,
                   ),
-                ),
-                for (final proposal in list)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    title: Text(
-                      proposal.key,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    subtitle: Text(
-                      proposal.value,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          tooltip: '忽略建议',
-                          icon: const Icon(Icons.close, size: 20),
-                          onPressed: () => _dismissOne(context, ref, proposal),
-                        ),
-                        IconButton(
-                          tooltip: '执行删除',
-                          icon: Icon(
-                            Icons.check,
-                            size: 20,
-                            color: scheme.error,
-                          ),
-                          onPressed: () => _approveOne(context, ref, proposal),
-                        ),
-                      ],
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '后台建议删除的变量 (${list.length})',
+                      style: Theme.of(context).textTheme.titleSmall,
                     ),
                   ),
-                if (list.length > 1)
-                  Row(
+                ],
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '这些删除建议尚未执行:确认后移入回收站,可恢复。',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+              for (final proposal in list)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: Text(
+                    proposal.key,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    proposal.value,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      TextButton(
-                        onPressed: () => _dismissAll(context, ref),
-                        child: const Text('全部忽略'),
+                      IconButton(
+                        tooltip: '忽略建议',
+                        icon: const Icon(Icons.close, size: 20),
+                        onPressed: () => _dismissOne(context, ref, proposal),
                       ),
-                      const Spacer(),
-                      FilledButton.tonalIcon(
-                        onPressed: () => _approveAll(context, ref, list.length),
-                        icon: const Icon(Icons.delete_sweep_outlined, size: 16),
-                        label: const Text('全部执行'),
+                      IconButton(
+                        tooltip: '执行删除',
+                        icon: Icon(Icons.check, size: 20, color: scheme.error),
+                        onPressed: () => _approveOne(context, ref, proposal),
                       ),
                     ],
                   ),
-              ],
-            ),
+                ),
+              if (list.length > 1)
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: () => _dismissAll(context, ref),
+                      child: const Text('全部忽略'),
+                    ),
+                    const Spacer(),
+                    FilledButton.tonalIcon(
+                      onPressed: () => _approveAll(context, ref, list.length),
+                      icon: const Icon(Icons.delete_sweep_outlined, size: 16),
+                      label: const Text('全部执行'),
+                    ),
+                  ],
+                ),
+            ],
           ),
         );
       },
@@ -292,8 +284,8 @@ class PendingVariableDeletions extends ConsumerWidget {
   }
 }
 
-/// 后台运行摘要:成功摘要按语义拆成「变量 / 移除 / 待确认 / 生图 / 审计」
-/// 分组条目,失败与非常规文案回退为带状态图标的整段文本。
+/// 后台运行摘要:成功摘要按语义拆成「变量 / 移除 / 待确认 / 注入 / 生图 /
+/// 审计」分组条目,失败与非常规文案回退为带状态图标的整段文本。
 ///
 /// 摘要本身仍是控制器拼好的一行字符串(灵动岛消费同一份),这里只做展示层
 /// 解析;任何认不出的片段都回退全文,避免把引擎诊断误拆成条目。
@@ -367,8 +359,7 @@ class _BackgroundSummaryViewState extends State<BackgroundSummaryView> {
     final scheme = Theme.of(context).colorScheme;
     // 窄屏(移动页)组名独占一行、胶囊在其下方铺开,不再和组名抢宽度;
     // 宽屏(桌面工作台)保持左侧组名列的横向对照。
-    final stacked =
-        MediaQuery.sizeOf(context).width < kStatusDesktopBreakpoint;
+    final stacked = MediaQuery.sizeOf(context).width < kStatusDesktopBreakpoint;
     return LayoutBuilder(
       builder: (context, constraints) {
         final available = stacked
@@ -450,6 +441,26 @@ class _BackgroundSummaryViewState extends State<BackgroundSummaryView> {
                     color: scheme.tertiary,
                     filled: true,
                     icon: Icons.help_outline,
+                    maxWidth: chipMax,
+                  ),
+              ],
+            ),
+          );
+        }
+        if (data.injected.isNotEmpty) {
+          rows.add(
+            _groupRow(
+              context,
+              stacked: stacked,
+              icon: Icons.input_rounded,
+              label: '注入',
+              color: scheme.primary,
+              chips: [
+                for (final name in data.injected)
+                  _tagChip(
+                    context,
+                    label: name,
+                    color: scheme.primary,
                     maxWidth: chipMax,
                   ),
               ],
@@ -587,10 +598,7 @@ class _BackgroundSummaryViewState extends State<BackgroundSummaryView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(left: 1),
-              child: labelRow,
-            ),
+            Padding(padding: const EdgeInsets.only(left: 1), child: labelRow),
             const SizedBox(height: 4),
             Wrap(spacing: 6, runSpacing: 6, children: chips),
           ],
@@ -609,9 +617,7 @@ class _BackgroundSummaryViewState extends State<BackgroundSummaryView> {
               child: labelRow,
             ),
           ),
-          Expanded(
-            child: Wrap(spacing: 6, runSpacing: 6, children: chips),
-          ),
+          Expanded(child: Wrap(spacing: 6, runSpacing: 6, children: chips)),
         ],
       ),
     );
@@ -734,7 +740,11 @@ class _BackgroundSummaryViewState extends State<BackgroundSummaryView> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           AnimatedSize(
-            duration: const Duration(milliseconds: 180),
+            duration: motionDurationOf(
+              context,
+              const Duration(milliseconds: 180),
+            ),
+            curve: Curves.easeOutCubic,
             alignment: Alignment.topLeft,
             child: Text(widget.text, style: style),
           ),
@@ -819,7 +829,10 @@ class _SummaryNotice extends StatelessWidget {
       BackgroundStatus.disabled => (Icons.power_settings_new, scheme.outline),
       BackgroundStatus.skipped ||
       BackgroundStatus.idle => (Icons.info_outline, scheme.outline),
-      BackgroundStatus.succeeded => (Icons.check_circle_outline, scheme.primary),
+      BackgroundStatus.succeeded => (
+        Icons.check_circle_outline,
+        scheme.primary,
+      ),
     };
     final parts = status == BackgroundStatus.failed
         ? _splitDiagnostic(text)
@@ -836,10 +849,7 @@ class _SummaryNotice extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                parts.$1,
-                style: style?.copyWith(color: scheme.onSurface),
-              ),
+              Text(parts.$1, style: style?.copyWith(color: scheme.onSurface)),
               if (parts.$2 != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
@@ -879,7 +889,8 @@ bool isMemoryPendingApply(
           (chatState.frozenMemory?.trim() ?? '');
 }
 
-/// 变量正文与全量行视图一起失效;变量不进主写上下文,不触发上下文重算。
+/// 变量正文与全量行视图一起失效;变量默认不进主写上下文,不触发上下文重算
+/// (Agentic 注入在下一次发送时以附件行消费)。
 void refreshVariableViews(WidgetRef ref, int sessionId) {
   ref.invalidate(variablesProvider(sessionId));
   ref.invalidate(variableRowsProvider(sessionId));
@@ -1138,6 +1149,63 @@ class StatusWorkspaceHeader extends StatelessWidget {
           ],
         );
       },
+    );
+  }
+}
+
+/// 后台 agent 的记忆提议卡(移动/桌面共用):只读展示,用户显式「采用」才
+/// 写入记忆库;上下文换新仍在记忆区「应用到上下文」二次确认。
+class MemoryProposalCard extends StatelessWidget {
+  final String proposal;
+  final bool enabled;
+  final VoidCallback onAccept;
+  final VoidCallback onDismiss;
+
+  const MemoryProposalCard({
+    super.key,
+    required this.proposal,
+    required this.enabled,
+    required this.onAccept,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return GroupCard(
+      children: [
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+          leading: Icon(Icons.auto_awesome, size: 20, color: scheme.primary),
+          title: const Text('后台记忆建议'),
+          subtitle: const Text('采用只写入记忆库;应用到上下文需在下方另行确认。'),
+          trailing: IconButton(
+            tooltip: '忽略建议',
+            icon: const Icon(Icons.close, size: 20),
+            onPressed: onDismiss,
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: Text(
+            proposal,
+            maxLines: 6,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+          leading: Icon(
+            Icons.check_circle_outline,
+            size: 20,
+            color: scheme.primary,
+          ),
+          title: const Text('采用建议'),
+          enabled: enabled,
+          onTap: enabled ? onAccept : null,
+        ),
+      ],
     );
   }
 }

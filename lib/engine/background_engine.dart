@@ -51,7 +51,16 @@ class BackgroundRunFailure extends BackgroundRunResult {
   /// 开头片段("模型未返回任何内容" / "响应片段:…")。仅用于状态面板文案,
   /// 帮用户区分"网关报错 / 空响应 / 输出畸形";null 表示无可披露信息。
   final String? detail;
-  const BackgroundRunFailure(this.reason, {this.detail});
+
+  /// 失败前已到达的 token 用量(含前置重试尝试):请求可能已经计费,
+  /// 上层据此写 `reported` 用量行而不是记零。
+  final TokenUsage usage;
+
+  const BackgroundRunFailure(
+    this.reason, {
+    this.detail,
+    this.usage = const TokenUsage(),
+  });
 }
 
 /// 一轮后台维护解析出的状态更新;各字段的最终取舍由调用方决定。
@@ -83,12 +92,24 @@ class BackgroundResult {
   /// 这两条主动路径产出,快状态轮恒为 null。
   final String? memoryUpdate;
 
-  /// 生图指导初始化([BackgroundEngine.runImageGuideInit])的产出;
+  /// 生图指导主动轮([BackgroundEngine.runImageGuideInit] 初始化 /
+  /// [BackgroundEngine.runImageGuideRegenerate] 全量重生成)的产出;
   /// 快状态轮恒为 null。
   final String? imageGuide;
 
   /// 严格模式由编排器在落库后填充:本次只生成待确认提案,未真正删除的键。
   final List<String> variableRemovalProposals;
+
+  /// Agentic 变量注入的最终快照:后台 agent 选中的键 → 提交后最终值。
+  /// 已删除/权限拒绝后不存在的键不在其中;legacy/未开启时恒为空。
+  final Map<String, String> injectedVariables;
+
+  /// Agentic 下一步建议(用户口吻、可直接发送);未开启或未产出时为空。
+  final List<String> nextSuggestions;
+
+  /// Agentic 记忆提议(完整替换文本):只给用户审阅,绝不自动落库;
+  /// 未开启记忆锚定或未产出时为 null。
+  final String? memoryProposal;
 
   const BackgroundResult({
     this.variableUpdates = const {},
@@ -100,7 +121,26 @@ class BackgroundResult {
     this.memoryUpdate,
     this.imageGuide,
     this.variableRemovalProposals = const [],
+    this.injectedVariables = const {},
+    this.nextSuggestions = const [],
+    this.memoryProposal,
   });
+
+  /// 把此前重试尝试的用量并入本结果(成功轮记账不丢前置尝试)。
+  BackgroundResult withAddedUsage(TokenUsage extra) => BackgroundResult(
+    variableUpdates: variableUpdates,
+    addedVariables: addedVariables,
+    variableRemovals: variableRemovals,
+    imagePrompt: imagePrompt,
+    imagePrompts: imagePrompts,
+    usage: usage + extra,
+    memoryUpdate: memoryUpdate,
+    imageGuide: imageGuide,
+    variableRemovalProposals: variableRemovalProposals,
+    injectedVariables: injectedVariables,
+    nextSuggestions: nextSuggestions,
+    memoryProposal: memoryProposal,
+  );
 }
 
 /// `/rerun` 上下文:null = 普通后台维护;非 null 即告知后台这是用户触发的
@@ -113,10 +153,7 @@ class RerunContext {
   /// 改描述而过期 —— 提示词明确它只是上一轮输出基线,不是会话事实。
   final List<String> previousImagePrompts;
 
-  const RerunContext({
-    this.direction,
-    this.previousImagePrompts = const [],
-  });
+  const RerunContext({this.direction, this.previousImagePrompts = const []});
 }
 
 /// 后台提示词的分段形态:稳定前缀(任务契约 + image 轮锚定段)在同一会话/功能
@@ -154,6 +191,10 @@ class BackgroundEngine {
   /// 只是兜底。
   static const int maxMemoryChars = 4000;
 
+  /// 全量重生成生图指导时送入提示的既有指导文本最长字符数:用户手改后可能
+  /// 很长,截断保留开头兜底;提示词本身要求控制在约 60 行。
+  static const int maxImageGuideChars = 8000;
+
   /// 每轮后台调用的最大尝试次数:首试 + 2 次自动重试(瞬态 backendError /
   /// parseFailure,以及初始化轮"缺 memory 字段")。取消不计入重试。后台维护
   /// best-effort,单次失败率 p 经三次尝试降到 p³。
@@ -176,15 +217,6 @@ class BackgroundEngine {
   /// Scenario;systemPrompt/示例对话/剧情后注不进锚定段,控制每轮成本)。
   static const int maxBackgroundCharacterChars = 1000;
 
-  /// 快状态轮**单条**世界书条目的字符上限:逐条独立截断 —— 此前只按总量截
-  /// 拼接后整块,靠后的条目会被前面的预算吃光整段消失,用户勾选多条角色外貌
-  /// 设定时只有 position 最前的一条真进了上下文。
-  static const int maxBackgroundWorldbookEntryChars = 1000;
-
-  /// 快状态轮世界书锚定段的总字符上限(逐条截断后拼合的兜底,防极端多条目
-  /// 时把每轮请求撑爆)。用户自选,不再按常驻判断。
-  static const int maxBackgroundWorldbookChars = 4000;
-
   /// 重跑修改方向 / 上一轮图片描述的提示词上限:方向是用户原文,图片描述
   /// 来自上一次 LLM 输出 —— 都可能很长,截断防止把一次性请求撑爆。
   static const int maxRerunDirectionChars = 500;
@@ -204,6 +236,19 @@ lasting value:
 - world-setting facts, the user's stated preferences and directives, and long-term goals;
 - open plot threads, and major events once resolved.
 Exclude per-scene details already obvious from the recent conversation. Be thorough yet concise.''';
+
+  /// 生图指导的**内容定义** —— 初始化与全量重生成两条主动轮共用的契约段,
+  /// 消除两处各写各的导致的口径漂移。只描述"指导装什么",数据来源与语言
+  /// 等差异由各自 prompt 的上下文段补。
+  static const String _imageGuideContract = '''
+The guide is the fixed visual baseline carried by automatic image generation every turn. Pin down
+only durable, fixed visual facts:
+- each recurring character's FIXED appearance as weighted English NovelAI tags (identity such as
+  1girl/1boy, hair color, eye color, build, distinctive clothing) exactly as established;
+- the standing art style and quality tags, and camera/composition preferences;
+- content rules (e.g. never show the user's face — use POV prompts).
+Never let established looks drift. Scene-specific details are decided per turn, not here. Compose the
+guide itself in English tags/instructions regardless of the source language, under ~60 lines.''';
 
   /// 热点路径正则(每次解析最多 3 次尝试 × 多处调用,编译一次复用)。
   static final _thinkBlock = RegExp(r'<think>[\s\S]*?</think>');
@@ -355,9 +400,97 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     );
   }
 
+  /// 单张图片的提示词修订:以该图片落库的旧描述为基线,结合目标图片生成时点
+  /// 之前的对话、生图指导与角色/记忆/世界书锚定,按用户给出的一句修改要求产出
+  /// 新的英文 NovelAI tag 串。一次性请求,不推游标、不生成图片。
+  ///
+  /// 与 [run] 的区别:输出只取 [BackgroundResult.imagePrompt](其余字段一律
+  /// 清空),转录由调用方裁剪到目标图片的 seq;成功判据是"解析成功且带非空
+  /// imagePrompt",缺字段/空串/字面 null 照记忆主动轮语义重试。
+  Future<BackgroundRunResult> runImagePromptRevision({
+    required String model,
+    required String currentPrompt,
+    required String direction,
+    required List<Message> history,
+    String? imageGuide,
+    String? memory,
+    CharacterCard? character,
+    List<WorldbookEntry> worldbook = const [],
+    bool Function()? shouldCancel,
+    Future<void>? cancelSignal,
+    double temperature = LlmModelEntry.defaultTemperature,
+    int? maxTokens,
+    ReasoningLevel reasoningLevel = ReasoningLevel.off,
+  }) async {
+    final prompt = _buildImageRevisionPrompt(
+      currentPrompt: currentPrompt,
+      direction: direction,
+      history: history,
+      imageGuide: imageGuide,
+      memory: memory,
+      character: character,
+      worldbook: worldbook,
+    );
+    BackgroundRunFailure? last;
+    var totalUsage = const TokenUsage();
+    for (var attempt = 1; attempt <= maxAttemptsPerRound; attempt++) {
+      final outcome = await _attempt(
+        model: model,
+        prompt: prompt,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        reasoningLevel: reasoningLevel,
+        shouldCancel: shouldCancel,
+        cancelSignal: cancelSignal,
+        userMessage: 'Emit the revised image description JSON now.',
+      );
+      if (outcome is BackgroundRunSuccess) {
+        final result = outcome.result;
+        final promptList = result.imagePrompts;
+        final revised =
+            (result.imagePrompt ??
+                    (promptList != null && promptList.isNotEmpty
+                        ? promptList.first
+                        : null))
+                ?.trim();
+        if (revised != null && revised.isNotEmpty && revised != 'null') {
+          return BackgroundRunSuccess(
+            BackgroundResult(
+              imagePrompt: revised,
+              usage: result.usage,
+            ).withAddedUsage(totalUsage),
+          );
+        }
+        totalUsage = totalUsage + result.usage;
+        last = BackgroundRunFailure(
+          BackgroundFailureReason.parseFailure,
+          detail: '模型返回了 JSON 但没有有效的 imagePrompt 字段',
+          usage: totalUsage,
+        );
+        continue;
+      }
+      final failure = outcome as BackgroundRunFailure;
+      totalUsage = totalUsage + failure.usage;
+      if (failure.reason == BackgroundFailureReason.cancelled) {
+        return BackgroundRunFailure(
+          failure.reason,
+          detail: failure.detail,
+          usage: totalUsage,
+        );
+      }
+      last = failure;
+    }
+    return BackgroundRunFailure(
+      last!.reason,
+      detail: last.detail,
+      usage: totalUsage,
+    );
+  }
+
   /// 主动初始化会话生图指导(类似记忆初始化):依据**角色卡 + 常驻世界书**
   /// 生成一份初始生图指导并落库 —— 角色的定妆外貌(发色/瞳色/体型/服装的
-  /// 英文 tag)、画风基调与构图偏好。用户之后可随时手动编辑。
+  /// 英文 tag)、画风基调与构图偏好。用户之后可手动编辑,或经
+  /// [runImageGuideRegenerate] 依据全部对话重生成。
   ///
   /// 输出 JSON 形状为 `{"imageGuide": "<...>"}`;成功判据同记忆主动轮
   /// (解析成功且带非空字段),重试语义一致。
@@ -371,55 +504,69 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
   }) async {
-    final characterText = _characterCardText(character);
-    final constantEntries =
-        worldbook.where((e) => e.constant && e.enabled).toList()
-          ..sort((a, b) => a.position.compareTo(b.position));
-    final constantText = constantEntries.map((e) => e.content).join('\n\n');
+    final prompt = _buildImageGuideInitPrompt(character, worldbook);
+    return _runImageGuidePrompt(
+      model: model,
+      prompt: prompt,
+      shouldCancel: shouldCancel,
+      cancelSignal: cancelSignal,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      reasoningLevel: reasoningLevel,
+    );
+  }
 
-    final instruction = StringBuffer()
-      ..writeln(
-        'You are composing the initial image direction guide for a roleplay session. The guide is '
-        'a compact, reusable instruction that drives automatic image generation every turn.',
-      )
-      ..writeln()
-      ..writeln('# Output contract')
-      ..writeln(
-        '- A single JSON object and nothing else: {"imageGuide": "<the initial image direction guide>"}',
-      )
-      ..writeln('- No markdown fences, no prose, no extra keys.')
-      ..writeln()
-      ..writeln('# What the guide must pin down (FIXED, never drifting)')
-      ..writeln(
-        '- each character\'s FIXED appearance as weighted English NovelAI tags (identity '
-        'such as 1girl/1boy, hair color, eye color, build, distinctive clothing);',
-      )
-      ..writeln(
-        '- the standing art style and quality tags, and camera/composition preferences;',
-      )
-      ..writeln(
-        '- content rules (e.g. never show the user\'s face — use POV prompts).',
-      )
-      ..writeln(
-        'Only objective, fixed attributes; scene-specific details are decided per turn, not here. '
-        'Compose it from the character card and the standing worldbook facts below. Write the '
-        'guide itself in English tags/instructions regardless of the card\'s language, under ~60 lines.',
-      )
-      ..writeln()
-      ..writeln('Character card:')
-      ..write(characterText);
-    if (constantText.isNotEmpty) {
-      instruction
-        ..writeln()
-        ..writeln('Standing worldbook facts (constant, always active):')
-        ..write(constantText);
-    }
+  /// 全量重生成生图指导(用户主动发起,具有**所有对话上下文**的请求):
+  /// 把会话全部活跃对话连同角色卡、常驻世界书与既有指导送入 LLM,产出覆盖
+  /// 全程的新指导整段替换落库。用于剧情新增角色、角色外貌或世界观大幅变化后
+  /// 同步定妆信息,免去逐条手工补 tag。
+  Future<BackgroundRunResult> runImageGuideRegenerate({
+    required String model,
+    required CharacterCard character,
+    required List<Message> history,
+    List<WorldbookEntry> worldbook = const [],
+    String? currentGuide,
+    bool Function()? shouldCancel,
+    Future<void>? cancelSignal,
+    double temperature = LlmModelEntry.defaultTemperature,
+    int? maxTokens,
+    ReasoningLevel reasoningLevel = ReasoningLevel.off,
+  }) async {
+    final prompt = _buildImageGuideRegeneratePrompt(
+      character,
+      worldbook,
+      history,
+      currentGuide,
+    );
+    return _runImageGuidePrompt(
+      model: model,
+      prompt: prompt,
+      shouldCancel: shouldCancel,
+      cancelSignal: cancelSignal,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      reasoningLevel: reasoningLevel,
+    );
+  }
 
+  /// image guide 主动轮(初始化/重生成)的公共执行体:与 [_runMemoryPrompt]
+  /// 同构,成功判据是"解析成功且带非空 imageGuide 字段";缺字段/字面 null
+  /// 与空串同样重试。
+  Future<BackgroundRunResult> _runImageGuidePrompt({
+    required String model,
+    required String prompt,
+    bool Function()? shouldCancel,
+    Future<void>? cancelSignal,
+    double temperature = LlmModelEntry.defaultTemperature,
+    int? maxTokens,
+    ReasoningLevel reasoningLevel = ReasoningLevel.off,
+  }) async {
     BackgroundRunFailure? last;
+    var totalUsage = const TokenUsage();
     for (var attempt = 1; attempt <= maxAttemptsPerRound; attempt++) {
       final outcome = await _attempt(
         model: model,
-        prompt: instruction.toString(),
+        prompt: prompt,
         temperature: temperature,
         maxTokens: maxTokens,
         reasoningLevel: reasoningLevel,
@@ -429,21 +576,38 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       if (outcome is BackgroundRunSuccess) {
         final guide = outcome.result.imageGuide;
         if (guide != null) {
+          // 主动轮只产出 imageGuide:其余字段一律清空(防御 LLM 多给字段)。
           return BackgroundRunSuccess(
-            BackgroundResult(imageGuide: guide, usage: outcome.result.usage),
+            BackgroundResult(
+              imageGuide: guide,
+              usage: outcome.result.usage,
+            ).withAddedUsage(totalUsage),
           );
         }
-        last = const BackgroundRunFailure(
+        totalUsage = totalUsage + outcome.result.usage;
+        last = BackgroundRunFailure(
           BackgroundFailureReason.parseFailure,
           detail: '模型返回了 JSON 但没有有效的 imageGuide 字段',
+          usage: totalUsage,
         );
         continue;
       }
       final failure = outcome as BackgroundRunFailure;
-      if (failure.reason == BackgroundFailureReason.cancelled) return failure;
+      totalUsage = totalUsage + failure.usage;
+      if (failure.reason == BackgroundFailureReason.cancelled) {
+        return BackgroundRunFailure(
+          failure.reason,
+          detail: failure.detail,
+          usage: totalUsage,
+        );
+      }
       last = failure;
     }
-    return last!;
+    return BackgroundRunFailure(
+      last!.reason,
+      detail: last.detail,
+      usage: totalUsage,
+    );
   }
 
   /// memory 主动轮(初始化/重生成)的公共执行体:与 [_runJson] 同款尝试循环,
@@ -458,6 +622,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
   }) async {
     BackgroundRunFailure? last;
+    var totalUsage = const TokenUsage();
     for (var attempt = 1; attempt <= maxAttemptsPerRound; attempt++) {
       final outcome = await _attempt(
         model: model,
@@ -476,20 +641,33 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
             BackgroundResult(
               memoryUpdate: result.memoryUpdate,
               usage: result.usage,
-            ),
+            ).withAddedUsage(totalUsage),
           );
         }
-        last = const BackgroundRunFailure(
+        totalUsage = totalUsage + result.usage;
+        last = BackgroundRunFailure(
           BackgroundFailureReason.parseFailure,
           detail: '模型返回了 JSON 但没有有效的 memory 字段',
+          usage: totalUsage,
         );
         continue;
       }
       final failure = outcome as BackgroundRunFailure;
-      if (failure.reason == BackgroundFailureReason.cancelled) return failure;
+      totalUsage = totalUsage + failure.usage;
+      if (failure.reason == BackgroundFailureReason.cancelled) {
+        return BackgroundRunFailure(
+          failure.reason,
+          detail: failure.detail,
+          usage: totalUsage,
+        );
+      }
       last = failure;
     }
-    return last!;
+    return BackgroundRunFailure(
+      last!.reason,
+      detail: last.detail,
+      usage: totalUsage,
+    );
   }
 
   /// 一次后台 LLM 调用的公共执行体:发请求 → 流式收集 → 解析 JSON → 带出
@@ -517,6 +695,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     Future<void>? cancelSignal,
   }) async {
     BackgroundRunFailure? last;
+    var totalUsage = const TokenUsage();
     for (var attempt = 1; attempt <= maxAttemptsPerRound; attempt++) {
       final outcome = await _attempt(
         model: model,
@@ -531,12 +710,26 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
         shouldCancel: shouldCancel,
         cancelSignal: cancelSignal,
       );
-      if (outcome is BackgroundRunSuccess) return outcome;
+      if (outcome is BackgroundRunSuccess) {
+        // 成功轮的 result.usage 只含本次尝试;前置失败尝试同样计费。
+        return BackgroundRunSuccess(outcome.result.withAddedUsage(totalUsage));
+      }
       final failure = outcome as BackgroundRunFailure;
-      if (failure.reason == BackgroundFailureReason.cancelled) return failure;
+      totalUsage = totalUsage + failure.usage;
+      if (failure.reason == BackgroundFailureReason.cancelled) {
+        return BackgroundRunFailure(
+          failure.reason,
+          detail: failure.detail,
+          usage: totalUsage,
+        );
+      }
       last = failure;
     }
-    return last!;
+    return BackgroundRunFailure(
+      last!.reason,
+      detail: last.detail,
+      usage: totalUsage,
+    );
   }
 
   /// 单次尝试:真实发起请求并收集/解析;失败带诊断摘要返回。
@@ -550,13 +743,14 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     int? maxTokens,
     ReasoningLevel reasoningLevel = ReasoningLevel.off,
     bool requireVariables = false,
+    String? userMessage,
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
   }) async {
     final request = LlmRequest(
       model: model,
       systemPrompt: prompt,
-      messages: [ChatMessage(ChatRole.user, _userMessage)],
+      messages: [ChatMessage(ChatRole.user, userMessage ?? _userMessage)],
       temperature: temperature,
       // 后台推理强度:默认 off 不发送;开启后 openai 兼容端点映射
       // reasoning_effort、anthropic 映射 thinking 预算(其内部会连带省略
@@ -576,6 +770,11 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
 
     final buffer = StringBuffer();
     var inTok = 0, outTok = 0, cachedTok = 0;
+    TokenUsage currentUsage() => TokenUsage(
+      inputTokens: inTok,
+      outputTokens: outTok,
+      cachedInputTokens: cachedTok,
+    );
     // 与主写同款的竞速唤醒。LLM 思考期不吐首块,`await for` 只能等下一个
     // 流事件到达才轮询到 shouldCancel —— 中断按钮要等模型终于吐第一个
     // token(可能 5~30 秒)才生效。cancelSignal 镜像主写的取消令牌:触发
@@ -605,6 +804,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
                     BackgroundRunFailure(
                       BackgroundFailureReason.backendError,
                       detail: _oneLine(message, maxDetailChars),
+                      usage: currentUsage(),
                     ),
                   );
                 }
@@ -616,6 +816,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
                 BackgroundRunFailure(
                   BackgroundFailureReason.backendError,
                   detail: _oneLine('$e', maxDetailChars),
+                  usage: currentUsage(),
                 ),
               );
             }
@@ -625,7 +826,10 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
               // 流自然结束后再确认一次:中断可能正好发生在末事件与解析之间。
               if (shouldCancel?.call() ?? false) {
                 completer.complete(
-                  const BackgroundRunFailure(BackgroundFailureReason.cancelled),
+                  BackgroundRunFailure(
+                    BackgroundFailureReason.cancelled,
+                    usage: currentUsage(),
+                  ),
                 );
               } else {
                 completer.complete(
@@ -647,7 +851,10 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       if (cancelled || completer.isCompleted) return;
       cancelled = true;
       completer.complete(
-        const BackgroundRunFailure(BackgroundFailureReason.cancelled),
+        BackgroundRunFailure(
+          BackgroundFailureReason.cancelled,
+          usage: currentUsage(),
+        ),
       );
       // 关闭底层 HTTP 流(协作式中断:令牌取消 + 显式关闭订阅,与主写一致)。
       // 不 await —— async* 生成器在零事件期会停在 `await client.send()`,
@@ -684,6 +891,11 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       return BackgroundRunFailure(
         BackgroundFailureReason.parseFailure,
         detail: _parseDetail(raw),
+        usage: TokenUsage(
+          inputTokens: inTok,
+          outputTokens: outTok,
+          cachedInputTokens: cachedTok,
+        ),
       );
     }
     return BackgroundRunSuccess(
@@ -760,77 +972,72 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
         'to the user, never explain.',
       )
       ..writeln()
-      ..writeln('# Output contract (hard rules)')
-      ..writeln('- Reply with a single JSON object and NOTHING else.')
+      ..writeln('# Output contract')
       ..writeln(
-        '- No markdown fences, no preamble, no trailing commentary, no thinking tags.',
+        '- Output exactly one JSON object and nothing else: no markdown fences, no preamble, '
+        'no commentary, no thinking tags.',
       )
       ..writeln(
-        '- Use exactly the keys listed in the output shape, valid JSON only (double quotes, no '
-        'trailing commas). A key may be null only where null is explicitly allowed below.',
+        '- Use only the keys in the output shape, valid JSON only (double quotes, no trailing '
+        'commas). A key may be null only where the shape explicitly allows it.',
       )
       ..writeln()
       ..writeln('# Output shape for this run')
       ..writeln('{$enabledFields}')
       ..writeln()
-      ..writeln('# How to read the context sections')
+      ..writeln('# How to read the context')
       ..writeln(
-        '- The recent_conversation section is the ONLY source of truth for the current image scene; '
-        'it is read-only context, not a source of variable updates.',
+        '- recent_conversation is read-only context and the ONLY source of truth for the current '
+        'image scene; it is never a source of variable updates.',
       )
       ..writeln(
-        '- Any memory, character, worldbook_background or image_guide section that appears below '
-        'is durable, read-only background: never contradict it, never copy it into your output, '
-        'and never invent facts that fight it. These sections may be absent — work with what is '
-        'present.',
+        '- Any memory, character, worldbook_background or image_guide section below is durable, '
+        'read-only background: never contradict it, never copy it into your output, never invent '
+        'facts that fight it. Sections may be absent — work with what is present.',
       )
       ..writeln();
     if (features.variables) {
       instruction
         ..writeln('# variables')
         ..writeln(
-          '- Variables are the session\'s durable state board: short key-value pairs for facts that '
-          'persist and can change across the story (location, time, condition, goals, relationships, '
-          'possessions, ongoing effects). They are not a per-scene summary.',
+          '- Variables are the session\'s durable state board: short key-value pairs for facts '
+          'that persist and change across the story (location, time, condition, goals, '
+          'relationships, possessions, ongoing effects). Not a per-scene summary.',
         )
         ..writeln(
-          '- Update variables ONLY from the variable_delta section, the unprocessed turns for this run.',
+          '- variable_delta holds this run\'s unprocessed turns and is the ONLY source of variable '
+          'changes; never replay old changes from recent_conversation.',
         )
         ..writeln(
-          '- Never replay old changes from the read-only recent_conversation section.',
+          '- Emit only keys whose value CHANGED in variable_delta, as {"key": new_value}. Always '
+          'include the variables object; use {} when nothing changed.',
         )
         ..writeln(
-          '- Emit only the keys whose value CHANGED in variable_delta, as {"key": new_value}.',
+          '- Create new keys when variable_delta establishes a durable fact of this kind that no '
+          'existing key covers: keep the key short and stable, reuse that exact key in later runs, '
+          'and prefer updating an existing key over creating a near-duplicate or synonym. Do not '
+          'track transient scene details that will not matter again.',
         )
         ..writeln(
-          '- YOU MAY AND SHOULD CREATE NEW KEYS: when variable_delta establishes a durable fact of '
-          'this kind that no existing key covers, add it with a short, stable key and reuse that '
-          'exact key in later runs. Prefer updating an existing key over creating a near-duplicate '
-          'or synonym, and do not track transient scene details that will not matter again.',
+          '- Preserve existing keys exactly, including whitespace; keys must not be empty or '
+          'whitespace-only. Values are JSON scalars: strings, finite numbers or booleans; never '
+          'null, objects or arrays.',
         )
         ..writeln(
-          '- Preserve existing keys exactly, including whitespace; keys must not be empty or whitespace-only.',
+          '- Delete only via removeVariables with the key\'s EXACT existing name, and only when '
+          'variable_delta shows the fact has ended, been left behind, or been permanently '
+          'superseded. Never delete because a key is absent from variable_delta or the board '
+          'looks cluttered; if the key still describes state, update it to a neutral value '
+          'instead.',
         )
         ..writeln(
-          '- Values must be JSON scalars: strings, finite numbers or booleans; never null, objects or arrays.',
+          '- variable_access governs EXISTING keys: only deletable keys may be removed; readonly '
+          'keys must never be updated or removed; all other existing keys may be updated but '
+          'never removed. New keys are unrestricted.',
         )
         ..writeln(
-          '- Always include the variables object. Do NOT restate unchanged keys; use {} when nothing changed.',
-        )
-        ..writeln(
-          '- To delete a key, list its EXACT existing key in removeVariables. Remove only when '
-          'variable_delta shows the fact it tracks has ended, been left behind, or been permanently '
-          'superseded. Never remove a key merely because it is absent from variable_delta or because the '
-          'context looks cluttered; prefer updating it to a neutral value when the key still describes state.',
-        )
-        ..writeln(
-          '- Only existing keys listed under variable_access.deletable may be removed; readonly '
-          'keys must never be updated or removed. All other existing keys may be updated but never '
-          'removed. New keys may always be created.',
-        )
-        ..writeln(
-          '- A key must never appear in both variables and removeVariables. At most 5 removals per run; '
-          'use [] when none.',
+          '- A key must never appear in both variables and removeVariables. At most 5 removals '
+          'per run; use [] when none.',
         )
         ..writeln();
     }
@@ -838,14 +1045,13 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       instruction
         ..writeln('# image')
         ..writeln(
-          '- Always fill this field — never null, never a generic or stale image. Describe the '
-          'CURRENT scene read from the recent_conversation section: who is present, where, the '
-          'action, lighting and mood.',
+          '- Always fill this field: never null, never generic, never stale. Describe the CURRENT '
+          'scene from recent_conversation — who is present, where, the action, lighting and mood.',
         )
         ..writeln(
           '- Reproduce each character\'s established appearance EXACTLY as pinned by the '
-          'image_guide (and the character / memory sections when present); never alter what those '
-          'fix. Vary only scene-specific pose, expression, action and mood.',
+          'image_guide (and the character / memory sections when present); vary only '
+          'scene-specific pose, expression, action and mood.',
         )
         ..writeln(
           '- Write it as the English NovelAI tag format defined in the image_guide: one '
@@ -881,8 +1087,6 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
           worldbook: worldbook,
           memoryChars: maxBackgroundMemoryChars,
           characterChars: maxBackgroundCharacterChars,
-          worldbookChars: maxBackgroundWorldbookChars,
-          worldbookEntryChars: maxBackgroundWorldbookEntryChars,
         ),
       );
     }
@@ -967,6 +1171,92 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     return lines.join('\n');
   }
 
+  /// 单张图片提示词修订的提示词:稳定段为修订契约 + 生图锚定三段(复用
+  /// image 轮的截断上限),可变尾部为**目标图片生成时点之前**的对话、旧描述
+  /// 与用户修改要求。旧描述与方向都可能很长,按重跑同款上限截断。
+  static String _buildImageRevisionPrompt({
+    required String currentPrompt,
+    required String direction,
+    required List<Message> history,
+    String? imageGuide,
+    String? memory,
+    CharacterCard? character,
+    List<WorldbookEntry> worldbook = const [],
+  }) {
+    final instruction = StringBuffer()
+      ..writeln(
+        'You are revising the scene description of ONE already-generated image for a roleplay '
+        'session, at the user\'s request. You are not a chat participant: never write prose, '
+        'never reply to the user, never explain.',
+      )
+      ..writeln()
+      ..writeln('# Output contract')
+      ..writeln(
+        '- Output exactly one JSON object and nothing else: '
+            '{"imagePrompt": "<revised English NovelAI tag string>"}',
+      )
+      ..writeln(
+        '- No markdown fences, no preamble, no commentary, no thinking tags. "imagePrompt" is '
+        'one non-empty comma-separated English tag string in the image_guide style, not a '
+        'sentence.',
+      )
+      ..writeln()
+      ..writeln('# Revision rules')
+      ..writeln(
+        '- image_prompt_to_revise is the stored description of the image being fixed. Treat it '
+        'as the baseline: keep its subject, framing, composition and every tag the revision '
+        'request does not ask to change.',
+      )
+      ..writeln(
+        '- Apply ONLY the change requested in image_revision_request. If the request is vague or '
+        'partial, make the smallest coherent change that satisfies it.',
+      )
+      ..writeln(
+        '- image_guide pins each character\'s fixed appearance and the standing art style. '
+        'Preserve those tags exactly; only when the user\'s request explicitly asks to change a '
+        'fixed attribute for this image may you override it, and never beyond this single '
+        'prompt.',
+      )
+      ..writeln(
+        '- recent_conversation, when present, is read-only evidence of the scene at the time '
+        'the image was made. Do not contradict it; do not invent new characters, objects, '
+        'events or setting facts not already present in the description or conversation.',
+      )
+      ..writeln(
+        '- Keep the result a single usable prompt for one image; never return multiple descriptions.',
+      );
+
+    final stableSections = <String>[
+      backgroundTag(
+        'background_image_revision',
+        'Single-image prompt revision contract: the output format and rules for this run.',
+        instruction.toString().trimRight(),
+      ),
+      ...imageAnchorSections(
+        imageGuide: imageGuide,
+        character: character,
+        memory: memory,
+        worldbook: worldbook,
+        memoryChars: maxBackgroundMemoryChars,
+        characterChars: maxBackgroundCharacterChars,
+      ),
+    ];
+    final variableSections = <String>[
+      if (history.isNotEmpty) transcriptSection(history),
+      backgroundTag(
+        'image_prompt_to_revise',
+        'Current stored description of the single image being revised — the baseline, not a chat message.',
+        backgroundTruncate(currentPrompt, maxRerunPreviousImageChars),
+      ),
+      backgroundTag(
+        'image_revision_request',
+        'The user\'s requested change for this image — apply only this; keep every other tag intact.',
+        backgroundTruncate(direction, maxRerunDirectionChars),
+      ),
+    ];
+    return '${stableSections.join('\n\n')}\n\n${variableSections.join('\n\n')}';
+  }
+
   /// 记忆初始化提示词:只送**角色卡 + 常驻(恒定)世界书**,不含会话转录与其它
   /// 功能块 —— 全新会话没有任何对话可依据,初始记忆完全来自这两份设定源。
   ///
@@ -977,11 +1267,7 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     List<WorldbookEntry> worldbook,
   ) {
     final characterText = _characterCardText(character);
-
-    final constantEntries =
-        worldbook.where((e) => e.constant && e.enabled).toList()
-          ..sort((a, b) => a.position.compareTo(b.position));
-    final constantText = constantEntries.map((e) => e.content).join('\n\n');
+    final constantText = _constantWorldbookText(worldbook);
 
     final instruction = StringBuffer()
       ..writeln(
@@ -1012,10 +1298,27 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     return instruction.toString();
   }
 
-  /// 全量重生成记忆的转录上限:超长时保最新 [maxRegenerateMessages] 条 ——
-  /// 记忆重生成是低频主动操作,截尾只是防止一次性请求超窗;更早剧情若有
-  /// 价值应已沉淀在既有记忆里。
+  /// 全量重生成主动轮(记忆/生图指导)的转录上限:超长时保最新
+  /// [maxRegenerateMessages] 条 —— 重生成是低频主动操作,截尾只是防止一次性
+  /// 请求超窗;更早剧情若有价值应已沉淀在既有记忆/指导里。
   static const int maxRegenerateMessages = 500;
+
+  /// 重生成主动轮的活跃对话行:排除 system 摘要/附件行/已压缩/空内容,
+  /// 并按 [maxRegenerateMessages] 截尾保最新。
+  static List<Message> _regenerateTranscriptRows(List<Message> history) {
+    final active = history
+        .where(
+          (m) =>
+              m.isChat &&
+              m.role != 'system' &&
+              !m.isCompacted &&
+              m.content.isNotEmpty,
+        )
+        .toList();
+    return active.length > maxRegenerateMessages
+        ? active.sublist(active.length - maxRegenerateMessages)
+        : active;
+  }
 
   /// 全量重生成记忆的提示词([runMemoryRegenerate] 用):角色卡 + 常驻世界书 +
   /// **全部活跃对话**(旧→新)+ 既有记忆(只读参考)。
@@ -1026,27 +1329,11 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
     String? currentMemory,
   ) {
     final characterText = _characterCardText(character);
-    final constantEntries =
-        worldbook.where((e) => e.constant && e.enabled).toList()
-          ..sort((a, b) => a.position.compareTo(b.position));
-    final constantText = constantEntries.map((e) => e.content).join('\n\n');
+    final constantText = _constantWorldbookText(worldbook);
 
-    // 活跃对话 = 真实对话行(排除 system 摘要/已压缩/空内容/附件行)。
-    final active = history
-        .where(
-          (m) =>
-              m.isChat &&
-              m.role != 'system' &&
-              !m.isCompacted &&
-              m.content.isNotEmpty,
-        )
-        .toList();
-    final transcriptRows = active.length > maxRegenerateMessages
-        ? active.sublist(active.length - maxRegenerateMessages)
-        : active;
-    final transcript = transcriptRows
-        .map((m) => '${m.role}: ${m.content}')
-        .join('\n');
+    final transcript = _regenerateTranscriptRows(
+      history,
+    ).map((m) => '${m.role}: ${m.content}').join('\n');
 
     final hasMemory = currentMemory != null && currentMemory.trim().isNotEmpty;
 
@@ -1098,6 +1385,122 @@ Exclude per-scene details already obvious from the recent conversation. Be thoro
       ..writeln('Full conversation transcript (oldest first):')
       ..write(transcript);
     return instruction.toString();
+  }
+
+  /// 生图指导初始化提示词([runImageGuideInit] 用):只送角色卡 + 常驻世界书 ——
+  /// 全新会话没有对话可依据。
+  static String _buildImageGuideInitPrompt(
+    CharacterCard character,
+    List<WorldbookEntry> worldbook,
+  ) {
+    final instruction = StringBuffer()
+      ..writeln(
+        'You are composing the initial image direction guide for a roleplay session. The guide is '
+        'a compact, reusable instruction that drives automatic image generation every turn.',
+      )
+      ..writeln()
+      ..writeln('# Output contract')
+      ..writeln(
+        '- A single JSON object and nothing else: {"imageGuide": "<the initial image direction guide>"}',
+      )
+      ..writeln('- No markdown fences, no prose, no extra keys.')
+      ..writeln()
+      ..writeln('# What the guide must pin down (FIXED, never drifting)')
+      ..writeln(_imageGuideContract)
+      ..writeln()
+      ..writeln(
+        'Compose it from the character card and the standing worldbook facts below.',
+      )
+      ..writeln()
+      ..writeln('Character card:')
+      ..write(_characterCardText(character));
+    final constantText = _constantWorldbookText(worldbook);
+    if (constantText.isNotEmpty) {
+      instruction
+        ..writeln()
+        ..writeln('Standing worldbook facts (constant, always active):')
+        ..write(constantText);
+    }
+    return instruction.toString();
+  }
+
+  /// 全量重生成生图指导的提示词([runImageGuideRegenerate] 用):角色卡 +
+  /// 常驻世界书 + **全部活跃对话**(旧→新)+ 既有指导(只读草稿)。
+  static String _buildImageGuideRegeneratePrompt(
+    CharacterCard character,
+    List<WorldbookEntry> worldbook,
+    List<Message> history,
+    String? currentGuide,
+  ) {
+    final transcript = _regenerateTranscriptRows(
+      history,
+    ).map((m) => '${m.role}: ${m.content}').join('\n');
+    final hasGuide = currentGuide != null && currentGuide.trim().isNotEmpty;
+
+    final instruction = StringBuffer()
+      ..writeln(
+        'You are recomposing the image direction guide for an ONGOING roleplay session. The guide '
+        'is a compact, reusable instruction that drives automatic image generation every turn. Fold '
+        'the FULL conversation below into one updated guide: keep established characters and style, '
+        'add recurring characters the story introduced with the appearance it established for them, '
+        'and update any appearance or world-setting facts that changed substantially.',
+      )
+      ..writeln()
+      ..writeln('# Output contract')
+      ..writeln(
+        '- A single JSON object and nothing else: {"imageGuide": "<the recomposed image direction guide>"}',
+      )
+      ..writeln('- No markdown fences, no prose, no extra keys.')
+      ..writeln()
+      ..writeln('# What the guide must pin down (FIXED, never drifting)')
+      ..writeln(_imageGuideContract)
+      ..writeln()
+      ..writeln(
+        'Recompose from the FULL transcript below (oldest to newest), checked against the '
+        'character card and standing worldbook'
+        '${hasGuide ? ' and the existing guide used as a draft — keep what still holds, '
+                  'merge in what the story establishes, correct what has changed' : ''}. '
+        'Only include characters that actually appeared, are on the card, or are established by the '
+        'standing worldbook facts; when the story never establishes a character\'s look, keep it '
+        'minimal rather than inventing tags.',
+      )
+      ..writeln()
+      ..writeln('Character card:')
+      ..write(_characterCardText(character));
+    final constantText = _constantWorldbookText(worldbook);
+    if (constantText.isNotEmpty) {
+      instruction
+        ..writeln()
+        ..writeln('Standing worldbook facts (constant, always active):')
+        ..write(constantText);
+    }
+    if (hasGuide) {
+      final draft = currentGuide;
+      instruction
+        ..writeln()
+        ..writeln(
+          'Existing image guide (read-only draft to correct and extend):',
+        )
+        ..write(
+          draft.length > maxImageGuideChars
+              ? '${draft.substring(0, maxImageGuideChars)}\n…(超出 $maxImageGuideChars 字符,已截断,保留开头)'
+              : draft,
+        );
+    }
+    instruction
+      ..writeln()
+      ..writeln('Full conversation transcript (oldest first):')
+      ..write(transcript);
+    return instruction.toString();
+  }
+
+  /// 常驻(恒定且启用)世界书文本:按 position 排序后完整拼合 —— 后台世界书
+  /// 注入不设上限,主动轮(`runMemoryInit`/`runMemoryRegenerate`/
+  /// `runImageGuideInit`/`runImageGuideRegenerate`)同样不做截断。
+  static String _constantWorldbookText(List<WorldbookEntry> worldbook) {
+    final entries = worldbook.where((e) => e.constant && e.enabled).toList()
+      ..sort((a, b) => a.position.compareTo(b.position));
+    return entries.map((e) => e.content).join('\n\n');
   }
 
   /// 角色卡的纯文本形态(记忆主动轮共用)。

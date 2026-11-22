@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 
 import 'empty_state.dart';
+import 'inline_spinner.dart';
 import 'searchable_list.dart';
 
 /// 检索型管理页骨架。
@@ -59,7 +60,7 @@ class ListPageScaffold<T> extends StatelessWidget {
     this.onRetry,
     this.items,
     this.header,
-    this.listPadding = const EdgeInsets.only(top: 4, bottom: 96),
+    this.listPadding = const EdgeInsets.fromLTRB(16, 4, 16, 96),
     this.onReorder,
     this.reorderKey,
   });
@@ -76,7 +77,7 @@ class ListPageScaffold<T> extends StatelessWidget {
   Widget _body() {
     final list = items;
     if (loading && list == null) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: InlineSpinner(size: 36, strokeWidth: 4));
     }
     if (error != null) {
       return EmptyState(
@@ -95,7 +96,11 @@ class ListPageScaffold<T> extends StatelessWidget {
     if (list == null || list.isEmpty) return emptyState;
     return Column(
       children: [
-        if (header != null) header!,
+        if (header != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: header!,
+          ),
         Expanded(
           child: SearchableList<T>(
             items: list,

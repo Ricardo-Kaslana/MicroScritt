@@ -9,6 +9,7 @@ import '../../state/card_studio_state.dart';
 import '../../state/providers.dart';
 import '../character_edit_screen.dart';
 import '../common/confirm_dialog.dart';
+import '../common/inline_spinner.dart';
 import '../common/section_header.dart';
 import '../common/unsaved_changes_guard.dart';
 import '../theme/app_theme.dart';
@@ -141,7 +142,7 @@ class _CardStudioScreenState extends ConsumerState<CardStudioScreen> {
 
   Widget _buildBody(CardStudioState state, bool wide) {
     if (state.phase == CardStudioPhase.preparing) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: InlineSpinner(size: 36, strokeWidth: 4));
     }
     if (state.phase == CardStudioPhase.done &&
         state.appliedCharacterId != null) {

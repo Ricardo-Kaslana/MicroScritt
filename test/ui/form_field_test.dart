@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/ui/common/form_field.dart';
+import 'package:microscritt/ui/theme/app_theme.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -87,6 +88,40 @@ void main() {
     );
     expect(button.onPressed, isNull);
     expect(copied, isEmpty);
+  });
+
+  testWidgets('appInputDecoration 默认沿用主题,描边档可调圆角与内边距', (tester) async {
+    InputDecoration? themed;
+    InputDecoration? outlined;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) {
+              themed = appInputDecoration(context, hintText: '主题档');
+              outlined = appInputDecoration(
+                context,
+                hintText: '描边档',
+                borderAlpha: 0.5,
+                radius: 10,
+                contentPadding: const EdgeInsets.all(8),
+              );
+              return const SizedBox();
+            },
+          ),
+        ),
+      ),
+    );
+
+    expect(themed!.border, isNull);
+    expect(themed!.enabledBorder, isNull);
+    expect(themed!.filled, isNull);
+
+    expect(outlined!.filled, isTrue);
+    expect(outlined!.contentPadding, const EdgeInsets.all(8));
+    final border = outlined!.enabledBorder! as OutlineInputBorder;
+    expect(border.borderRadius, BorderRadius.circular(10));
   });
 
   testWidgets('下拉字段的长 helper 自动换行,不再单行省略', (tester) async {

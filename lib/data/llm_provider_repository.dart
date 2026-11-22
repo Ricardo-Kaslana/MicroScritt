@@ -4,6 +4,8 @@
 /// 模型行按 id upsert,保住被 `app_settings.background_model_id` 引用的 id。
 library;
 
+import 'package:sqflite/sqflite.dart';
+
 import '../models/backend_config.dart';
 import '../models/llm_provider.dart';
 import 'database.dart';
@@ -16,11 +18,15 @@ class LlmProviderRepository {
   final AppDatabase db;
   LlmProviderRepository(this.db);
 
-  Future<List<LlmProviderConfig>> all() async {
-    final providerRows = await db.db.query('llm_providers', orderBy: 'position ASC, id ASC');
+  Future<List<LlmProviderConfig>> all() => allWith(db.db);
+
+  /// 在给定执行器([DatabaseExecutor])上读取全部 provider;供跨仓库事务
+  /// (如配置文件整体应用)在提交前后复用同一套查询逻辑。
+  Future<List<LlmProviderConfig>> allWith(DatabaseExecutor executor) async {
+    final providerRows = await executor.query('llm_providers', orderBy: 'position ASC, id ASC');
     // position 序即用户排列序;与 loadBackendConfig 的模型排序口径一致,
     // 不依赖"重插后 rowid 恰好单调"的隐性巧合。
-    final modelRows = await db.db.query('llm_models', orderBy: 'position ASC, id ASC');
+    final modelRows = await executor.query('llm_models', orderBy: 'position ASC, id ASC');
     final modelsByProvider = <int, List<LlmModelEntry>>{};
     for (final m in modelRows) {
       final pid = m['provider_id'] as int;
@@ -43,65 +49,72 @@ class LlmProviderRepository {
   /// `app_settings.background_model_id` 等按 `llm_models.id` 引用的配置随即
   /// 悬空 —— 后台 agent 会静默回退主写模型,用户无任何提示。upsert 保住
   /// 未变行的 id,引用稳定。
-  Future<void> saveProvider(LlmProviderConfig c) async {
-    await db.db.transaction((txn) async {
-      int id = c.id;
-      final data = {
-        'provider_id': c.providerId,
-        'display_name': c.displayName,
-        'base_url': c.baseUrl,
-        'protocol': c.protocol.wire,
-        'api_key': c.apiKey,
-        'is_active': c.isActive ? 1 : 0,
-        'position': c.position,
-        'extra_headers': LlmProviderConfig.extraHeadersWire(c.extraHeaders),
-        'modern_params': c.modernParams ? 1 : 0,
+  Future<void> saveProvider(LlmProviderConfig c) =>
+      db.db.transaction((txn) => saveProviderInTransaction(txn, c));
+
+  /// 在调用方事务内保存 provider 及其模型目录;不自行开启/提交事务。
+  Future<void> saveProviderInTransaction(
+    DatabaseExecutor executor,
+    LlmProviderConfig c,
+  ) async {
+    int id = c.id;
+    final data = {
+      'provider_id': c.providerId,
+      'display_name': c.displayName,
+      'base_url': c.baseUrl,
+      'protocol': c.protocol.wire,
+      'api_key': c.apiKey,
+      'is_active': c.isActive ? 1 : 0,
+      'position': c.position,
+      'extra_headers': LlmProviderConfig.extraHeadersWire(c.extraHeaders),
+      'modern_params': c.modernParams ? 1 : 0,
+    };
+    if (c.id == 0) {
+      id = await executor.insert('llm_providers', data);
+    } else {
+      await executor.update('llm_providers', data, where: 'id = ?', whereArgs: [c.id]);
+      // 删除本次保存中消失的模型行(新 provider 无旧行可删)。
+      final keptIds = c.models.map((m) => m.id).where((mid) => mid != 0).toSet();
+      final existingIds = (await executor.query(
+        'llm_models',
+        columns: ['id'],
+        where: 'provider_id = ?',
+        whereArgs: [id],
+      ))
+          .map((r) => r['id'] as int)
+          .toSet();
+      for (final gone in existingIds.difference(keptIds)) {
+        await executor.delete('llm_models', where: 'id = ?', whereArgs: [gone]);
+      }
+    }
+    for (var i = 0; i < c.models.length; i++) {
+      final m = c.models[i];
+      final modelData = {
+        'provider_id': id,
+        'model_id': m.modelId,
+        'display_name': m.displayName,
+        'context_capacity': m.contextCapacity,
+        'max_output': m.maxOutput,
+        'temperature': m.temperature,
+        'is_active': m.isActive ? 1 : 0,
+        'position': i,
       };
-      if (c.id == 0) {
-        id = await txn.insert('llm_providers', data);
+      if (c.id != 0 && m.id != 0) {
+        await executor.update('llm_models', modelData, where: 'id = ?', whereArgs: [m.id]);
       } else {
-        await txn.update('llm_providers', data, where: 'id = ?', whereArgs: [c.id]);
-        // 删除本次保存中消失的模型行(新 provider 无旧行可删)。
-        final keptIds = c.models.map((m) => m.id).where((mid) => mid != 0).toSet();
-        final existingIds = (await txn.query(
-          'llm_models',
-          columns: ['id'],
-          where: 'provider_id = ?',
-          whereArgs: [id],
-        ))
-            .map((r) => r['id'] as int)
-            .toSet();
-        for (final gone in existingIds.difference(keptIds)) {
-          await txn.delete('llm_models', where: 'id = ?', whereArgs: [gone]);
-        }
+        await executor.insert('llm_models', modelData);
       }
-      for (var i = 0; i < c.models.length; i++) {
-        final m = c.models[i];
-        final modelData = {
-          'provider_id': id,
-          'model_id': m.modelId,
-          'display_name': m.displayName,
-          'context_capacity': m.contextCapacity,
-          'max_output': m.maxOutput,
-          'temperature': m.temperature,
-          'is_active': m.isActive ? 1 : 0,
-          'position': i,
-        };
-        if (c.id != 0 && m.id != 0) {
-          await txn.update('llm_models', modelData, where: 'id = ?', whereArgs: [m.id]);
-        } else {
-          await txn.insert('llm_models', modelData);
-        }
-      }
-    });
+    }
   }
 
   /// 删除 provider 及其全部模型行(单事务,避免留下孤儿模型)。
-  Future<void> deleteProvider(int id) async {
-    await db.db.transaction((txn) async {
-      await txn.delete('llm_models', where: 'provider_id = ?', whereArgs: [id]);
-      await txn.delete('llm_providers', where: 'id = ?', whereArgs: [id]);
-    });
+  Future<void> deleteProvider(int id) =>
+      db.db.transaction((txn) => deleteProviderInTransaction(txn, id));
+
+  /// 在调用方事务内删除 provider 及其模型行;不自行开启/提交事务。
+  Future<void> deleteProviderInTransaction(DatabaseExecutor executor, int id) async {
+    await executor.delete('llm_models', where: 'provider_id = ?', whereArgs: [id]);
+    await executor.delete('llm_providers', where: 'id = ?', whereArgs: [id]);
   }
 
   /// 选择某个 provider 为当前在用,并(可选)指定其下某个模型为选中模型。

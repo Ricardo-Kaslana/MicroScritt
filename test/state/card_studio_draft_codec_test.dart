@@ -11,128 +11,139 @@ import 'package:microscritt/state/card_studio_state.dart';
 
 void main() {
   CharacterCard baseCard() => const CharacterCard(
-        name: '旧名',
-        description: '旧描述',
-        personality: '旧性格',
-        scenario: '旧场景',
-        firstMessage: '旧开场',
-        mesExample: '旧示例',
-        systemPrompt: '旧系统',
-        postHistoryInstructions: '旧后指令',
-        creatorNotes: '旧备注',
-        depthPrompt: '旧深度',
-        alternateGreetings: ['g1'],
-        tags: ['t1'],
-        creator: 'author',
-        characterVersion: '1.0',
-        talkativeness: 'chatty',
-        fav: true,
-        bubbleStyle: BubbleStyle(bubbleColor: 0xFF112233, radius: 20),
-        avatarBase64: 'avatar-base',
-        backgroundBase64: 'bg-base',
-      );
+    name: '旧名',
+    description: '旧描述',
+    personality: '旧性格',
+    scenario: '旧场景',
+    firstMessage: '旧开场',
+    mesExample: '旧示例',
+    systemPrompt: '旧系统',
+    postHistoryInstructions: '旧后指令',
+    creatorNotes: '旧备注',
+    depthPrompt: '旧深度',
+    alternateGreetings: ['g1'],
+    tags: ['t1'],
+    creator: 'author',
+    characterVersion: '1.0',
+    talkativeness: 'chatty',
+    fav: true,
+    bubbleStyle: BubbleStyle(bubbleColor: 0xFF112233, radius: 20),
+    avatarHash: 'avatar-base',
+    backgroundHash: 'bg-base',
+  );
 
   CharacterCard draftCard() => const CharacterCard(
-        name: '新名',
-        description: '新描述',
-        personality: '新性格',
-        scenario: '新场景',
-        firstMessage: '新开场',
-        mesExample: '新示例',
-        systemPrompt: '新系统',
-        postHistoryInstructions: '新后指令',
-        creatorNotes: '新备注',
-        depthPrompt: '新深度',
-        alternateGreetings: ['g1', 'g2'],
-        tags: ['t1', 't2'],
-        creator: 'author',
-        characterVersion: '1.0',
-        talkativeness: 'chatty',
-        fav: true,
-        bubbleStyle: BubbleStyle(bubbleColor: 0xFF112233, radius: 20),
-        avatarBase64: 'new-avatar',
-        backgroundBase64: 'bg-base',
-      );
+    name: '新名',
+    description: '新描述',
+    personality: '新性格',
+    scenario: '新场景',
+    firstMessage: '新开场',
+    mesExample: '新示例',
+    systemPrompt: '新系统',
+    postHistoryInstructions: '新后指令',
+    creatorNotes: '新备注',
+    depthPrompt: '新深度',
+    alternateGreetings: ['g1', 'g2'],
+    tags: ['t1', 't2'],
+    creator: 'author',
+    characterVersion: '1.0',
+    talkativeness: 'chatty',
+    fav: true,
+    bubbleStyle: BubbleStyle(bubbleColor: 0xFF112233, radius: 20),
+    avatarHash: 'new-avatar',
+    backgroundHash: 'bg-base',
+  );
 
   WorldbookEntry baseEntry() => const WorldbookEntry(
-        id: 4,
-        characterId: 7,
-        name: '设定',
-        keys: ['蒸汽'],
-        secondaryKeys: ['城'],
-        content: '旧内容',
-        constant: true,
-        selective: true,
-        position: 2,
-        enabled: false,
-        background: true,
-        extra: {'probability': 80},
-      );
+    id: 4,
+    characterId: 7,
+    name: '设定',
+    keys: ['蒸汽'],
+    secondaryKeys: ['城'],
+    content: '旧内容',
+    constant: true,
+    selective: true,
+    position: 2,
+    enabled: false,
+    background: true,
+    extra: {'probability': 80},
+  );
 
   WorldbookEntry newEntry() => const WorldbookEntry(
-        id: -1,
-        characterId: 7,
-        name: '新增',
-        keys: ['新'],
-        content: '新增内容',
-        position: 3,
-        extra: {'custom': true},
-      );
+    id: -1,
+    characterId: 7,
+    name: '新增',
+    keys: ['新'],
+    content: '新增内容',
+    position: 3,
+    extra: {'custom': true},
+  );
 
   CardStudioDraftSnapshot snapshot() => CardStudioDraftSnapshot(
-        targetCharacterId: 7,
-        baseCard: baseCard(),
-        baseEntries: [baseEntry()],
-        draftCard: draftCard(),
-        draftEntries: [
-          baseEntry().copyWith(content: '新内容'),
-          newEntry(),
-        ],
-        decisions: ReviewDecisions.acceptAll
-            .withField('name', const FieldDecision(editedText: '编辑名'))
-            .withEntry(
-              'base:4',
-              EntryDecision(
-                editedEntry: baseEntry().copyWith(content: '手工内容'),
-              ),
-            )
-            .withEntry('new:-1', const EntryDecision(accepted: false))
-            .withAvatar(false),
-        entries: const [
-          CardStudioEntry.user('写卡'),
-          CardStudioEntry(CardStudioEntryKind.agent, '构思', step: 2),
-          CardStudioEntry(
-            CardStudioEntryKind.toolStep,
-            '更新角色卡',
-            tools: ['setCardFields'],
-            step: 3,
-          ),
-          CardStudioEntry.notice('完成'),
-          CardStudioEntry.error('失败'),
-        ],
-        sessionLog: const ['用户：写卡', '完成：ok'],
-        draftAvatarPrompt: '1girl, red hair',
-        generatedAvatarPrompt: '1girl, red hair',
-        lastSummary: 'ok',
-        lastRequestInputTokens: 1800,
-        lastRequestCachedInputTokens: 1500,
-        contextEstimateTokens: 240,
-      );
+    targetCharacterId: 7,
+    baseCard: baseCard(),
+    baseEntries: [baseEntry()],
+    draftCard: draftCard(),
+    draftEntries: [
+      baseEntry().copyWith(content: '新内容'),
+      newEntry(),
+    ],
+    decisions: ReviewDecisions.acceptAll
+        .withField('name', const FieldDecision(editedText: '编辑名'))
+        .withField(
+          'alternateGreetings',
+          const FieldDecision(editedList: ['第一条\n带换行', '第二条,带逗号']),
+        )
+        .withEntry(
+          'base:4',
+          EntryDecision(editedEntry: baseEntry().copyWith(content: '手工内容')),
+        )
+        .withEntry('new:-1', const EntryDecision(accepted: false))
+        .withAvatar(false),
+    entries: const [
+      CardStudioEntry.user('写卡'),
+      CardStudioEntry(CardStudioEntryKind.agent, '构思', step: 2),
+      CardStudioEntry(
+        CardStudioEntryKind.toolStep,
+        '更新角色卡',
+        tools: ['setCardFields'],
+        step: 3,
+      ),
+      CardStudioEntry.notice('完成'),
+      CardStudioEntry.error('失败'),
+    ],
+    sessionLog: const ['用户：写卡', '完成：ok'],
+    draftAvatarPrompt: '1girl, red hair',
+    generatedAvatarPrompt: '1girl, red hair',
+    lastSummary: 'ok',
+    heldAssetHashes: const ['new-avatar', 'bg-base'],
+    lastRequestInputTokens: 1800,
+    lastRequestCachedInputTokens: 1500,
+    contextEstimateTokens: 240,
+  );
 
   test('round-trips cards, entries, decisions and logs', () {
-    final payload = jsonDecode(jsonEncode(encodeCardStudioDraft(snapshot())))
-        as Map<String, dynamic>;
+    final payload =
+        jsonDecode(jsonEncode(encodeCardStudioDraft(snapshot())))
+            as Map<String, dynamic>;
     final restored = decodeCardStudioDraft(payload)!;
+    final draftDto =
+        (payload['draft'] as Map<String, dynamic>)['card']
+            as Map<String, dynamic>;
+    expect(draftDto.containsKey('avatarHash'), isTrue);
+    expect(draftDto.containsKey('backgroundHash'), isTrue);
+    expect(draftDto.containsKey('avatar'), isFalse);
+    expect(draftDto.containsKey('background'), isFalse);
 
     expect(restored.targetCharacterId, 7);
     expect(restored.baseCard.name, '旧名');
-    expect(restored.baseCard.avatarBase64, 'avatar-base');
-    expect(restored.baseCard.backgroundBase64, 'bg-base');
+    expect(restored.baseCard.avatarHash, 'avatar-base');
+    expect(restored.baseCard.backgroundHash, 'bg-base');
     expect(restored.baseCard.fav, isTrue);
     expect(restored.baseCard.bubbleStyle?.bubbleColor, 0xFF112233);
     expect(restored.baseCard.raw, isEmpty, reason: '草稿不落 raw');
     expect(restored.draftCard.name, '新名');
-    expect(restored.draftCard.avatarBase64, 'new-avatar');
+    expect(restored.draftCard.avatarHash, 'new-avatar');
     expect(restored.draftCard.alternateGreetings, ['g1', 'g2']);
 
     final base = restored.baseEntries.single;
@@ -145,10 +156,11 @@ void main() {
     expect(restored.draftEntries.last.extra, {'custom': true});
 
     expect(restored.decisions.field('name').editedText, '编辑名');
-    expect(
-      restored.decisions.entry('base:4').editedEntry?.content,
-      '手工内容',
-    );
+    expect(restored.decisions.field('alternateGreetings').editedList, [
+      '第一条\n带换行',
+      '第二条,带逗号',
+    ]);
+    expect(restored.decisions.entry('base:4').editedEntry?.content, '手工内容');
     expect(restored.decisions.entry('new:-1').accepted, isFalse);
     expect(restored.decisions.avatarAccepted, isFalse);
 
@@ -165,17 +177,34 @@ void main() {
     expect(restored.draftAvatarPrompt, '1girl, red hair');
     expect(restored.generatedAvatarPrompt, '1girl, red hair');
     expect(restored.lastSummary, 'ok');
+    expect(restored.heldAssetHashes, ['new-avatar', 'bg-base']);
+    expect(restored.requiredAssetHashes, {
+      'avatar-base',
+      'bg-base',
+      'new-avatar',
+    });
     expect(restored.lastRequestInputTokens, 1800);
     expect(restored.lastRequestCachedInputTokens, 1500);
     expect(restored.contextEstimateTokens, 240);
+  });
+
+  test('legacy drafts without an asset manifest remain decodable', () {
+    final payload =
+        jsonDecode(jsonEncode(encodeCardStudioDraft(snapshot())))
+            as Map<String, dynamic>;
+    payload.remove('heldAssetHashes');
+
+    final restored = decodeCardStudioDraft(payload)!;
+    expect(restored.heldAssetHashes, isNull);
+    expect(restored.requiredAssetHashes, contains('new-avatar'));
   });
 
   test('withRaw attaches the current envelope without touching fields', () {
     final card = baseCard().withRaw({'spec': 'chara_card_v2', 'data': {}});
     expect(card.raw, {'spec': 'chara_card_v2', 'data': {}});
     expect(card.name, '旧名');
-    expect(card.avatarBase64, 'avatar-base');
-    expect(card.backgroundBase64, 'bg-base');
+    expect(card.avatarHash, 'avatar-base');
+    expect(card.backgroundHash, 'bg-base');
     expect(card.bubbleStyle?.radius, 20);
   });
 

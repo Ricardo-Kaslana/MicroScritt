@@ -9,14 +9,15 @@ MicroScritt 不收集、不上传任何遥测数据;没有账号系统,也没有
 
 - 数据库:`microscritt.db`(会话、消息、角色卡、变量、记忆、提示词、Hook、
   provider 配置等)。
-- 图片缓存与生成图:数据目录下的 `image_cache` 及消息内嵌图片。
-- 配置文件:`microscritt-config.json`(用户名与 LLM provider,含**明文 API
-  Key**)。
-- UI 偏好:`ui-prefs.json`。
+- 图片资产:数据目录下的 `images/`(按 SHA-256 内容寻址的原图与预览)以及
+  URL 图片回退缓存 `image_cache`。
+- 配置文件:`microscritt-config.json`(用户名、LLM 与生图 provider、插件与
+  画风,含**明文 API Key 与可执行插件代码**)。
+- UI 偏好:`ui-prefs.json`;AI 制卡草稿:`card-studio-draft-<id|new>.json`。
 
 桌面端数据目录为 `~/.microscritt`(Windows 即 `C:\Users\<用户名>\.microscritt`);
-移动端使用应用私有目录(Android/iOS 的应用数据区)。卸载应用或删除数据目录
-会移除本地数据;请先自行导出需要保留的会话。
+移动端使用应用私有目录。卸载应用或删除数据目录会移除本地数据;请先自行导出
+需要保留的会话。
 
 ## 网络请求
 

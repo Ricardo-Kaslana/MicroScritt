@@ -14,6 +14,7 @@ import '../data/message_repository.dart';
 import '../models/chat_message.dart';
 import '../models/message.dart';
 import '../models/token_usage.dart';
+import 'context_budget.dart';
 
 /// 压缩被用户中断时 [_summarize] 抛出、[CompactService.compact] 捕获:
 /// 按"未压缩"返回,不落库、不继续重试。
@@ -75,7 +76,11 @@ class CompactService {
     // 用户中断直接放弃(不重试、不落库)。
     String? summary;
     try {
-      for (var attempt = 0; attempt < maxSummarizeAttempts && summary == null; attempt++) {
+      for (
+        var attempt = 0;
+        attempt < maxSummarizeAttempts && summary == null;
+        attempt++
+      ) {
         summary = await _summarize(
           model,
           temperature,
@@ -121,12 +126,29 @@ class CompactService {
     final all = await messages.bySession(sessionId);
     // 未折叠 system 行 = 现行版本摘要(可能含机械折叠的注记行);
     // 新摘要落库时它们一并折叠,线上摘要段始终只有一条。
-    final prevSummaries = all.where((m) => m.role == 'system' && !m.isCompacted).toList();
-    final active = all.where((m) => m.role != 'system' && !m.isCompacted && m.content.isNotEmpty).toList();
+    final prevSummaries = all
+        .where((m) => m.role == 'system' && !m.isCompacted)
+        .toList();
+    final active = all
+        .where(
+          (m) => m.role != 'system' && !m.isCompacted && m.content.isNotEmpty,
+        )
+        .toList();
     final chatRows = active.where((m) => m.isChat).toList();
     if (chatRows.length <= keep) return null;
-    final cutSeq = chatRows[chatRows.length - keep].seq;
-    final toCompact = active.where((m) => m.seq < cutSeq).toList();
+    final cutIndex = chatRows.length - keep;
+    final cutSeq = chatRows[cutIndex].seq;
+    // 切割点下移到首个保留用户消息的前导附件组之前:附件必须与所属消息
+    // 同窗,不能只保留对话行而把它的世界书/技能/通知折掉。
+    var effectiveCut = cutSeq;
+    for (final m in leadingAttachmentsBefore(
+      active: active,
+      chat: chatRows,
+      cutIndex: cutIndex,
+    )) {
+      if (m.seq < effectiveCut) effectiveCut = m.seq;
+    }
+    final toCompact = active.where((m) => m.seq < effectiveCut).toList();
     if (toCompact.isEmpty) return null;
     return (toCompact: toCompact, prevSummaries: prevSummaries);
   }
@@ -163,7 +185,10 @@ class CompactService {
     // LLM 出口)。
     final transcript = msgs
         .where((m) => m.isChat)
-        .map((m) => '${m.role}: ${ContextAssembler.withoutSkillTokens(m.content, stripSkillNames)}')
+        .map(
+          (m) =>
+              '${m.role}: ${ContextAssembler.withoutSkillTokens(m.content, stripSkillNames)}',
+        )
         .join('\n');
     // 附件行(世界书/技能/通知)随历史折叠时,其资料性内容不能凭空消失:
     // 单独成段交给模型,只允许提取其中已确立的设定事实(不当作对话/事件)。
@@ -180,8 +205,7 @@ class CompactService {
     // (冲突处以更新的对话为准),配合 _apply 折叠旧行实现单一自足最新摘要。
     final prior = prevSummaries.map((m) => m.content).join('\n\n');
     final parts = <String>[
-      if (prior.isNotEmpty)
-        '【既有摘要 —— 仅作早期背景,与下方对话冲突处以对话为准】\n$prior',
+      if (prior.isNotEmpty) '【既有摘要 —— 仅作早期背景,与下方对话冲突处以对话为准】\n$prior',
       '【待摘要对话】\n$transcript',
       if (attachments.isNotEmpty)
         '【历史注入资料(非对话)】\n'
@@ -204,37 +228,41 @@ class CompactService {
     // chat_controller 主写同款结构;中断时取消订阅断开底层连接。
     final finished = Completer<void>();
     late final StreamSubscription<LlmEvent> sub;
-    sub = backend.generate(request).listen(
-      (event) {
-        switch (event) {
-          case TextDelta(:final text):
-            buffer.write(text);
-          case UsageEvent(:final usage):
-            inTok += usage.inputTokens;
-            outTok += usage.outputTokens;
-            cachedTok += usage.cachedInputTokens;
-          case ToolCallsEvent():
-            break; // 压缩无工具消费方(tools 恒空),忽略。
-          case DoneEvent():
-            break;
-          case ErrorEvent():
+    sub = backend
+        .generate(request)
+        .listen(
+          (event) {
+            switch (event) {
+              case TextDelta(:final text):
+                buffer.write(text);
+              case UsageEvent(:final usage):
+                inTok += usage.inputTokens;
+                outTok += usage.outputTokens;
+                cachedTok += usage.cachedInputTokens;
+              case ToolCallsEvent():
+                break; // 压缩无工具消费方(tools 恒空),忽略。
+              case DoneEvent():
+                break;
+              case ErrorEvent():
+                sawError = true;
+            }
+          },
+          onError: (Object _) {
             sawError = true;
-        }
-      },
-      onError: (Object _) {
-        sawError = true;
-        if (!finished.isCompleted) finished.complete();
-      },
-      onDone: () {
-        if (!finished.isCompleted) finished.complete();
-      },
-      cancelOnError: true,
-    );
+            if (!finished.isCompleted) finished.complete();
+          },
+          onDone: () {
+            if (!finished.isCompleted) finished.complete();
+          },
+          cancelOnError: true,
+        );
     if (cancelSignal != null) {
-      unawaited(cancelSignal.then((_) {
-        interrupted = true;
-        if (!finished.isCompleted) finished.complete();
-      }));
+      unawaited(
+        cancelSignal.then((_) {
+          interrupted = true;
+          if (!finished.isCompleted) finished.complete();
+        }),
+      );
     }
     await finished.future;
     // 善后取消:中断时断链;自然完成后的补位取消无害(订阅已结束)。
@@ -250,7 +278,13 @@ class CompactService {
     }
     // 即使上游未上报(全零)也回调一次:统计侧据此计入本摘要请求的次数,
     // 累加方对全零是无害的。重试时每次尝试各回调一次。
-    onUsage?.call(TokenUsage(inputTokens: inTok, outputTokens: outTok, cachedInputTokens: cachedTok));
+    onUsage?.call(
+      TokenUsage(
+        inputTokens: inTok,
+        outputTokens: outTok,
+        cachedInputTokens: cachedTok,
+      ),
+    );
     final raw = buffer.toString().trim();
     if (raw.isEmpty) return null;
     final summary = formatCompactSummary(raw);
@@ -265,6 +299,7 @@ String _attachmentLabel(Message m) {
   if (ref.startsWith('skill:')) return '技能';
   if (ref.startsWith('notice:compact:')) return '压缩通知';
   if (ref.startsWith('notice:memdiff:')) return '记忆差异通知';
+  if (ref.startsWith('notice:varinj:')) return '变量注入通知';
   if (ref.startsWith('notice:')) return '系统通知';
   return '附件';
 }
@@ -282,7 +317,7 @@ String _attachmentLabel(Message m) {
 /// - 【合并纪律】输入可能带「既有摘要」背景块,新摘要必须自足、可完全替代
 ///   旧摘要,并抑制无界增长(摘要注入后续每一轮请求、长期占用预算)。
 const String _summarySystemPrompt = '''
-你是会话摘要助手。请把下面提供的角色扮演对话片段浓缩为一份结构化中文摘要。这份摘要之后会与角色卡一同注入后续每一轮请求,供模型站在"续写者"视角无缝接写同一角色、同一剧情 —— 因此请记录"剧情状态",不要记"对话流水账"。
+你是角色扮演会话的摘要助手。请把下面提供的对话片段浓缩为一份结构化中文摘要。这份摘要之后会与角色卡一同注入后续每一轮请求,供模型以"续写者"视角无缝接写同一角色、同一剧情 —— 因此请记录"剧情状态",不要记"对话流水账"。
 
 先输出一段 <analysis> 草稿:按故事时间线梳理关键事件与因果、盘点登场角色、自查现场与伏笔有无遗漏;然后以 <summary> 标签包裹输出正式摘要。正式摘要必须包含以下分段:
 
@@ -295,7 +330,7 @@ const String _summarySystemPrompt = '''
 7. 语气与风格:当前对话的人称与时态、句式节奏、称呼与用词习惯,便于续写保持一致
 
 纪律:
-- 摘要会注入后续每一轮请求、长期占用上下文:只保留续写必需的信息,表达精炼,不无界增长。
+- 摘要注入后续每一轮请求、长期占用上下文:只保留续写必需的信息,表达精炼,不无界增长。
 - 只归纳对话中真实发生的内容,不虚构、不脑补、不替剧情做决定。
 - 若输入附带「既有摘要」,将其作为早期背景吸收进新摘要;与更新的对话冲突处,一律以对话为准。新摘要必须自足,可完全替代旧摘要。
 - 若输入附带「历史注入资料」,只从中提取已确立的设定事实并入第 5 段;它们是资料而不是对话,不得当作剧情事件、台词或当前现场。

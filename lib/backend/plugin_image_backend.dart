@@ -8,6 +8,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show HandshakeException, SocketException;
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -40,6 +41,44 @@ class _ResponseTooLarge implements Exception {
   const _ResponseTooLarge();
 }
 
+/// 发给正则匹配 isolate 的请求(不要直接传 RegExp,在子 isolate 重建)。
+class _StopMatchRequest {
+  final SendPort port;
+  final String pattern;
+  final bool caseSensitive;
+  final bool multiLine;
+  final bool dotAll;
+  final bool unicode;
+  final Uint8List window;
+
+  const _StopMatchRequest({
+    required this.port,
+    required this.pattern,
+    required this.caseSensitive,
+    required this.multiLine,
+    required this.dotAll,
+    required this.unicode,
+    required this.window,
+  });
+}
+
+/// 匹配 isolate 入口:同步跑一次正则,结果回传后由父 isolate 立即 kill。
+void _stopMatchEntry(_StopMatchRequest request) {
+  var matched = false;
+  try {
+    matched = RegExp(
+      request.pattern,
+      caseSensitive: request.caseSensitive,
+      multiLine: request.multiLine,
+      dotAll: request.dotAll,
+      unicode: request.unicode,
+    ).hasMatch(utf8.decode(request.window, allowMalformed: true));
+  } catch (_) {
+    matched = false;
+  }
+  request.port.send(matched);
+}
+
 /// 生图 JS 插件宿主:用同步 `step(ctx)` 状态机 + Dart 受限 HTTP/sleep 执行,
 /// 统一承载 generate / test / listModels 三种操作。内置协议(对话式网关、
 /// Nai2API、NovelAI 官方 API)亦以仓库自带插件走这条路径。
@@ -62,6 +101,12 @@ class PluginImageBackend implements ImageBackend {
 
   /// 单次生成允许返回的图片数上限(与配置的每次生图数量一致)。
   static const int _maxImages = 6;
+
+  /// stopWhen 正则只匹配正文尾部这么多字节;更早的内容与"目标已到位"无关。
+  static const int _stopMatchWindowBytes = 256 * 1024;
+
+  /// 单次 stopWhen 匹配的时间预算;超时 kill 该 isolate 并按未命中继续。
+  static const Duration _stopMatchBudget = Duration(milliseconds: 750);
 
   /// 插件可请求的单请求超时上限(下限是 [requestTimeout] 之外的 `timeoutMs`)。
   /// 对话式生图网关排队可达数分钟,旧后端给该请求 5 分钟;不给插件放大空间
@@ -470,11 +515,17 @@ ${activePlugin.code}
     // **绝不能把插件请求的值再夹到 requestTimeout** —— 那等于「放大超时」这个
     // 能力根本不存在:对话式生图网关的生成 POST 要 5 分钟,夹成 30s 会把正在
     // 排队出图的请求稳定掐死,表现为整轮生图失败。
-    final requested = request['timeoutMs'] is int && request['timeoutMs'] as int > 0
+    final requested =
+        request['timeoutMs'] is int && request['timeoutMs'] as int > 0
         ? request['timeoutMs'] as int
         : requestTimeout.inMilliseconds;
-    final ceiling = math.min(remaining.inMilliseconds, _maxRequestTimeout.inMilliseconds);
-    final budget = Duration(milliseconds: math.max(1, math.min(requested, ceiling)));
+    final ceiling = math.min(
+      remaining.inMilliseconds,
+      _maxRequestTimeout.inMilliseconds,
+    );
+    final budget = Duration(
+      milliseconds: math.max(1, math.min(requested, ceiling)),
+    );
 
     var receivedBytes = false;
     final requestWatch = Stopwatch()..start();
@@ -490,9 +541,42 @@ ${activePlugin.code}
       final builder = BytesBuilder(copy: false);
       var length = 0;
       var stoppedEarly = false;
+      var matchInFlight = false;
+      var matchPending = false;
       final finished = Completer<void>();
       void finishError(Object error) {
         if (!finished.isCompleted) finished.completeError(error);
+      }
+
+      // stopWhen 的正则可能在插件作者手里变成灾难性回溯。匹配放到可 kill 的
+      // isolate 里,并只作用于缓冲区尾部窗口:UI isolate 永远不会同步跑正则,
+      // 外层 Future.timeout 才真正能生效。分片里出现 contains 才触发(便宜门控),
+      // 匹配在飞时只记待办,避免每个分片都 spawn 一个 isolate;
+      // 链接恰好被拆到两个分片时门控落空,退回读完整流由 JS 侧兜底。
+      void checkStopWindow() {
+        if (stop == null || stoppedEarly || finished.isCompleted) return;
+        if (matchInFlight) {
+          matchPending = true;
+          return;
+        }
+        matchInFlight = true;
+        unawaited(
+          _matchesStopWindow(stop.regex, builder.toBytes()).then(
+            (hit) {
+              matchInFlight = false;
+              if (hit && !stoppedEarly && !finished.isCompleted) {
+                stoppedEarly = true;
+                finished.complete();
+              } else if (matchPending && !finished.isCompleted) {
+                matchPending = false;
+                checkStopWindow();
+              }
+            },
+            onError: (Object _) {
+              matchInFlight = false;
+            },
+          ),
+        );
       }
 
       // 显式订阅而非 for-await:提前截断/超时都要 cancel 底层订阅,否则被放弃的
@@ -509,17 +593,11 @@ ${activePlugin.code}
             return;
           }
           builder.add(chunk);
-          if (stop != null && !stoppedEarly) {
-            // 先用新到分片做一次廉价子串门控(UTF-8 后续字节恒 ≥0x80,不会
-            // 误撞 ASCII needle),命中才对整段缓冲跑正则 —— 与旧后端逐分片
-            // 检查 `](` 同款省算,避免每分片 O(缓冲长度) 全量匹配。
-            // 链接的 `](` 恰被拆到两个分片时门控落空,退回读完整流,由 JS 的
-            // SSE 重组兜底提取(与旧后端的兜底路径一致)。
-            if (String.fromCharCodes(chunk).contains(stop.contains) &&
-                stop.regex.hasMatch(utf8.decode(builder.toBytes(), allowMalformed: true))) {
-              stoppedEarly = true;
-              if (!finished.isCompleted) finished.complete();
-            }
+          if (stop != null &&
+              !stoppedEarly &&
+              !finished.isCompleted &&
+              String.fromCharCodes(chunk).contains(stop.contains)) {
+            checkStopWindow();
           }
         },
         onError: finishError,
@@ -530,7 +608,10 @@ ${activePlugin.code}
       );
       var timedOut = false;
       try {
-        await finished.future.timeout(bodyBudget, onTimeout: () => timedOut = true);
+        await finished.future.timeout(
+          bodyBudget,
+          onTimeout: () => timedOut = true,
+        );
       } on TimeoutException {
         timedOut = true;
       } finally {
@@ -543,7 +624,11 @@ ${activePlugin.code}
       if (timedOut) {
         return {'error': 'timeout', 'receivedBytes': receivedBytes};
       }
-      return _decodeResponse(response, builder.takeBytes(), partial: stoppedEarly);
+      return _decodeResponse(
+        response,
+        builder.takeBytes(),
+        partial: stoppedEarly,
+      );
     } on _ResponseTooLarge {
       return {'error': 'tooLarge', 'receivedBytes': true};
     } on TimeoutException {
@@ -560,7 +645,9 @@ ${activePlugin.code}
   /// 解析 `request.stopWhen`(`{contains, regex}`):流式响应里目标内容一到位就
   /// 断开读取。旧对话式生图后端靠它把「链接已到、服务端还保活数十秒」的等待
   /// 砍掉 —— 没有等价机制,内置插件会把已经出好的图硬拖成请求超时。
-  ({String contains, RegExp regex})? _parseStopWhen(Map<String, dynamic> request) {
+  ({String contains, RegExp regex})? _parseStopWhen(
+    Map<String, dynamic> request,
+  ) {
     final raw = request['stopWhen'];
     if (raw == null) return null;
     if (raw is! Map<String, dynamic>) {
@@ -578,6 +665,46 @@ ${activePlugin.code}
       return (contains: contains, regex: RegExp(pattern));
     } on FormatException {
       throw const ImagePluginException('插件 stopWhen.regex 不是合法正则');
+    }
+  }
+
+  /// 只在缓冲区尾部 [windowBytes] 内匹配(链接/目标内容总在最新分片附近),
+  /// 并放进可 kill 的 isolate;超预算直接返回 false,绝不阻塞 UI isolate。
+  static Future<bool> _matchesStopWindow(RegExp regex, Uint8List buffer) async {
+    final start = buffer.length > _stopMatchWindowBytes
+        ? buffer.length - _stopMatchWindowBytes
+        : 0;
+    final window = Uint8List.sublistView(buffer, start);
+    final port = ReceivePort();
+    Isolate? isolate;
+    try {
+      isolate = await Isolate.spawn(
+        _stopMatchEntry,
+        _StopMatchRequest(
+          port: port.sendPort,
+          pattern: regex.pattern,
+          caseSensitive: regex.isCaseSensitive,
+          multiLine: regex.isMultiLine,
+          dotAll: regex.isDotAll,
+          unicode: regex.isUnicode,
+          window: window,
+        ),
+      );
+      final result = await port.first.timeout(
+        _stopMatchBudget,
+        onTimeout: () => false,
+      );
+      return result == true;
+    } catch (_) {
+      // isolate 不可用(或 spawn 失败):退化为有界窗口的同步匹配。
+      try {
+        return regex.hasMatch(utf8.decode(window, allowMalformed: true));
+      } catch (_) {
+        return false;
+      }
+    } finally {
+      isolate?.kill(priority: Isolate.immediate);
+      port.close();
     }
   }
 

@@ -13,10 +13,15 @@ import '../models/llm_provider.dart';
 import '../state/app_config_sync.dart';
 import '../state/providers.dart';
 import 'model_edit_sheet.dart';
+import 'common/app_sheet.dart';
+import 'common/app_snack_bar.dart';
 import 'common/confirm_dialog.dart';
 import 'common/edit_form_scaffold.dart';
+import 'common/empty_state.dart';
 import 'common/form_field.dart';
 import 'common/info_button.dart';
+import 'common/info_dialog.dart';
+import 'common/inline_spinner.dart';
 import 'common/section_header.dart';
 
 /// 新建/编辑一个 LLM provider(Provider ID / 显示名 / API 地址 / 协议 / 密钥 +
@@ -116,15 +121,11 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
     final displayName = _displayName.text.trim();
     final baseUrl = _baseUrl.text.trim();
     if (providerId.isEmpty || displayName.isEmpty || baseUrl.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请填写 Provider ID、显示名称与 API 地址')),
-      );
+      showAppSnack(context, '请填写 Provider ID、显示名称与 API 地址');
       return;
     }
     if (_models.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请至少添加一个模型')));
+      showAppSnack(context, '请至少添加一个模型');
       return;
     }
 
@@ -146,6 +147,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
 
     setState(() => _saving = true);
     try {
+      await markAppConfigDirty(ref);
       await repo.saveProvider(config);
 
       // 若编辑的是当前在用的 provider,编辑后重解析运行时配置(如换了密钥/地址)。
@@ -159,19 +161,19 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
       ref.invalidate(llmProvidersProvider);
       await syncAppConfigFile(ref);
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('LLM 配置已保存')));
+      showAppSnack(context, 'LLM 配置已保存');
       Navigator.pop(context);
+    } catch (e) {
+      // 写库或配置同步失败:留在本页保留表单,明确提示失败原因。
+      if (mounted) showAppSnack(context, '保存失败: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
   Future<void> _addModel() async {
-    final result = await showModalBottomSheet<LlmModelEntry>(
-      context: context,
-      isScrollControlled: true,
+    final result = await showAppSheet<LlmModelEntry>(
+      context,
       builder: (_) => const ModelEditSheet(),
     );
     if (result == null || !mounted) return;
@@ -182,18 +184,20 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
   }
 
   Future<void> _editModel(LlmModelEntry entry) async {
-    final result = await showModalBottomSheet<LlmModelEntry>(
-      context: context,
-      isScrollControlled: true,
+    final result = await showAppSheet<LlmModelEntry>(
+      context,
       builder: (_) => ModelEditSheet(existing: entry),
     );
     if (result == null || !mounted) return;
+    // 未落库模型的 id 都是 0,不能拿它当唯一键(否则会覆盖全部新建项)。
+    // 优先按对象身份匹配;已落库模型才允许按 id 兜底。
+    bool same(LlmModelEntry candidate) =>
+        identical(candidate, entry) ||
+        (entry.id != 0 && candidate.id == entry.id);
     setState(() {
       _models = [
         for (final m in _models)
-          m.id == result.id || (m == entry && m.modelId == entry.modelId)
-              ? result.copyWith(id: m.id, position: m.position)
-              : m,
+          same(m) ? result.copyWith(id: m.id, position: m.position) : m,
       ];
     });
   }
@@ -206,8 +210,12 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
       message: entry.displayName,
     );
     if (!confirmed || !mounted) return;
+    // 同 [_editModel]:未落库模型共用 id=0,按身份删除,不能按 id 批量误删。
     setState(() {
-      _models = _models.where((m) => !(m.id == entry.id)).toList();
+      _models = [
+        for (final m in _models)
+          if (!identical(m, entry) && !(entry.id != 0 && m.id == entry.id)) m,
+      ];
     });
   }
 
@@ -238,57 +246,27 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
   /// 「官方 OpenAI 参数风格」的详细说明弹层(表单行只留一行短文案,细节
   /// 经标题旁的信息按钮进入这里)。
   void _showModernParamsHelp(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('官方 OpenAI 参数风格 · 说明'),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '• 开启后改发 max_completion_tokens(o 系列与 GPT-5 等推理模型必需;继续发 max_tokens 会被拒绝),并请求流式 usage(否则用量统计为 0)',
-            ),
-            SizedBox(height: 6),
-            Text('• 适用:直连 api.openai.com 或严格兼容官方协议的网关'),
-            SizedBox(height: 10),
-            Text('部分宽松网关不认识这些字段会报错,默认关闭。'),
-          ],
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('知道了'),
-          ),
-        ],
-      ),
+    showInfoDialog(
+      context,
+      title: '官方 OpenAI 参数风格 · 说明',
+      bullets: const [
+        '• 开启后改发 max_completion_tokens(o 系列与 GPT-5 等推理模型必需;继续发 max_tokens 会被拒绝),并请求流式 usage(否则用量统计为 0)',
+        '• 适用:直连 api.openai.com 或严格兼容官方协议的网关',
+      ],
+      note: '部分宽松网关不认识这些字段会报错,默认关闭。',
     );
   }
 
   /// 「自定义请求头」的详细说明弹层。
   void _showCustomHeaderHelp(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('自定义请求头 · 说明'),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('• 部分网关会对 Origin、Referer、User-Agent 或客户端标识等请求头进行校验,不匹配的请求将被拒绝。'),
-            SizedBox(height: 6),
-            Text('• 此处配置的请求头将随每次对话请求一并发送;与内置请求头同名时覆盖内置值。'),
-            SizedBox(height: 10),
-            Text('host 与 content-length 由 HTTP 栈托管,即使配置也会被忽略。'),
-          ],
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('知道了'),
-          ),
-        ],
-      ),
+    showInfoDialog(
+      context,
+      title: '自定义请求头 · 说明',
+      bullets: const [
+        '• 部分网关会对 Origin、Referer、User-Agent 或客户端标识等请求头进行校验,不匹配的请求将被拒绝。',
+        '• 此处配置的请求头将随每次对话请求一并发送;与内置请求头同名时覆盖内置值。',
+      ],
+      note: 'host 与 content-length 由 HTTP 栈托管,即使配置也会被忽略。',
     );
   }
 
@@ -465,12 +443,11 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
           ],
         ),
         if (_models.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            child: Text(
-              '还没有模型,点击"添加模型"加入第一个。',
-              style: TextStyle(color: Theme.of(context).colorScheme.outline),
-            ),
+          const EmptyState(
+            compact: true,
+            icon: Icons.memory,
+            title: '还没有模型',
+            message: '点击上方「添加模型」加入第一个。',
           )
         else
           GroupCard(
@@ -492,11 +469,7 @@ class _ProviderEditScreenState extends ConsumerState<ProviderEditScreen> {
               // 探测用当前表单值;模型目录为空无从选模型。
               onPressed: (_models.isEmpty || _probing) ? null : _runProbe,
               icon: _probing
-                  ? const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
+                  ? const InlineSpinner(size: 14)
                   : const Icon(Icons.network_check),
               label: Text(_probing ? '测试中…' : '开始测试'),
             ),
@@ -561,6 +534,7 @@ class _ModelTile extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.delete_outline),
             tooltip: '删除',
+            color: Theme.of(context).colorScheme.error,
             onPressed: onDelete,
           ),
         ],

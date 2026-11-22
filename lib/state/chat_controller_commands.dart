@@ -19,6 +19,10 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
       state = state.copyWith(error: '正在处理中(生成/生图/压缩进行时),请稍候或按停止中断');
       return null;
     }
+    if (state.sessionId == null || state.character == null) {
+      state = state.copyWith(error: '会话尚未加载完成,命令未执行');
+      return null;
+    }
     switch (cmd) {
       case SlashCommand.test:
         await _runTest();
@@ -27,8 +31,7 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
         await _runContinue();
         return null;
       case SlashCommand.clearHistory:
-        await _runClear();
-        return null;
+        return await _runClear() ? '已清空会话历史' : null;
       case SlashCommand.compact:
         return _runCompact();
       case SlashCommand.rerun:
@@ -48,15 +51,25 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
         state.messages.any((m) => m.role != 'system' && m.isChat)) {
       return false;
     }
-    await ref
-        .read(messageRepositoryProvider)
-        .append(sessionId: sessionId, role: 'assistant', content: text);
-    await _refreshMessages();
-    // 历史从空到一条:上下文面板与圆环立即跟上,不必等下一轮发送。
-    // 上轮真实输入计数对新上下文已失效,圆环退回估算。
-    state = state.copyWith(lastSentInputTokens: null);
-    await _reassembleContext();
-    return true;
+    // 同步置忙挡住双击/与发送竞争:append 落库前 state.messages 还看不到
+    // 新行,仅靠入口检查会让两次调用都通过。
+    _busy = true;
+    try {
+      final epoch = _sessionEpoch;
+      await ref
+          .read(messageRepositoryProvider)
+          .append(sessionId: sessionId, role: 'assistant', content: text);
+      if (!_ownsMain(sessionId, epoch)) return true;
+      await _refreshMessages();
+      if (!_ownsMain(sessionId, epoch)) return true;
+      // 历史从空到一条:上下文面板与圆环立即跟上,不必等下一轮发送。
+      // 上轮真实输入计数对新上下文已失效,圆环退回估算。
+      state = state.copyWith(lastSentInputTokens: null);
+      await _reassembleContext();
+      return true;
+    } finally {
+      _busy = false;
+    }
   }
 
   /// `/test`:追加一条测试消息走生成,验证 LLM 链路。
@@ -85,9 +98,9 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
   /// `/clear`:清空该会话全部消息(含压缩摘要与原文),但保留开场消息 ——
   /// 即新建会话时自动写入的角色开场白(`firstMessage`),使清空后对话以开场起头
   /// 而非完全空白。
-  Future<void> _runClear() async {
+  Future<bool> _runClear() async {
     final sessionId = state.sessionId;
-    if (sessionId == null) return;
+    if (sessionId == null) return false;
     final character = state.character;
     _invalidateBackground();
     _windowFloor = null;
@@ -108,6 +121,7 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
     // 历史清空 = 上轮实际计数对新上下文完全失效,圆环退回估算。
     state = state.copyWith(lastSentInputTokens: null);
     await _reassembleContext();
+    return true;
   }
 
   /// `/rerun [修改方向]`:重跑上一次后台维护(变量按同一批对话重放,生图
@@ -135,11 +149,15 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
     // 持有自己的实例,不受影响。
     _mainToken = InterruptToken();
     final token = _mainToken;
+    final epoch = _sessionEpoch;
+    final windowFloor = _windowFloor;
 
     // 「压缩中」活动态 + 可中断:网络黑洞/排队过长时用户有停止入口。
     // 置位必须先于本方法内首个 await —— UI 事件派发是同步链,放在 await 之后
     // 的话活动态要等事件循环推进才可见(tap 后首帧不出「压缩中」)。
-    state = state.copyWith(busyCommand: 'compact');
+    if (_ownsMain(sessionId, epoch)) {
+      state = state.copyWith(busyCommand: 'compact');
+    }
 
     final messageRepo = ref.read(messageRepositoryProvider);
     var done = false;
@@ -151,7 +169,7 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
       // 全量读了整条会话(超长会话一次搬全部行)。
       final before = await messageRepo.bySessionSince(
         sessionId,
-        sinceSeq: _windowFloor,
+        sinceSeq: windowFloor,
       );
       activeBefore = before
           .where((m) => m.role != 'system' && !m.isCompacted)
@@ -161,7 +179,8 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
         model: config.model,
         temperature: config.temperature,
         keep: 6,
-        onUsage: _accumulateCompactUsage,
+        onUsage: (usage) =>
+            _accumulateCompactUsage(usage, sessionId: sessionId, epoch: epoch),
         stripSkillNames: await enabledSkillNames(),
         cancelSignal: token.whenCancelled,
       );
@@ -170,9 +189,11 @@ abstract class ChatControllerCommands extends ChatControllerPipeline {
       // (旧实现没有 try/finally,事务抛错后灵动岛与发送键会一直卡住)。
       failed = true;
     } finally {
-      if (ref.mounted) state = state.copyWith(busyCommand: null);
+      if (_ownsMain(sessionId, epoch)) {
+        state = state.copyWith(busyCommand: null);
+      }
     }
-    if (!ref.mounted) return null;
+    if (!_ownsMain(sessionId, epoch)) return null;
     final interrupted = token.cancelled;
     if (failed) {
       state = state.copyWith(error: '压缩失败(未生成摘要,历史保持原样)');

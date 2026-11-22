@@ -14,7 +14,9 @@ import '../../state/chat_controller.dart';
 import '../../state/providers.dart';
 import '../common/confirm_dialog.dart';
 import '../common/empty_state.dart';
+import '../common/form_field.dart';
 import '../common/section_header.dart';
+import 'status_dialogs.dart';
 import 'status_widgets.dart';
 
 class StatusMemoryWorkspace extends ConsumerStatefulWidget {
@@ -81,28 +83,11 @@ class _StatusMemoryWorkspaceState extends ConsumerState<StatusMemoryWorkspace> {
   }
 
   Future<void> _apply({required bool pending}) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('应用到上下文?'),
-        content: Text(
-          pending
-              ? '库中记忆已修改,上下文开头仍是旧版本。应用后记忆整体换新,提示前缀会变化(缓存重新预热);改动的差异此前已以通知送达。'
-              : '上下文里的记忆已是最新,应用只会重新组装一次上下文。仍要继续吗?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('应用'),
-          ),
-        ],
-      ),
+    final confirmed = await confirmApplyMemoryToContext(
+      context,
+      pending: pending,
     );
-    if (confirmed != true) return;
+    if (!confirmed) return;
     await ref.read(chatControllerProvider.notifier).applyMemoryToContext();
   }
 
@@ -196,16 +181,27 @@ class _StatusMemoryWorkspaceState extends ConsumerState<StatusMemoryWorkspace> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     content,
-                    if (rail != null) ...[
-                      const SizedBox(height: 16),
-                      rail,
-                    ],
+                    if (rail != null) ...[const SizedBox(height: 16), rail],
                   ],
                 );
           return ListView(
             primary: false,
             padding: const EdgeInsets.only(bottom: 24),
             children: [
+              if (chatState.memoryProposal != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: MemoryProposalCard(
+                    proposal: chatState.memoryProposal!,
+                    enabled: !running,
+                    onAccept: () => ref
+                        .read(chatControllerProvider.notifier)
+                        .acceptMemoryProposal(),
+                    onDismiss: () => ref
+                        .read(chatControllerProvider.notifier)
+                        .dismissMemoryProposal(),
+                  ),
+                ),
               if (pending)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 16),
@@ -414,24 +410,10 @@ class _MemoryEditor extends StatelessWidget {
               textAlignVertical: TextAlignVertical.top,
               keyboardType: TextInputType.multiline,
               style: theme.textTheme.bodyMedium?.copyWith(height: 1.55),
-              decoration: InputDecoration(
+              decoration: appInputDecoration(
+                context,
                 hintText: '输入长期记忆内容…',
-                filled: true,
-                fillColor: scheme.surfaceContainerHighest.withValues(
-                  alpha: 0.45,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: scheme.outlineVariant.withValues(alpha: 0.5),
-                  ),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: scheme.outlineVariant.withValues(alpha: 0.5),
-                  ),
-                ),
+                borderAlpha: 0.5,
                 contentPadding: const EdgeInsets.all(14),
               ),
             ),
@@ -635,6 +617,16 @@ class _StatusImageGuideWorkspaceState
         description: '后台生图每轮携带的角色外貌与画风 tag;保存后立即生效。',
         actions: [
           if (!_editing && guide != null) ...[
+            StatusSecondaryAction(
+              buttonKey: const ValueKey('image_guide_regenerate_button'),
+              icon: Icons.auto_awesome,
+              label: '重新生成',
+              onPressed: running
+                  ? null
+                  : () => ref
+                        .read(chatControllerProvider.notifier)
+                        .regenerateImageGuide(),
+            ),
             StatusPrimaryAction(
               buttonKey: const ValueKey('image_guide_edit_button'),
               icon: Icons.edit_outlined,
@@ -661,10 +653,7 @@ class _StatusImageGuideWorkspaceState
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     content,
-                    if (rail != null) ...[
-                      const SizedBox(height: 16),
-                      rail,
-                    ],
+                    if (rail != null) ...[const SizedBox(height: 16), rail],
                   ],
                 );
           return ListView(
@@ -805,24 +794,10 @@ class _GuideEditor extends StatelessWidget {
                 fontSize: 13,
                 height: 1.55,
               ),
-              decoration: InputDecoration(
+              decoration: appInputDecoration(
+                context,
                 hintText: '生图指导:定妆外貌 tag、画风与构图偏好…',
-                filled: true,
-                fillColor: scheme.surfaceContainerHighest.withValues(
-                  alpha: 0.45,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: scheme.outlineVariant.withValues(alpha: 0.5),
-                  ),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: scheme.outlineVariant.withValues(alpha: 0.5),
-                  ),
-                ),
+                borderAlpha: 0.5,
                 contentPadding: const EdgeInsets.all(14),
               ),
             ),

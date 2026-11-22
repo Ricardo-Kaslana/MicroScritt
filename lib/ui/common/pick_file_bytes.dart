@@ -66,15 +66,74 @@ Future<Uint8List?> pickedFileBytes(
 /// 会话归档专用:只拿文件**路径**,不整读字节、也不设 50MB 上限 ——
 /// 归档可能几百 MB,读取端必须边扫边解析(见 SessionArchiveReader)。
 ///
-/// 极少数平台只给内联 bytes 时落到临时文件再返回路径。
-Future<String?> pickedFilePath(PlatformFile? file) async {
+/// 极少数平台只给内联 bytes 时,落到应用临时目录下的 `imports/` 受管理文件;
+/// 调用方导入结束后必须调用 [PickedSessionFile.deleteIfTemporary] 清理
+/// (异常路径同样要清理),崩溃残留由一天后的清扫兜底。
+Future<PickedSessionFile?> pickedFilePath(PlatformFile? file) async {
   if (file == null) return null;
   final path = file.path;
-  if (path != null && path.isNotEmpty) return path;
+  if (path != null && path.isNotEmpty) return PickedSessionFile(path);
   final bytes = file.bytes;
   if (bytes == null) return null;
-  final dir = await getTemporaryDirectory();
-  final target = File(p.join(dir.path, 'picked-${DateTime.now().microsecondsSinceEpoch}.json'));
-  await target.writeAsBytes(bytes, flush: true);
-  return target.path;
+  final dir = Directory(
+    p.join((await getTemporaryDirectory()).path, 'imports'),
+  );
+  await dir.create(recursive: true);
+  await _purgeOldImports(dir);
+  final isZip = bytes.length >= 2 && bytes[0] == 0x50 && bytes[1] == 0x4b;
+  final target = File(
+    p.join(
+      dir.path,
+      'picked-${DateTime.now().microsecondsSinceEpoch}.'
+      '${isZip ? 'msarc' : 'json'}',
+    ),
+  );
+  try {
+    await target.writeAsBytes(bytes, flush: true);
+  } catch (_) {
+    // 写一半失败时不留半截临时档。
+    try {
+      if (await target.exists()) await target.delete();
+    } catch (_) {}
+    rethrow;
+  }
+  return PickedSessionFile(target.path, temporary: true);
+}
+
+/// 会话导入选中的文件:实际路径 + 是否需要导入后清理。
+class PickedSessionFile {
+  /// 本地文件路径。
+  final String path;
+
+  /// true 表示该文件是 [pickedFilePath] 为内联 bytes 写出的临时归档。
+  final bool temporary;
+
+  const PickedSessionFile(this.path, {this.temporary = false});
+
+  /// 删除本次导入创建的临时归档(用户自己的文件绝不删除)。
+  Future<void> deleteIfTemporary() async {
+    if (!temporary) return;
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // 清理失败只留下临时档,一天后的清扫会回收。
+    }
+  }
+}
+
+/// 清理一天前异常退出遗留的内联字节临时档。
+Future<void> _purgeOldImports(Directory dir) async {
+  final now = DateTime.now();
+  try {
+    await for (final entity in dir.list()) {
+      if (entity is! File) continue;
+      final stat = await entity.stat();
+      if (now.difference(stat.modified) > const Duration(hours: 24)) {
+        try {
+          await entity.delete();
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
 }

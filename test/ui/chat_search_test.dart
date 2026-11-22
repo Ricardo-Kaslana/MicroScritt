@@ -228,13 +228,15 @@ void main() {
   ) async {
     late AppDatabase db;
     late int sessionId;
-    late String png;
+    late String avatarHash;
     await tester.runAsync(() async {
       db = await openTestDb();
-      png = await _pngBase64();
+      avatarHash = (await db.images.putBytes(
+        base64Decode(await _pngBase64()),
+      )).hash;
       final charId = await CharacterRepository(
         db,
-      ).insert(CharacterCard(name: 'Alice', avatarBase64: png));
+      ).insert(CharacterCard(name: 'Alice', avatarHash: avatarHash));
       sessionId = await SessionRepository(db).create(charId, 's');
       final messages = MessageRepository(db);
       await messages.append(
@@ -254,14 +256,14 @@ void main() {
         overrides: [
           databaseProvider.overrideWithValue(db),
           userProfileProvider.overrideWith(
-            (ref) => UserProfile(name: '小明', avatarBase64: png),
+            (ref) => UserProfile(name: '小明', avatarHash: avatarHash),
           ),
         ],
         child: MaterialApp(
           home: ChatSearchScreen(
             sessionId: sessionId,
             characterName: 'Alice',
-            characterAvatarBase64: png,
+            characterAvatarHash: avatarHash,
           ),
         ),
       ),
@@ -276,10 +278,7 @@ void main() {
         .widgetList<CircleAvatar>(find.byType(CircleAvatar))
         .toList();
     expect(avatars, hasLength(2));
-    expect(avatars.every((a) => a.backgroundImage is MemoryImage), isTrue);
-    // 有头像时不再显示占位图标。
-    expect(find.byIcon(Icons.person_outline), findsNothing);
-    expect(find.byIcon(Icons.auto_awesome_outlined), findsNothing);
+    expect(avatars.every((a) => a.foregroundImage is ResizeImage), isTrue);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.runAsync(() => db.db.close());

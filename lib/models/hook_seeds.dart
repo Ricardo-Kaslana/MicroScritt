@@ -40,7 +40,7 @@ if (m) {
   var head = m[1].trim();
   var body = (m[2] || '').trim();
   var out = head === '' ? body : (body ? head + ' ' + body : head);
-  var note = '\n\n<main_note>主导模式\n本回合请详细描写——细腻呈现场景、动作与人物反应,篇幅加长;可适度替主角做出行动与决定;剧情要有实质推进,不要停在原地。</main_note>';
+  var note = '\n\n<main_note>主导模式\n本回合请详细描写:细腻呈现场景、动作与人物反应,篇幅加长;可适度替主角做出行动与决定;剧情要有实质推进,不要停在原地。</main_note>';
   __ctx.userText = out !== '' ? out + note : note.trim();
 }
 ''',
@@ -59,7 +59,7 @@ if (m) {
   var head = m[1].trim();
   var body = (m[2] || '').trim();
   var out = head === '' ? body : (body ? head + ' ' + body : head);
-  var note = '\n\n<jump_note>时间快进\n请把故事时间自然推进一段——幅度依输入与剧情而定(几分钟、几小时、一天或几天均可),用简洁的过渡交代推进期间发生的变化,再从推进后的时间点继续详细描写。</jump_note>';
+  var note = '\n\n<jump_note>时间快进\n请把故事时间自然推进一段:幅度依输入与剧情而定(几分钟、几小时、一天或几天均可),用简洁的过渡交代推进期间发生的变化,再从推进后的时间点继续详细描写。</jump_note>';
   __ctx.userText = out !== '' ? out + note : note.trim();
 }
 ''',

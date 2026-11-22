@@ -36,28 +36,20 @@ String compactCharacterText(CharacterCard? character, {required int maxChars}) {
 }
 
 /// 后台锚定世界书内容:取用户选定(`background`,状态面板后台agent 区
-/// 多选)且启用的条目,按 position 排序,**逐条截断**后拼合再套总量兜底。
-/// 逐条截断是显式语义:用户勾了几条,每条都要真进锚定段(哪怕被夹到
-/// [maxEntryChars]),不能让 position 靠后的外貌条目被前面吃光预算整段清零。
-/// 后台锚定按用户选定,不再按常驻判断;初始化路径(记忆/生图指导)仍按
-/// 常驻取数,不走此函数。
-String backgroundWorldbookText(
-  List<WorldbookEntry> worldbook, {
-  required int maxChars,
-  required int maxEntryChars,
-}) {
+/// 多选)且启用的条目,按 position 排序后**完整**拼合 —— 后台世界书注入
+/// 不设上限,用户勾选的内容全部进入上下文,不做逐条或总量截断。
+/// 后台锚定按用户选定,不再按常驻判断;初始化路径(记忆/生图指导)按常驻
+/// 取数,同样不截断。
+String backgroundWorldbookText(List<WorldbookEntry> worldbook) {
   final entries = worldbook.where((e) => e.background && e.enabled).toList()
     ..sort((a, b) => a.position.compareTo(b.position));
-  if (entries.isEmpty) return '';
-  final joined = entries
-      .map((e) => backgroundTruncate(e.content, maxEntryChars))
-      .join('\n\n');
-  return backgroundTruncate(joined, maxChars);
+  return entries.map((e) => e.content).join('\n\n');
 }
 
 /// image 轮的只读锚定段(顺序固定:guide → character → memory → worldbook):
 /// 生图指导空则回退内置英文 tag 规范;角色卡/记忆/世界书缺省即整段不注入。
-/// 各段截断上限由调用方传入(常量归属 BackgroundEngine,测试引用)。
+/// 角色卡/记忆的截断上限由调用方传入(常量归属 BackgroundEngine,测试引用);
+/// 世界书按用户选定完整注入,不设上限。
 List<String> imageAnchorSections({
   String? imageGuide,
   CharacterCard? character,
@@ -65,8 +57,6 @@ List<String> imageAnchorSections({
   List<WorldbookEntry> worldbook = const [],
   required int memoryChars,
   required int characterChars,
-  required int worldbookChars,
-  required int worldbookEntryChars,
 }) {
   final sections = <String>[];
   final guide = imageGuide != null && imageGuide.trim().isNotEmpty
@@ -99,11 +89,7 @@ List<String> imageAnchorSections({
       ),
     );
   }
-  final wbText = backgroundWorldbookText(
-    worldbook,
-    maxChars: worldbookChars,
-    maxEntryChars: worldbookEntryChars,
-  );
+  final wbText = backgroundWorldbookText(worldbook);
   if (wbText.isNotEmpty) {
     sections.add(
       backgroundTag(

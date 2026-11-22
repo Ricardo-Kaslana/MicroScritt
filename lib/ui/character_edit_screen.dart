@@ -8,16 +8,18 @@ library;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../data/image_codec.dart';
+import '../data/image_asset_input.dart';
 import '../engine/display_regex.dart';
 import '../models/bubble_style.dart';
 import '../models/character_card.dart';
 import '../models/regex_script_seeds.dart';
 import '../state/providers.dart';
+import 'common/app_snack_bar.dart';
 import 'common/form_field.dart';
+import 'common/hash_image.dart';
+import 'common/inline_spinner.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/section_header.dart';
-import '../data/shrink_image.dart';
 import 'common/unsaved_changes_guard.dart';
 import 'widgets/message_bubble.dart';
 import 'widgets/rich_message_text.dart';
@@ -49,8 +51,8 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
   late final TextEditingController _tags;
   final _scroll = ScrollController();
   final _nameFocus = FocusNode();
-  String? _avatarBase64;
-  String? _backgroundBase64;
+  String? _avatarHash;
+  String? _backgroundHash;
 
   /// 角色级气泡样式(仅助手气泡;null = 应用默认)。
   BubbleStyle? _bubbleStyle;
@@ -108,8 +110,8 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
     _postHistory.text = card.postHistoryInstructions;
     _creatorNotes.text = card.creatorNotes;
     _tags.text = card.tags.join(', ');
-    _avatarBase64 = card.avatarBase64;
-    _backgroundBase64 = card.backgroundBase64;
+    _avatarHash = card.avatarHash;
+    _backgroundHash = card.backgroundHash;
     _bubbleStyle = card.bubbleStyle;
     _initialSignature = _signature();
     setState(() => _loading = false);
@@ -130,8 +132,8 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
     _postHistory.text,
     _creatorNotes.text,
     _tags.text,
-    '${identityHashCode(_avatarBase64)}',
-    '${identityHashCode(_backgroundBase64)}',
+    _avatarHash ?? '',
+    _backgroundHash ?? '',
     _bubbleSignature(_bubbleStyle),
   ].join('\u0000');
 
@@ -177,10 +179,8 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
     final result = await FilePicker.pickFiles(type: FileType.image);
     final bytes = await pickedFileBytes(result?.files.single);
     if (bytes == null) return;
-    // 缩到安全尺寸再落库:用户可能选整张几 MB 的照片作头像,不缩会撑爆
-    // Android CursorWindow(与导入同款防护,见 shrink_image.dart)。
-    final shrunk = await shrinkImageBytes(bytes);
-    if (shrunk != null) setState(() => _avatarBase64 = shrunk);
+    final hash = await assetizeImageBytes(ref.read(databaseProvider), bytes);
+    if (hash != null && mounted) setState(() => _avatarHash = hash);
   }
 
   /// 选择/清除角色卡专属聊天背景图(独立于头像;未设置时开启背景回退头像)。
@@ -188,11 +188,15 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
     final result = await FilePicker.pickFiles(type: FileType.image);
     final bytes = await pickedFileBytes(result?.files.single);
     if (bytes == null) return;
-    final shrunk = await shrinkImageBytes(bytes);
-    if (shrunk != null) setState(() => _backgroundBase64 = shrunk);
+    final hash = await assetizeImageBytes(
+      ref.read(databaseProvider),
+      bytes,
+      maxDim: 2048,
+    );
+    if (hash != null && mounted) setState(() => _backgroundHash = hash);
   }
 
-  void _clearBackground() => setState(() => _backgroundBase64 = null);
+  void _clearBackground() => setState(() => _backgroundHash = null);
 
   /// 用表单值重建角色卡:编辑模式带上界面没有编辑入口的元数据字段
   /// (creator/character_version/fav 等),新建模式取默认值。
@@ -208,8 +212,8 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
       systemPrompt: _systemPrompt.text,
       postHistoryInstructions: _postHistory.text,
       creatorNotes: _creatorNotes.text,
-      avatarBase64: _avatarBase64,
-      backgroundBase64: _backgroundBase64,
+      avatarHash: _avatarHash,
+      backgroundHash: _backgroundHash,
       alternateGreetings: _alternateGreetings.text
           .split('\n')
           .map((s) => s.trim())
@@ -244,9 +248,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
         duration: const Duration(milliseconds: 200),
         curve: Curves.easeOut,
       );
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('名字不能为空')));
+      showAppSnack(context, '名字不能为空');
       return;
     }
     setState(() => _saving = true);
@@ -265,6 +267,9 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
       // 侧栏分组直接读角色仓库(名字/顺序),改名/换头像卡后需一并失效。
       ref.invalidate(sessionGroupsProvider);
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      // 写库失败:留在本页保留表单,明确提示失败原因。
+      if (mounted) showAppSnack(context, '保存失败: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -273,25 +278,25 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+        body: Center(child: InlineSpinner(size: 36, strokeWidth: 4)),
+      );
     }
     const fallback = CircleAvatar(
       radius: 36,
       child: Icon(Icons.person, size: 36),
     );
     Widget avatar = fallback;
-    final avatarBytes = safeBase64Decode(_avatarBase64);
-    if (avatarBytes != null) {
-      avatar = CircleAvatar(
-        radius: 36,
-        // 72 逻辑半径的头像按 384px 降采样解码,导入的大卡头像(可能整张
-        // 几 MB 的 PNG)不再全分辨率解码占内存。
-        backgroundImage: ResizeImage(
-          MemoryImage(avatarBytes),
-          width: 384,
-          policy: ResizeImagePolicy.fit,
-        ),
+    final avatarHash = _avatarHash;
+    if (avatarHash != null) {
+      final image = hashImageProvider(
+        ref.read(databaseProvider).images,
+        avatarHash,
+        cacheWidth: kAvatarImageWidth,
       );
+      if (image != null) {
+        avatar = CircleAvatar(radius: 36, backgroundImage: image);
+      }
     }
     return UnsavedChangesGuard(
       // 加载完成前不参与判定:首帧空白表单与加载后的初值不应算修改。
@@ -303,13 +308,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
           actions: [
             TextButton(
               onPressed: _saving ? null : _save,
-              child: _saving
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('保存'),
+              child: _saving ? const InlineSpinner() : const Text('保存'),
             ),
           ],
         ),
@@ -333,7 +332,7 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
             const SizedBox(height: 8),
             // 聊天背景:独立于头像的横图,开启"聊天背景"后铺在聊天页;未设置时回退头像。
             _BackgroundField(
-              backgroundBase64: _backgroundBase64,
+              backgroundHash: _backgroundHash,
               onPick: _pickBackground,
               onClear: _clearBackground,
             ),
@@ -446,13 +445,9 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
                   ? Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Theme.of(context).colorScheme.onPrimary,
-                          ),
+                        InlineSpinner(
+                          size: 18,
+                          color: Theme.of(context).colorScheme.onPrimary,
                         ),
                         const SizedBox(width: 10),
                         const Text('保存中…'),
@@ -468,26 +463,33 @@ class _CharacterEditScreenState extends ConsumerState<CharacterEditScreen> {
 }
 
 /// 聊天背景选择:横图预览 + 选择/清除按钮。未设置时显示说明,提示开启背景后回退头像。
-class _BackgroundField extends StatelessWidget {
-  final String? backgroundBase64;
+class _BackgroundField extends ConsumerWidget {
+  final String? backgroundHash;
   final VoidCallback onPick;
   final VoidCallback onClear;
   const _BackgroundField({
-    required this.backgroundBase64,
+    required this.backgroundHash,
     required this.onPick,
     required this.onClear,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
-    final bytes = safeBase64Decode(backgroundBase64);
+    final hash = backgroundHash;
+    final image = hash == null
+        ? null
+        : hashImageProvider(
+            ref.read(databaseProvider).images,
+            hash,
+            cacheWidth: kLargeImageWidth,
+          );
     final Widget preview;
-    if (bytes != null) {
+    if (image != null) {
       preview = ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.memory(
-          bytes,
+        child: Image(
+          image: image,
           height: 90,
           width: double.infinity,
           fit: BoxFit.cover,
@@ -518,9 +520,9 @@ class _BackgroundField extends StatelessWidget {
             TextButton.icon(
               onPressed: onPick,
               icon: const Icon(Icons.wallpaper_outlined),
-              label: Text(bytes == null ? '选择背景图' : '更换背景图'),
+              label: Text(hash == null ? '选择背景图' : '更换背景图'),
             ),
-            if (bytes != null)
+            if (hash != null)
               TextButton.icon(
                 onPressed: onClear,
                 icon: const Icon(Icons.close),
@@ -533,7 +535,7 @@ class _BackgroundField extends StatelessWidget {
           '开启"聊天背景"后铺在聊天页;未设置时自动使用角色头像。',
           style: Theme.of(
             context,
-          ).textTheme.bodySmall?.copyWith(color: scheme.outline),
+          ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
         ),
       ],
     );
@@ -739,7 +741,7 @@ class _BubbleStyleSection extends StatelessWidget {
                 '仅定制该角色(助手)的气泡外观,不进对话上下文;用户气泡保持应用统一样式。',
                 style: Theme.of(
                   context,
-                ).textTheme.bodySmall?.copyWith(color: scheme.outline),
+                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
               ),
               if (style != null)
                 Align(

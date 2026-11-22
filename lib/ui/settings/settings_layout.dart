@@ -1,13 +1,14 @@
 /// 设置页桌面工作台的布局刻度与分区定义。
 ///
-/// 宽窗断点与状态面板同值,但侧栏宽度与内容限宽独立定义,不跨页 import,
-/// 避免两个页面互相牵制。
+/// 宽窗断点取全局共享刻度;侧栏宽度与内容限宽仍由本页独立定义。
 library;
 
 import 'package:flutter/material.dart';
 
+import '../common/layout_breakpoints.dart';
+
 /// 进入桌面分区工作台的窗口宽度阈值。
-const double kSettingsDesktopBreakpoint = 1000;
+const double kSettingsDesktopBreakpoint = kDesktopBreakpoint;
 
 /// 桌面左侧分区导航宽度。
 const double kSettingsDesktopSidebarWidth = 280;
@@ -24,7 +25,12 @@ enum SettingsDesktopSection {
   image('生图', Icons.image_outlined, '生图服务、插件与自定义风格。'),
   extensions('内容与扩展', Icons.extension_outlined, '技能、全局提示词、Hooks 与正则脚本。'),
   stats('统计', Icons.bar_chart_outlined, '逐请求用量明细、热力图与趋势。'),
-  config('配置', Icons.settings_outlined, '用户名与 LLM 后端的纯文本配置;文件含明文 API Key,请妥善保管。'),
+  storage('图片与存储', Icons.cleaning_services_outlined, '图片资产、预览缓存与数据库空间治理。'),
+  config(
+    '配置',
+    Icons.settings_outlined,
+    '用户名、LLM 与生图的纯文本配置;文件含明文 API Key 与插件代码,请妥善保管。',
+  ),
   about('关于', Icons.info_outline, '本地优先的极简 AI 角色扮演应用。');
 
   const SettingsDesktopSection(this.label, this.icon, this.description);

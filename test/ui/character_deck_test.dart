@@ -1,8 +1,5 @@
 // 牌堆布局 widget 测试:正面/侧翼卡渲染、点侧卡换牌、按钮与轻扫翻牌、
 // 列表变化时按 id 保住正面卡、大牌堆的可见窗口与头像惰性加载。
-import 'dart:convert';
-import 'dart:ui' as ui;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +8,7 @@ import 'package:microscritt/data/database.dart';
 import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/widgets/character_deck.dart';
+import '../support/image_fixtures.dart';
 import '../support/test_database.dart';
 
 CharacterRecord _record(int id, String name, String description) =>
@@ -58,18 +56,6 @@ Future<void> _pumpDeck(
     }
   });
   await tester.pumpAndSettle();
-}
-
-Future<String> _pngBase64(int width, int height) async {
-  final recorder = ui.PictureRecorder();
-  final canvas = ui.Canvas(recorder);
-  canvas.drawRect(
-    ui.Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
-    ui.Paint()..color = const ui.Color(0xff5577aa),
-  );
-  final img = await recorder.endRecording().toImage(width, height);
-  final data = await img.toByteData(format: ui.ImageByteFormat.png);
-  return base64Encode(data!.buffer.asUint8List());
 }
 
 void main() {
@@ -391,10 +377,10 @@ void main() {
     late final List<CharacterRecord> records;
     await tester.runAsync(() async {
       db = await openTestDb();
-      final b64 = await _pngBase64(64, 84);
+      final avatar = await putTestImageHash(db, width: 64, height: 84);
       final repo = CharacterRepository(db);
-      await repo.insert(CharacterCard(name: 'Pixel', avatarBase64: b64));
-      await repo.insert(CharacterCard(name: 'Quill', avatarBase64: b64));
+      await repo.insert(CharacterCard(name: 'Pixel', avatarHash: avatar));
+      await repo.insert(CharacterCard(name: 'Quill', avatarHash: avatar));
       records = await repo.all();
     });
     await _pumpDeck(tester, db, records);

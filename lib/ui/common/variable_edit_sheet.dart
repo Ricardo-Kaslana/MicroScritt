@@ -6,7 +6,9 @@ library;
 
 import 'package:flutter/material.dart';
 import '../../models/variable.dart';
+import 'app_sheet.dart';
 import 'copy_button.dart';
+import 'form_field.dart';
 import 'sheet_header.dart';
 import 'unsaved_changes_guard.dart';
 
@@ -32,10 +34,8 @@ Future<VariableEditResult?> showVariableEditSheet(
   VariableAccess initialAccess = VariableAccess.protected,
   Set<String> existingKeys = const {},
 }) {
-  return showModalBottomSheet<VariableEditResult>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
+  return showAppSheet<VariableEditResult>(
+    context,
     builder: (_) => _VariableEditSheet(
       title: title,
       initialKey: initialKey,
@@ -111,23 +111,13 @@ class _VariableEditSheetState extends State<_VariableEditSheet> {
     // 软键盘底高:键盘弹起时整区抬升,保证保存键可见可点。
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
-    InputDecoration decoration(String label, String hint) => InputDecoration(
+    InputDecoration decoration(String label, String hint) => appInputDecoration(
+      context,
       labelText: label,
       hintText: hint,
-      filled: true,
+      borderAlpha: 0.5,
       fillColor: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(
-          color: scheme.outlineVariant.withValues(alpha: 0.5),
-        ),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(
-          color: scheme.outlineVariant.withValues(alpha: 0.5),
-        ),
-      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
     );
 
     return UnsavedChangesGuard(

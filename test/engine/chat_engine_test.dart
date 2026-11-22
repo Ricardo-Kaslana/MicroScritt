@@ -5,6 +5,7 @@ import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/context/context_assembler.dart';
 import 'package:microscritt/engine/chat_engine.dart';
 import 'package:microscritt/models/character_card.dart';
+import 'package:microscritt/models/llm_tool.dart';
 
 class _FakeBackend implements LlmBackend {
   LlmRequest? lastRequest;
@@ -39,5 +40,35 @@ void main() {
     expect(backend.lastRequest!.messages, snapshot.messages);
     expect(backend.lastRequest!.model, 'm');
     expect(snapshot.systemPrompt, isNot('REWRITTEN')); // snapshot itself untouched
+  });
+
+  test('forwards tools when rebuilding the request (regression)', () async {
+    // 重建 LlmRequest 时漏传 tools 会让带工具请求退化成普通请求:
+    // 上游不返回原生工具调用,agent 步直接失败。
+    final backend = _FakeBackend();
+    final engine = ChatEngine(backend);
+    final snapshot = ContextAssembler().assemble(
+      character: const CharacterCard(name: 'Alice'),
+      items: const [],
+      history: const [],
+    );
+    const tools = [
+      LlmTool(name: 'finish', description: 'done', parameters: {'type': 'object'}),
+    ];
+
+    await engine
+        .generate(
+          snapshot,
+          const LlmRequest(
+            model: 'm',
+            systemPrompt: 'sys',
+            messages: [],
+            tools: tools,
+            temperature: 1,
+          ),
+        )
+        .toList();
+
+    expect(backend.lastRequest!.tools, tools);
   });
 }

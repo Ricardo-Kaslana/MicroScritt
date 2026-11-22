@@ -13,7 +13,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../backend/image_downloader.dart';
 import '../data/card_studio_draft_file.dart';
-import '../data/shrink_image.dart';
+import '../data/image_asset_input.dart';
+import '../data/image_asset_store.dart';
 import '../engine/agent/agent_events.dart';
 import '../engine/agent/agent_runner.dart';
 import '../engine/card_studio/card_agent.dart';
@@ -25,6 +26,7 @@ import '../models/llm_units.dart';
 import '../models/token_usage.dart';
 import '../models/usage_stats.dart';
 import '../models/worldbook_entry.dart';
+import 'card_studio_draft_assets.dart';
 import 'card_studio_draft_codec.dart';
 import 'card_studio_state.dart';
 import 'interrupt_token.dart';
@@ -61,6 +63,10 @@ class CardStudioController extends Notifier<CardStudioState> {
   /// 已生成当前种子头像的提示词(避免重复计费)。
   String? _generatedAvatarPrompt;
 
+  /// 与 [_generatedAvatarPrompt] 成对记录的图片哈希:只有两者同时匹配当前
+  /// 草稿头像时才能复用,避免「生成中继续调整」把旧图误记成新提示词的产出。
+  String? _generatedAvatarHash;
+
   /// 最近一轮的轮前快照;null = 没有可撤回的轮次(未运行/已应用/草稿恢复)。
   _TurnSnapshot? _turn;
 
@@ -75,9 +81,17 @@ class CardStudioController extends Notifier<CardStudioState> {
   Timer? _draftSaveTimer;
   bool _draftDirty = false;
 
+  /// 每个目标已成功落盘的图片持有清单;重启恢复时从快照接管,不重复加引用。
+  final Map<String, Set<String>> _draftAssetRefs = {};
+
   /// 单调代数:apply/discard/新 start 后让在排队的防抖写回调失效,
   /// 防止删除草稿后又被迟到写复活。
   int _draftEpoch = 0;
+
+  /// 工作台会话代次:`detach` 递增让上一页面所有异步续体失效;`start` 递增
+  /// 并在每个 await 后校验。解决「生成中退出后 phase 卡 busy,再进 `start`
+  /// 被 `state.busy` 永久挡住」的问题。
+  int _studioEpoch = 0;
 
   @override
   CardStudioState build() {
@@ -90,7 +104,16 @@ class CardStudioController extends Notifier<CardStudioState> {
   /// 可重复调用以开启新会话(页面退出时只 [detach] 取消在飞任务,不写状态;
   /// 下次 start 在这里统一重置)。
   Future<void> start(int? characterId) async {
-    if (state.busy) return;
+    // 同一页面内的重复 start 在忙态拒绝;`_started` 为 false 说明上一页面
+    // 已 detach,残留的 busy phase 只是未复位的旧状态,可以安全接管。
+    if (_started && state.busy) return;
+    if (!_started) {
+      _token?.cancel();
+      _token = null;
+      _cancelAll();
+    }
+    _studioEpoch++;
+    final epoch = _studioEpoch;
     _started = true;
     _baseLoaded = false;
     _targetId = characterId;
@@ -106,6 +129,7 @@ class CardStudioController extends Notifier<CardStudioState> {
     _seedEntries = const [];
     _seedAvatarPrompt = null;
     _generatedAvatarPrompt = null;
+    _generatedAvatarHash = null;
     _sessionLog.clear();
     _clearDraft();
     state = CardStudioState(
@@ -116,19 +140,27 @@ class CardStudioController extends Notifier<CardStudioState> {
       final card = characterId == null
           ? const CharacterCard()
           : await ref.read(characterRepositoryProvider).get(characterId);
+      if (!_isCurrentStudio(epoch)) return;
       if (characterId != null && card == null) {
-        await _draftFile?.clear(characterId);
+        await _clearDraftAssets(characterId);
         throw StateError('角色卡不存在或已被删除');
       }
       final entries = characterId == null
           ? const <WorldbookEntry>[]
-          : await ref.read(worldbookRepositoryProvider).byCharacter(characterId);
-      if (!_started || !ref.mounted) return;
+          : await ref
+                .read(worldbookRepositoryProvider)
+                .byCharacter(characterId);
+      if (!_isCurrentStudio(epoch)) return;
       final currentCard = card ?? const CharacterCard();
-      if (await _restoreDraftIfPresent(characterId, currentCard, entries)) {
+      if (await _restoreDraftIfPresent(
+        characterId,
+        currentCard,
+        entries,
+        epoch,
+      )) {
         return;
       }
-      if (!_started || !ref.mounted) return;
+      if (!_isCurrentStudio(epoch)) return;
       _originCard = currentCard;
       _originEntries = entries;
       _seedCard = _originCard;
@@ -142,7 +174,7 @@ class CardStudioController extends Notifier<CardStudioState> {
         baseEntries: _originEntries,
       );
     } catch (e) {
-      if (!_started || !ref.mounted) return;
+      if (!_isCurrentStudio(epoch)) return;
       state = state.copyWith(
         phase: CardStudioPhase.failed,
         error: '读取角色卡失败：$e',
@@ -150,23 +182,35 @@ class CardStudioController extends Notifier<CardStudioState> {
     }
   }
 
+  /// 当前异步续体是否仍属于同一次工作台会话(未 detach、未重新 start)。
+  bool _isCurrentStudio(int epoch) =>
+      ref.mounted && _started && _studioEpoch == epoch;
+
   /// 尝试恢复同目标的草稿;返回 true 表示已经接管状态(或页面已卸载)。
   Future<bool> _restoreDraftIfPresent(
     int? characterId,
     CharacterCard currentCard,
     List<WorldbookEntry> currentEntries,
+    int epoch,
   ) async {
     final file = _draftFile;
     if (file == null) return false;
     final payload = await file.read(characterId);
-    if (!_started || !ref.mounted) return true;
-    if (payload == null) return false;
+    if (!_isCurrentStudio(epoch)) return true;
+    if (payload == null) {
+      if (_trackedDraftRefs(characterId).isNotEmpty) {
+        unawaited(_clearDraftAssets(characterId));
+      }
+      return false;
+    }
     final snapshot = decodeCardStudioDraft(payload);
     if (snapshot == null) {
-      unawaited(file.clear(characterId));
+      unawaited(_clearDraftAssets(characterId));
       return false;
     }
     if (snapshot.targetCharacterId != characterId) return false;
+    _draftAssetRefs[_draftTargetKey(characterId)] =
+        (snapshot.heldAssetHashes ?? const <String>[]).toSet();
 
     // 草稿不存 raw:恢复时附上当前库 raw,保证 apply 合并出的信封不丢;
     // 建模字段仍用快照基线,基线漂移由应用前冲突检测兜住。
@@ -182,6 +226,9 @@ class CardStudioController extends Notifier<CardStudioState> {
     );
     final baseEntries = remapped.base;
     final draftEntries = remapped.draft;
+    // 旧草稿的基线临时 id 被换成真实 id 后,决策键也必须同步迁移,
+    // 否则用户之前的「拒绝」会查不到而回落为默认接受。
+    final decisions = _remapDecisionKeys(snapshot.decisions, remapped.remap);
     final diff = computeCardDiff(
       baseCard: base,
       baseEntries: baseEntries,
@@ -189,8 +236,10 @@ class CardStudioController extends Notifier<CardStudioState> {
       draftEntries: draftEntries,
     );
     final hasChanges = diff.hasChanges;
-    if (!hasChanges && snapshot.entries.isEmpty && snapshot.sessionLog.isEmpty) {
-      unawaited(file.clear(characterId));
+    if (!hasChanges &&
+        snapshot.entries.isEmpty &&
+        snapshot.sessionLog.isEmpty) {
+      unawaited(_clearDraftAssets(characterId));
       return false;
     }
 
@@ -200,18 +249,21 @@ class CardStudioController extends Notifier<CardStudioState> {
         baseEntries: baseEntries,
         draftCard: draft,
         draftEntries: draftEntries,
-        decisions: snapshot.decisions,
+        decisions: decisions,
       );
       _originCard = base;
       _originEntries = baseEntries;
       _seedCard = submission.card;
       _seedEntries = submission.entries;
-      final avatarAccepted = snapshot.decisions.avatarAccepted &&
-          draft.avatarBase64 != null &&
-          draft.avatarBase64 != base.avatarBase64;
+      final avatarAccepted =
+          decisions.avatarAccepted &&
+          draft.avatarHash != null &&
+          draft.avatarHash != base.avatarHash;
       _seedAvatarPrompt = avatarAccepted ? snapshot.draftAvatarPrompt : null;
-      _generatedAvatarPrompt =
-          avatarAccepted ? snapshot.generatedAvatarPrompt : null;
+      _generatedAvatarPrompt = avatarAccepted
+          ? snapshot.generatedAvatarPrompt
+          : null;
+      _generatedAvatarHash = avatarAccepted ? draft.avatarHash : null;
     } else {
       // 只有会话(应用后继续打磨 / 无变更轮):没有待审意图,基线一律取当前库,
       // 避免把快照里的过期基线带进下一轮;已生成头像的提示词仍作为复用凭据。
@@ -220,11 +272,13 @@ class CardStudioController extends Notifier<CardStudioState> {
       _seedCard = currentCard;
       _seedEntries = currentEntries;
       final reusePrompt = snapshot.draftAvatarPrompt;
-      final canReuse = reusePrompt != null &&
+      final canReuse =
+          reusePrompt != null &&
           snapshot.generatedAvatarPrompt == reusePrompt &&
-          currentCard.avatarBase64 == snapshot.draftCard.avatarBase64;
+          currentCard.avatarHash == snapshot.draftCard.avatarHash;
       _seedAvatarPrompt = canReuse ? reusePrompt : null;
       _generatedAvatarPrompt = canReuse ? reusePrompt : null;
+      _generatedAvatarHash = canReuse ? currentCard.avatarHash : null;
     }
     _sessionLog
       ..clear()
@@ -233,17 +287,13 @@ class CardStudioController extends Notifier<CardStudioState> {
 
     final restoredEntries = <CardStudioEntry>[
       ...snapshot.entries,
-      CardStudioEntry.notice(
-        hasChanges ? '已恢复上次未完成的草稿。' : '已恢复上次制卡对话，可继续调整。',
-      ),
+      CardStudioEntry.notice(hasChanges ? '已恢复上次未完成的草稿。' : '已恢复上次制卡对话，可继续调整。'),
     ];
     if (hasChanges &&
         (!_sameCard(currentCard, base) ||
             !_sameEntries(currentEntries, baseEntries))) {
       restoredEntries.add(
-        const CardStudioEntry.notice(
-          '角色卡或世界书在离开期间已更新，应用时会提示冲突。',
-        ),
+        const CardStudioEntry.notice('角色卡或世界书在离开期间已更新，应用时会提示冲突。'),
       );
     }
     state = CardStudioState(
@@ -257,13 +307,17 @@ class CardStudioController extends Notifier<CardStudioState> {
       draftCard: hasChanges ? draft : null,
       draftEntries: hasChanges ? draftEntries : null,
       diff: hasChanges ? diff : null,
-      decisions: hasChanges ? snapshot.decisions : ReviewDecisions.acceptAll,
+      decisions: hasChanges ? decisions : ReviewDecisions.acceptAll,
       draftAvatarPrompt: hasChanges ? snapshot.draftAvatarPrompt : null,
       lastSummary: snapshot.lastSummary,
       lastRequestInputTokens: snapshot.lastRequestInputTokens,
       lastRequestCachedInputTokens: snapshot.lastRequestCachedInputTokens,
       contextEstimateTokens: snapshot.contextEstimateTokens,
     );
+    if (snapshot.heldAssetHashes == null) {
+      // 旧草稿没有所有权清单:按当前卡面补建一次,后续恢复直接接管。
+      _saveDraftNow(force: true);
+    }
     return true;
   }
 
@@ -296,20 +350,18 @@ class CardStudioController extends Notifier<CardStudioState> {
       conflictWarning: null,
       avatarStatus: CardStudioAvatarStatus.idle,
       avatarError: null,
-      entries: [
-        ...state.entries,
-        CardStudioEntry.user(text),
-      ],
+      entries: [...state.entries, CardStudioEntry.user(text)],
     );
     _appendLog('用户：$text');
 
-    final staging = CardStaging(
-      baseCard: _seedCard,
-      baseEntries: _seedEntries,
-      characterId: _targetId ?? 0,
-    )
-      ..avatarPrompt = _seedAvatarPrompt
-      ..generatedPrompt = _generatedAvatarPrompt;
+    final staging =
+        CardStaging(
+            baseCard: _seedCard,
+            baseEntries: _seedEntries,
+            characterId: _targetId ?? 0,
+          )
+          ..avatarPrompt = _seedAvatarPrompt
+          ..generatedPrompt = _generatedAvatarPrompt;
 
     final built = CardProfile.build(
       backend: backend,
@@ -383,10 +435,7 @@ class CardStudioController extends Notifier<CardStudioState> {
           error: null,
           entries: summary.isEmpty
               ? state.entries
-              : [
-                  ...state.entries,
-                  CardStudioEntry.notice('完成：$summary'),
-                ],
+              : [...state.entries, CardStudioEntry.notice('完成：$summary')],
         );
         // 先落一次提案:头像生成可能耗时很久,期间退出也不丢草稿。
         _scheduleDraftSave();
@@ -409,19 +458,14 @@ class CardStudioController extends Notifier<CardStudioState> {
           );
         } else {
           final message = switch (reason) {
-            AgentFailureReason.backendError =>
-              'Agent 运行失败：${detail ?? '后端错误'}',
-            AgentFailureReason.guardrail =>
-              'Agent 无法继续：${detail ?? '工具调用异常'}',
+            AgentFailureReason.backendError => 'Agent 运行失败：${detail ?? '后端错误'}',
+            AgentFailureReason.guardrail => 'Agent 无法继续：${detail ?? '工具调用异常'}',
             AgentFailureReason.cancelled => '已取消本轮生成。',
           };
           state = state.copyWith(
             phase: CardStudioPhase.failed,
             error: message,
-            entries: [
-              ...state.entries,
-              CardStudioEntry.error(message),
-            ],
+            entries: [...state.entries, CardStudioEntry.error(message)],
           );
         }
         _scheduleDraftSave();
@@ -446,14 +490,16 @@ class CardStudioController extends Notifier<CardStudioState> {
     );
     _seedCard = submission.card;
     _seedEntries = submission.entries;
-    final avatarAccepted = state.decisions.avatarAccepted &&
-        submission.card.avatarBase64 != _originCard.avatarBase64;
+    final avatarAccepted =
+        state.decisions.avatarAccepted &&
+        submission.card.avatarHash != _originCard.avatarHash;
     _seedAvatarPrompt = avatarAccepted ? state.draftAvatarPrompt : null;
-    if (avatarAccepted) {
-      _generatedAvatarPrompt = state.draftAvatarPrompt;
-    } else {
-      _generatedAvatarPrompt = null;
-    }
+    final canReuseAvatar =
+        avatarAccepted &&
+        _generatedAvatarPrompt == state.draftAvatarPrompt &&
+        _generatedAvatarHash == submission.card.avatarHash;
+    _generatedAvatarPrompt = canReuseAvatar ? state.draftAvatarPrompt : null;
+    _generatedAvatarHash = canReuseAvatar ? submission.card.avatarHash : null;
     await run(text);
   }
 
@@ -509,6 +555,8 @@ class CardStudioController extends Notifier<CardStudioState> {
     _seedEntries = turn.seedEntries;
     _seedAvatarPrompt = turn.seedAvatarPrompt;
     _generatedAvatarPrompt = turn.generatedAvatarPrompt;
+    // 旧轮次快照不携带哈希配对:宁可重新生成,也不把旧图记成新提示词产出。
+    _generatedAvatarHash = null;
     _sessionLog
       ..clear()
       ..addAll(turn.sessionLog);
@@ -547,7 +595,11 @@ class CardStudioController extends Notifier<CardStudioState> {
     state = state.copyWith(
       decisions: state.decisions.withField(
         key,
-        FieldDecision(accepted: accepted, editedText: current.editedText),
+        FieldDecision(
+          accepted: accepted,
+          editedText: current.editedText,
+          editedList: current.editedList,
+        ),
       ),
     );
     _scheduleDraftSave();
@@ -562,6 +614,26 @@ class CardStudioController extends Notifier<CardStudioState> {
       decisions: state.decisions.withField(
         key,
         FieldDecision(accepted: true, editedText: text),
+      ),
+    );
+    _scheduleDraftSave();
+  }
+
+  /// 列表字段(备用开场白/标签)的逐元素编辑:每个元素原样保存,
+  /// 不经过换行/逗号投影,元素内部的换行与逗号不会被拆条。
+  void editListField(String key, List<String> values) {
+    if (state.phase != CardStudioPhase.review &&
+        state.phase != CardStudioPhase.failed) {
+      return;
+    }
+    final normalized = <String>[
+      for (final value in values)
+        if (value.trim().isNotEmpty) value.trim(),
+    ];
+    state = state.copyWith(
+      decisions: state.decisions.withField(
+        key,
+        FieldDecision(accepted: true, editedList: normalized),
       ),
     );
     _scheduleDraftSave();
@@ -644,11 +716,13 @@ class CardStudioController extends Notifier<CardStudioState> {
   /// 返回 false 表示校验/冲突/写库失败,原因在 state.applyErrors/conflictWarning。
   Future<bool> apply({bool force = false}) async {
     if (!state.canApply) return false;
+    final epoch = _studioEpoch;
     // detach 会置空 `_targetId`/`_draftFile`,但写库仍会完成;入口处全部
     // 捕获,避免 await 之后把更新误判成新建或清理不掉的草稿。
     final targetId = _targetId;
     final savedTarget = targetId;
     final draftFile = _draftFile;
+    final database = ref.read(databaseProvider);
     final draftCard = state.draftCard!;
     final draftEntries = state.draftEntries!;
     final submission = buildCardSubmission(
@@ -663,34 +737,8 @@ class CardStudioController extends Notifier<CardStudioState> {
       state = state.copyWith(applyErrors: errors);
       return false;
     }
-    if (targetId != null) {
-      final current = await ref.read(characterRepositoryProvider).get(targetId);
-      if (!ref.mounted) return false;
-      if (current == null) {
-        state = state.copyWith(applyErrors: ['角色卡已被删除，无法保存。']);
-        return false;
-      }
-      final currentEntries = await ref
-          .read(worldbookRepositoryProvider)
-          .byCharacter(targetId);
-      if (!ref.mounted) return false;
-      if (!force) {
-        final cardChanged = !_sameCard(current, _originCard);
-        final entriesChanged = !_sameEntries(currentEntries, _originEntries);
-        if (cardChanged || entriesChanged) {
-          final parts = [
-            if (cardChanged) '角色卡',
-            if (entriesChanged) '世界书',
-          ];
-          state = state.copyWith(
-            conflictWarning:
-                '${parts.join('与')}已在其他页面被修改。继续应用将覆盖这些修改。',
-          );
-          return false;
-        }
-      }
-    }
-
+    // 在首个 await 之前同步进入 applying:双击「应用」的第二次调用会被
+    // canApply 挡住,不会并发跑两个事务。冲突/失败路径再回退到 review。
     _avatarGeneration++;
     state = state.copyWith(
       phase: CardStudioPhase.applying,
@@ -698,11 +746,45 @@ class CardStudioController extends Notifier<CardStudioState> {
       conflictWarning: null,
       error: null,
     );
+    if (targetId != null) {
+      final current = await ref.read(characterRepositoryProvider).get(targetId);
+      final stillCurrent = _isCurrentStudio(epoch);
+      if (current == null) {
+        if (stillCurrent) {
+          state = state.copyWith(
+            phase: CardStudioPhase.review,
+            applyErrors: ['角色卡已被删除，无法保存。'],
+          );
+        }
+        return false;
+      }
+      final currentEntries = await ref
+          .read(worldbookRepositoryProvider)
+          .byCharacter(targetId);
+      if (!force) {
+        final cardChanged = !_sameCard(current, _originCard);
+        final entriesChanged = !_sameEntries(currentEntries, _originEntries);
+        if (cardChanged || entriesChanged) {
+          if (_isCurrentStudio(epoch)) {
+            final parts = [if (cardChanged) '角色卡', if (entriesChanged) '世界书'];
+            state = state.copyWith(
+              phase: CardStudioPhase.review,
+              conflictWarning: '${parts.join('与')}已在其他页面被修改。继续应用将覆盖这些修改。',
+            );
+          }
+          return false;
+        }
+      }
+    }
+
     try {
       final repo = ref.read(characterRepositoryProvider);
       late final int id;
       if (targetId == null) {
-        id = await repo.insertWithWorldbook(submission.card, submission.entries);
+        id = await repo.insertWithWorldbook(
+          submission.card,
+          submission.entries,
+        );
       } else {
         await repo.updateWithWorldbook(
           targetId,
@@ -711,9 +793,27 @@ class CardStudioController extends Notifier<CardStudioState> {
         );
         id = targetId;
       }
-      // 写库即提交点:此后该轮指令只能复制,不允许再撤回重跑。
+      // 写库即提交点。草稿文件先清理(与当前页面是否还在无关);其余
+      // 工作台内部状态只在仍是同一会话时更新。
+      if (draftFile != null) {
+        final cleared = await clearCardStudioDraftAndRelease(
+          database,
+          draftFile,
+          savedTarget,
+          trackedHashes: _trackedDraftRefs(savedTarget),
+        );
+        if (cleared) {
+          _draftAssetRefs.remove(_draftTargetKey(savedTarget));
+        }
+      }
+      // 页面已退出/重开:写库与草稿清理已完成,但绝不能把旧目标的结果写进
+      // 新工作台的状态与基线。
+      if (!_isCurrentStudio(epoch)) return true;
       _turn = null;
-      if (!ref.mounted) return true;
+      _draftEpoch++;
+      _draftSaveTimer?.cancel();
+      _draftSaveTimer = null;
+      _draftDirty = false;
       // 以库为准刷新基线:提交值里的新条目还是负临时 id,直接当基线会让
       // 下一轮 diff 把它们同时判成删除与新增,重复应用还会让世界书 id 漂移。
       var appliedCard = submission.card;
@@ -722,30 +822,36 @@ class CardStudioController extends Notifier<CardStudioState> {
         final stored = await repo.get(id);
         if (stored != null) {
           appliedCard = stored;
-          appliedEntries =
-              await ref.read(worldbookRepositoryProvider).byCharacter(id);
+          appliedEntries = await ref
+              .read(worldbookRepositoryProvider)
+              .byCharacter(id);
         }
       } catch (e) {
         appliedCard = submission.card;
         appliedEntries = submission.entries;
         debugPrint('制卡应用后回读基线失败(沿用提交值):$e');
       }
-      if (!ref.mounted) return true;
+      if (!_isCurrentStudio(epoch)) return true;
       // 已应用的头像与提示词继续作为后续打磨的复用凭据,避免同一提示词
       // 再生成一次图。
-      final keepAvatarPrompt = state.decisions.avatarAccepted &&
+      final keepAvatarPrompt =
+          state.decisions.avatarAccepted &&
           state.draftAvatarPrompt != null &&
           _generatedAvatarPrompt == state.draftAvatarPrompt &&
-          submission.card.avatarBase64 == draftCard.avatarBase64;
+          _generatedAvatarHash == submission.card.avatarHash &&
+          submission.card.avatarHash == draftCard.avatarHash;
       _targetId = id;
       _originCard = appliedCard;
       _originEntries = appliedEntries;
       _seedCard = appliedCard;
       _seedEntries = appliedEntries;
-      _seedAvatarPrompt =
-          keepAvatarPrompt ? state.draftAvatarPrompt : null;
-      _generatedAvatarPrompt =
-          keepAvatarPrompt ? state.draftAvatarPrompt : null;
+      _seedAvatarPrompt = keepAvatarPrompt ? state.draftAvatarPrompt : null;
+      _generatedAvatarPrompt = keepAvatarPrompt
+          ? state.draftAvatarPrompt
+          : null;
+      _generatedAvatarHash = keepAvatarPrompt
+          ? submission.card.avatarHash
+          : null;
       ref.invalidate(charactersProvider);
       ref.invalidate(sessionGroupsProvider);
       ref.invalidate(characterAvatarProvider(id));
@@ -763,15 +869,9 @@ class CardStudioController extends Notifier<CardStudioState> {
         applyErrors: const [],
         conflictWarning: null,
       );
-      // 提案已落库:作废防抖回调并删除草稿(删除排在已入队写之后)。
-      _draftEpoch++;
-      _draftSaveTimer?.cancel();
-      _draftSaveTimer = null;
-      _draftDirty = false;
-      unawaited(draftFile?.clear(savedTarget));
       return true;
     } catch (e) {
-      if (ref.mounted) {
+      if (_isCurrentStudio(epoch)) {
         state = state.copyWith(
           phase: CardStudioPhase.review,
           applyErrors: ['保存失败：$e'],
@@ -828,11 +928,12 @@ class CardStudioController extends Notifier<CardStudioState> {
     _avatarGeneration++;
     _turn = null;
     final target = _targetId;
-    unawaited(_draftFile?.clear(target));
+    unawaited(_clearDraftAssets(target));
     _seedCard = _originCard;
     _seedEntries = _originEntries;
     _seedAvatarPrompt = null;
     _generatedAvatarPrompt = null;
+    _generatedAvatarHash = null;
     _sessionLog.clear();
     _clearDraft();
     state = CardStudioState(
@@ -852,6 +953,9 @@ class CardStudioController extends Notifier<CardStudioState> {
   /// 保留 `_targetId`:应用写库无法取消,退出后若写库失败,重试必须仍按
   /// 原目标更新而不是插入一张新卡。
   void detach() {
+    // 先递增代次:在飞的 start/run/apply 续体随后全部失效,不会再写 provider
+    // 状态;新页面进入时 start 会统一重置 phase(含上一页遗留的 busy)。
+    _studioEpoch++;
     _draftSaveTimer?.cancel();
     _draftSaveTimer = null;
     if (_draftDirty) _saveDraftNow(force: true);
@@ -862,17 +966,19 @@ class CardStudioController extends Notifier<CardStudioState> {
     _turn = null;
     _seedAvatarPrompt = null;
     _generatedAvatarPrompt = null;
+    _generatedAvatarHash = null;
     _sessionLog.clear();
     _draftFile = null;
   }
 
   /// 完全复位(不含页面卸载路径;测试/显式重置用)。
   void disposeStudio() {
+    _studioEpoch++;
     _draftEpoch++;
     _draftSaveTimer?.cancel();
     _draftSaveTimer = null;
     _draftDirty = false;
-    unawaited(_draftFile?.clear(_targetId));
+    unawaited(_clearDraftAssets(_targetId));
     _draftFile = null;
     _cancelAll();
     if (ref.mounted) ref.read(cardStudioDraftProvider.notifier).clear();
@@ -886,11 +992,33 @@ class CardStudioController extends Notifier<CardStudioState> {
     _seedEntries = const [];
     _seedAvatarPrompt = null;
     _generatedAvatarPrompt = null;
+    _generatedAvatarHash = null;
     _sessionLog.clear();
     state = const CardStudioState();
   }
 
   // ---- 内部
+
+  static String _draftTargetKey(int? target) => target?.toString() ?? 'new';
+
+  Set<String> _trackedDraftRefs(int? target) =>
+      _draftAssetRefs[_draftTargetKey(target)] ?? const {};
+
+  Future<bool> _clearDraftAssets(
+    int? target, {
+    CardStudioDraftFile? file,
+  }) async {
+    final draftFile = file ?? _draftFile;
+    if (draftFile == null) return true;
+    final cleared = await clearCardStudioDraftAndRelease(
+      ref.read(databaseProvider),
+      draftFile,
+      target,
+      trackedHashes: _trackedDraftRefs(target),
+    );
+    if (cleared) _draftAssetRefs.remove(_draftTargetKey(target));
+    return cleared;
+  }
 
   /// 有需要落盘的内容:待审提案,或已经发生的制卡对话(应用后继续打磨的
   /// 会话没有提案,也要能跨页面/重进恢复)。
@@ -907,8 +1035,9 @@ class CardStudioController extends Notifier<CardStudioState> {
       generatedAvatarPrompt: _generatedAvatarPrompt,
       sessionLog: List.of(_sessionLog),
       draftCard: state.draftCard,
-      draftEntries:
-          state.draftEntries == null ? null : List.of(state.draftEntries!),
+      draftEntries: state.draftEntries == null
+          ? null
+          : List.of(state.draftEntries!),
       diff: state.diff,
       decisions: state.decisions,
       draftAvatarPrompt: state.draftAvatarPrompt,
@@ -946,8 +1075,17 @@ class CardStudioController extends Notifier<CardStudioState> {
       _draftDirty = false;
       return;
     }
+    final desired = <String>{
+      for (final card in [_originCard, draftCard])
+        for (final hash in [card.avatarHash, card.backgroundHash])
+          if (hash != null && ImageAssetStore.isValidHash(hash)) hash,
+    };
+    final target = _targetId;
+    final targetKey = _draftTargetKey(target);
+    final database = ref.read(databaseProvider);
+    final epoch = _draftEpoch;
     final snapshot = CardStudioDraftSnapshot(
-      targetCharacterId: _targetId,
+      targetCharacterId: target,
       baseCard: _originCard,
       baseEntries: _originEntries,
       draftCard: draftCard,
@@ -959,16 +1097,36 @@ class CardStudioController extends Notifier<CardStudioState> {
           state.draftAvatarPrompt ?? (sessionOnly ? _seedAvatarPrompt : null),
       generatedAvatarPrompt: _generatedAvatarPrompt,
       lastSummary: state.lastSummary,
+      heldAssetHashes: desired.toList()..sort(),
       lastRequestInputTokens: state.lastRequestInputTokens,
       lastRequestCachedInputTokens: state.lastRequestCachedInputTokens,
       contextEstimateTokens: state.contextEstimateTokens,
     );
     _draftDirty = false;
     try {
-      unawaited(
-        file.write(_targetId, encodeCardStudioDraft(snapshot)),
-      );
+      unawaited(() async {
+        final saved = await file.write(
+          target,
+          encodeCardStudioDraft(snapshot),
+          afterWrite: () async {
+            // 账本在入队时可能已推进:按队列执行时的真实上一版算差集,
+            // 重叠保存不会重复 acquire/漏 release。
+            final previous = Set<String>.of(_trackedDraftRefs(target));
+            await reconcileCardStudioDraftReferences(
+              database,
+              previous: previous,
+              desired: desired,
+            );
+            _draftAssetRefs[targetKey] = desired;
+          },
+        );
+        if (!saved && epoch == _draftEpoch && ref.mounted) {
+          // 保留脏标记,页面退出时还会强制重试;失败过程中不调整引用账本。
+          _draftDirty = true;
+        }
+      }());
     } catch (e) {
+      _draftDirty = true;
       debugPrint('制卡草稿编码失败(已忽略):$e');
     }
   }
@@ -981,14 +1139,19 @@ class CardStudioController extends Notifier<CardStudioState> {
   ) async {
     if (!ref.mounted) return;
     try {
-      await ref.read(usageRepositoryProvider).record(
+      await ref
+          .read(usageRepositoryProvider)
+          .record(
             sessionId: null,
             kind: UsageKind.card,
             providerId: config.providerId,
-            providerName:
-                config.providerName.isEmpty ? config.providerWire : config.providerName,
+            providerName: config.providerName.isEmpty
+                ? config.providerWire
+                : config.providerName,
             model: config.model,
-            modelName: config.modelName.isEmpty ? config.model : config.modelName,
+            modelName: config.modelName.isEmpty
+                ? config.model
+                : config.modelName,
             usage: event.usage,
             reported: event.reported,
           );
@@ -1001,19 +1164,19 @@ class CardStudioController extends Notifier<CardStudioState> {
     final text = event.text.trim();
     final additions = <CardStudioEntry>[];
     if (event.success && text.isNotEmpty) {
-      additions.add(CardStudioEntry(
-        CardStudioEntryKind.agent,
-        text,
-        step: event.step,
-      ));
+      additions.add(
+        CardStudioEntry(CardStudioEntryKind.agent, text, step: event.step),
+      );
     }
     if (event.toolNames.isNotEmpty) {
-      additions.add(CardStudioEntry(
-        CardStudioEntryKind.toolStep,
-        _toolLabel(event.toolNames),
-        tools: List.unmodifiable(event.toolNames),
-        step: event.step,
-      ));
+      additions.add(
+        CardStudioEntry(
+          CardStudioEntryKind.toolStep,
+          _toolLabel(event.toolNames),
+          tools: List.unmodifiable(event.toolNames),
+          step: event.step,
+        ),
+      );
     }
     if (additions.isNotEmpty) {
       state = state.copyWith(entries: [...state.entries, ...additions]);
@@ -1075,9 +1238,12 @@ class CardStudioController extends Notifier<CardStudioState> {
       );
       return;
     }
-    final draftAvatar = state.draftCard?.avatarBase64;
-    if (trimmed == priorPrompt && draftAvatar != null) {
-      // 提示词未变且已有生成图(含已应用的基线头像):复用,不重复计费。
+    final draftAvatar = state.draftCard?.avatarHash;
+    if (trimmed == priorPrompt &&
+        draftAvatar != null &&
+        _generatedAvatarPrompt == trimmed &&
+        _generatedAvatarHash == draftAvatar) {
+      // 提示词与产出哈希都匹配(含已应用的基线头像):复用,不重复计费。
       state = state.copyWith(
         avatarStatus: CardStudioAvatarStatus.ready,
         avatarError: null,
@@ -1101,7 +1267,7 @@ class CardStudioController extends Notifier<CardStudioState> {
       avatarStatus: CardStudioAvatarStatus.generating,
       avatarError: null,
     );
-    String? base64;
+    String? avatarHash;
     String? error;
     try {
       final backend = ref.read(imageBackendProvider);
@@ -1120,7 +1286,12 @@ class CardStudioController extends Notifier<CardStudioState> {
           if (data == null) {
             error = '图片下载失败。';
           } else {
-            base64 = await shrinkBase64Image(data);
+            // base64 只存在于生图协议边界;进入制卡状态前先缩图并资产化。
+            avatarHash = await assetizeBase64Image(
+              ref.read(databaseProvider),
+              data,
+            );
+            if (avatarHash == null) error = '头像图片无法解码。';
           }
         }
       }
@@ -1128,20 +1299,22 @@ class CardStudioController extends Notifier<CardStudioState> {
       error = '头像生成失败：$e';
     }
     if (!ref.mounted || generation != _avatarGeneration) return;
-    if (base64 == null) {
+    if (avatarHash == null) {
       state = state.copyWith(
         avatarStatus: CardStudioAvatarStatus.failed,
         avatarError: error ?? '头像生成失败。',
       );
       return;
     }
-    _generatedAvatarPrompt = prompt;
     final draft = state.draftCard;
     final draftEntries = state.draftEntries;
     if (draft == null || draftEntries == null) return;
+    // 只有真正写进当前提案后才登记凭据,避免提示词与产出脱钩。
+    _generatedAvatarPrompt = prompt;
+    _generatedAvatarHash = avatarHash;
     // 新图已进入当前提案:编辑撤回会丢弃它,按「有产出」提示。
     _turnHasResults = true;
-    final updatedCard = draft.replacingAvatar(base64);
+    final updatedCard = draft.replacingAvatar(avatarHash);
     final diff = computeCardDiff(
       baseCard: _originCard,
       baseEntries: _originEntries,
@@ -1197,8 +1370,12 @@ class CardStudioController extends Notifier<CardStudioState> {
   /// 把基线里的负临时 id 按内容对账成当前库真实 id(基线/草稿同步改写)。
   /// 仅在旧草稿把「应用后延续」的暂存条目原样存盘时命中;对不上的条目
   /// (例如已被外部删除)保持原值,交给 diff/提交按暂存新增处理。
-  static ({List<WorldbookEntry> base, List<WorldbookEntry> draft})
-      _remapTempEntryIds(
+  static ({
+    List<WorldbookEntry> base,
+    List<WorldbookEntry> draft,
+    Map<int, int> remap,
+  })
+  _remapTempEntryIds(
     List<WorldbookEntry> baseEntries,
     List<WorldbookEntry> draftEntries,
     List<WorldbookEntry> currentEntries,
@@ -1222,7 +1399,7 @@ class CardStudioController extends Notifier<CardStudioState> {
       }
     }
     if (remap.isEmpty) {
-      return (base: baseEntries, draft: draftEntries);
+      return (base: baseEntries, draft: draftEntries, remap: const {});
     }
     WorldbookEntry mapped(WorldbookEntry entry) {
       final id = entry.id;
@@ -1233,6 +1410,28 @@ class CardStudioController extends Notifier<CardStudioState> {
     return (
       base: [for (final e in baseEntries) mapped(e)],
       draft: [for (final e in draftEntries) mapped(e)],
+      remap: remap,
+    );
+  }
+
+  /// 迁移 `base:<临时 id>` 形式的审阅决策键;其它键原样保留。
+  static ReviewDecisions _remapDecisionKeys(
+    ReviewDecisions decisions,
+    Map<int, int> remap,
+  ) {
+    if (remap.isEmpty || decisions.entries.isEmpty) return decisions;
+    final entries = <String, EntryDecision>{};
+    final pattern = RegExp(r'^base:(-?\d+)$');
+    for (final entry in decisions.entries.entries) {
+      final match = pattern.firstMatch(entry.key);
+      final tempId = match == null ? null : int.tryParse(match.group(1)!);
+      final realId = tempId == null ? null : remap[tempId];
+      entries[realId == null ? entry.key : 'base:$realId'] = entry.value;
+    }
+    return ReviewDecisions(
+      fields: decisions.fields,
+      entries: entries,
+      avatarAccepted: decisions.avatarAccepted,
     );
   }
 
@@ -1242,8 +1441,8 @@ class CardStudioController extends Notifier<CardStudioState> {
     for (final key in kEditableCardFieldKeys) {
       if (cardFieldText(a, key) != cardFieldText(b, key)) return false;
     }
-    return a.avatarBase64 == b.avatarBase64 &&
-        a.backgroundBase64 == b.backgroundBase64 &&
+    return a.avatarHash == b.avatarHash &&
+        a.backgroundHash == b.backgroundHash &&
         a.creator == b.creator &&
         a.characterVersion == b.characterVersion &&
         a.talkativeness == b.talkativeness &&
@@ -1252,10 +1451,7 @@ class CardStudioController extends Notifier<CardStudioState> {
   }
 
   /// 世界书冲突比较:按 id 对账,建模字段与 position/extra 全量比较。
-  static bool _sameEntries(
-    List<WorldbookEntry> a,
-    List<WorldbookEntry> b,
-  ) {
+  static bool _sameEntries(List<WorldbookEntry> a, List<WorldbookEntry> b) {
     if (a.length != b.length) return false;
     final byId = <int, WorldbookEntry>{};
     for (final entry in b) {
@@ -1311,5 +1507,5 @@ class _TurnSnapshot {
 
 final cardStudioControllerProvider =
     NotifierProvider<CardStudioController, CardStudioState>(
-  CardStudioController.new,
-);
+      CardStudioController.new,
+    );

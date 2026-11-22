@@ -12,6 +12,7 @@ import '../../models/image_style_preset.dart';
 import '../../models/llm_provider.dart';
 import '../../state/app_config_sync.dart';
 import '../../state/providers.dart';
+import '../common/async_section.dart';
 import '../common/confirm_dialog.dart';
 import '../common/empty_state.dart';
 import '../common/section_header.dart';
@@ -40,6 +41,7 @@ class LlmProviderSection extends ConsumerWidget {
       message: '「${p.displayName}」及其全部模型都会被删除。',
     );
     if (!confirmed || !context.mounted) return;
+    await markAppConfigDirty(ref);
     final wasActive = p.isActive;
     await ref.read(llmProviderRepositoryProvider).deleteProvider(p.id);
     if (wasActive) {
@@ -59,23 +61,10 @@ class LlmProviderSection extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        providersAsync.when(
-          loading: () => const Padding(
-            padding: EdgeInsets.all(16),
-            child: Center(child: CircularProgressIndicator()),
-          ),
-          error: (e, _) => EmptyState(
-            compact: true,
-            icon: Icons.error_outline,
-            title: '加载失败',
-            message: '$e',
-            action: FilledButton.tonalIcon(
-              onPressed: () => ref.invalidate(llmProvidersProvider),
-              icon: const Icon(Icons.refresh),
-              label: const Text('重试'),
-            ),
-          ),
-          data: (providers) {
+        AsyncSection<List<LlmProviderConfig>>(
+          value: providersAsync,
+          onRetry: () => ref.invalidate(llmProvidersProvider),
+          builder: (context, providers) {
             if (providers.isEmpty) {
               return const SurfaceCard(
                 child: EmptyState(
@@ -134,8 +123,8 @@ class _ProviderTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
-    return Card(
-      margin: EdgeInsets.zero,
+    return SurfaceCard(
+      padding: EdgeInsets.zero,
       child: ListTile(
         onTap: onEdit,
         leading: Icon(Icons.dns_outlined, color: scheme.onSurfaceVariant),
@@ -187,6 +176,7 @@ class ImageProviderSection extends ConsumerWidget {
       message: '「${p.displayName}」及其连接参数都会被删除。',
     );
     if (!confirmed || !context.mounted) return;
+    await markAppConfigDirty(ref);
     final repo = ref.read(imageConfigRepositoryProvider);
     await repo.deleteProvider(p.id);
     // 删掉的若是当前在用那套,repository 会顺位补一条为活跃 —— 重解析让运行
@@ -194,14 +184,17 @@ class ImageProviderSection extends ConsumerWidget {
     ref.read(imageConfigProvider.notifier).state = await repo
         .loadActiveConfig();
     ref.invalidate(imageProvidersProvider);
+    await syncAppConfigFile(ref);
   }
 
   Future<void> _setActive(WidgetRef ref, ImageProviderRecord p) async {
+    await markAppConfigDirty(ref);
     final repo = ref.read(imageConfigRepositoryProvider);
     await repo.setActive(p.id);
     ref.read(imageConfigProvider.notifier).state = await repo
         .loadActiveConfig();
     ref.invalidate(imageProvidersProvider);
+    await syncAppConfigFile(ref);
   }
 
   @override
@@ -213,23 +206,10 @@ class ImageProviderSection extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        providersAsync.when(
-          loading: () => const Padding(
-            padding: EdgeInsets.all(16),
-            child: Center(child: CircularProgressIndicator()),
-          ),
-          error: (e, _) => EmptyState(
-            compact: true,
-            icon: Icons.error_outline,
-            title: '加载失败',
-            message: '$e',
-            action: FilledButton.tonalIcon(
-              onPressed: () => ref.invalidate(imageProvidersProvider),
-              icon: const Icon(Icons.refresh),
-              label: const Text('重试'),
-            ),
-          ),
-          data: (providers) {
+        AsyncSection<List<ImageProviderRecord>>(
+          value: providersAsync,
+          onRetry: () => ref.invalidate(imageProvidersProvider),
+          builder: (context, providers) {
             if (providers.isEmpty) {
               return const SurfaceCard(
                 child: EmptyState(
@@ -278,9 +258,7 @@ class ImageProviderSection extends ConsumerWidget {
           OutlinedButton.icon(
             onPressed: () => Navigator.push(
               context,
-              MaterialPageRoute(
-                builder: (_) => const ImagePluginsScreen(),
-              ),
+              MaterialPageRoute(builder: (_) => const ImagePluginsScreen()),
             ),
             icon: const Icon(Icons.extension_outlined),
             label: const Text('管理生图插件'),
@@ -304,15 +282,16 @@ class ImageProviderSection extends ConsumerWidget {
 }
 
 /// 用当前生效的生图参数预填自定义风格;未配置生图时给空初值。
-ImageStylePreset stylePrefillFromConfig(ImageConfig? config) => ImageStylePreset(
-  name: '',
-  artist: config?.artist,
-  sampler: config?.sampler,
-  noiseSchedule: config?.noiseSchedule,
-  scale: config?.scale,
-  cfg: config?.cfg,
-  negative: config?.negative,
-);
+ImageStylePreset stylePrefillFromConfig(ImageConfig? config) =>
+    ImageStylePreset(
+      name: '',
+      artist: config?.artist,
+      sampler: config?.sampler,
+      noiseSchedule: config?.noiseSchedule,
+      scale: config?.scale,
+      cfg: config?.cfg,
+      negative: config?.negative,
+    );
 
 class _ImageProviderTile extends ConsumerWidget {
   final ImageProviderRecord record;
@@ -336,8 +315,8 @@ class _ImageProviderTile extends ConsumerWidget {
             .firstOrNull
             ?.name ??
         '生图插件';
-    return Card(
-      margin: EdgeInsets.zero,
+    return SurfaceCard(
+      padding: EdgeInsets.zero,
       child: ListTile(
         onTap: onEdit,
         leading: Icon(Icons.image_outlined, color: scheme.onSurfaceVariant),

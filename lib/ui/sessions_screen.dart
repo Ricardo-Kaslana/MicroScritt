@@ -17,6 +17,8 @@ import '../models/character_card.dart';
 import '../state/providers.dart';
 import 'chat_screen.dart';
 import 'common/app_menu.dart';
+import 'common/app_snack_bar.dart';
+import 'common/async_section.dart';
 import 'common/confirm_dialog.dart';
 import 'common/section_header.dart';
 import 'common/empty_state.dart';
@@ -29,9 +31,10 @@ import '../data/shrink_image.dart';
 /// 角色的会话列表,从角色卡点击进入:点击会话进聊天页,搜索匹配标题与
 /// 最近消息。
 ///
-/// 新建会话时若角色有开场白,会作为助手首条消息落库;删除会话级联删除
-/// 消息。导入归档可能落到其它(或新建)角色名下,完成后整族会话 provider
-/// 一起失效。
+/// 新建会话时,只有单条开场白的角色会自动把 `firstMessage` 落为助手首条
+/// 消息;有多条开场白时留空会话,让用户在聊天页空态自行选择(选择只写入
+/// 该会话,不跨会话记忆)。删除会话级联删除消息。导入归档可能落到其它
+/// (或新建)角色名下,完成后整族会话 provider 一起失效。
 class SessionsScreen extends ConsumerStatefulWidget {
   final int characterId;
   final CharacterCard character;
@@ -58,7 +61,8 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
     final id = await ref
         .read(sessionRepositoryProvider)
         .createWithDefaultTitle(widget.characterId);
-    if (widget.character.firstMessage.isNotEmpty) {
+    if (!widget.character.hasMultipleGreetings &&
+        widget.character.firstMessage.isNotEmpty) {
       await ref
           .read(messageRepositoryProvider)
           .append(
@@ -87,40 +91,16 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
     int sessionId,
     String current,
   ) async {
-    final controller = TextEditingController(text: current);
     final newTitle = await showDialog<String>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('重命名会话'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: '会话标题'),
-          onSubmitted: (v) => Navigator.pop(dialogContext, v),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: const Text('确定'),
-          ),
-        ],
-      ),
+      builder: (_) => _SessionRenameDialog(initial: current),
     );
-    // ChangeNotifier 用完即弃:对话框关闭(确认/取消/点外部)后必释放,
-    // 此前每次重命名泄漏一个 controller。
-    controller.dispose();
     if (newTitle == null) return;
     final title = newTitle.trim();
     if (title.isEmpty) {
       // 空标题不落库,但也不能静默关闭 —— 用户会以为改名成功了。
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(content: Text('会话标题不能为空')));
+        showAppSnack(context, '会话标题不能为空');
       }
       return;
     }
@@ -154,7 +134,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
   }) async {
     await saveSessionArchive(
       context,
-      fileName: '$title.json',
+      fileName: '$title.msarc',
       delivery: share
           ? SessionArchiveDelivery.share
           : SessionArchiveDelivery.save,
@@ -168,84 +148,104 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
     );
   }
 
+  /// 询问是否解包归档图片;null 表示用户取消导入。
+  Future<bool?> _askIncludeImages(BuildContext context) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('导入选项'),
+        content: const Text(
+          '仅文本只导入对话文字与变量等状态，'
+          '消息中的图片（含远程链接）与角色头像、背景都不导入，'
+          '只有图片的消息会被整条略过；导入更快、占用更小。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('仅文本'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('包含图片'),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 导入会话归档:同名角色复用既有(不动本地卡与世界书),否则随卡新建。
   /// 走流式读取:几百 MB 的图片消息也能导入,不再受 50MB 上限限制。
   Future<void> _import(BuildContext context, WidgetRef ref) async {
     final picked = await FilePicker.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['json'],
+      allowedExtensions: ['json', 'msarc'],
       withData: false,
     );
     // 系统文件选择器的返回键是标准取消路径,取消不是失败。
     if (picked == null) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(content: Text('已取消导入')));
+        showAppSnack(context, '已取消导入');
       }
       return;
     }
-    final path = await pickedFilePath(picked.files.single);
-    if (path == null) {
+    final pickedFile = await pickedFilePath(picked.files.single);
+    if (pickedFile == null) {
       if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('导入失败:未读取到所选文件')));
+        showAppSnack(context, '导入失败:未读取到所选文件');
       }
       return;
     }
-    if (!context.mounted) return;
+    // 内联 bytes 兜底写出的临时归档必须在所有出口清理(含取消/异常)。
     try {
-      final imported = await runWithProgress<SessionImportResult>(
-        context,
-        title: '正在导入会话',
-        task: (controller) async {
-          controller.report(message: '正在扫描归档…');
-          return SessionImporter.importFile(
-            ref.read(databaseProvider),
-            File(path),
-            avatarShrinker: shrinkBase64Image,
-            onProgress: (done, total) => controller.report(
-              value: total == 0 ? null : done / total,
-              message: '已导入 $done / $total 条消息',
-            ),
-            isCancelled: () => controller.cancelled,
-          );
-        },
-      );
-      // 会话可能落到其它(新建)角色名下,家族 provider 整体失效以覆盖所有角色。
-      ref.invalidate(sessionInfosProvider);
-      ref.invalidate(charactersProvider);
-      ref.invalidate(sessionGroupsProvider);
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            imported.reusedCharacter
-                ? '已导入会话(复用角色「${widget.character.name}」)'
-                : '已导入会话,并新建了同名未匹配的角色',
-          ),
-        ),
-      );
-    } on ArchiveScanCancelled {
+      final includeImages = await _askIncludeImages(context);
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('已取消导入')));
-    } on FormatException catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('导入失败:${e.message}')));
-    } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('导入失败:$e')));
+      if (includeImages == null) {
+        showAppSnack(context, '已取消导入');
+        return;
+      }
+      try {
+        final imported = await runWithProgress<SessionImportResult>(
+          context,
+          title: '正在导入会话',
+          task: (controller) async {
+            controller.report(message: '正在扫描归档…');
+            return SessionImporter.importFile(
+              ref.read(databaseProvider),
+              File(pickedFile.path),
+              avatarShrinker: shrinkBase64Image,
+              includeImages: includeImages,
+              onProgress: (done, total) => controller.report(
+                value: total == 0 ? null : done / total,
+                message: '已导入 $done / $total 条消息',
+              ),
+              isCancelled: () => controller.cancelled,
+            );
+          },
+        );
+        // 会话可能落到其它(新建)角色名下,家族 provider 整体失效以覆盖所有角色。
+        ref.invalidate(sessionInfosProvider);
+        ref.invalidate(charactersProvider);
+        ref.invalidate(sessionGroupsProvider);
+        if (!context.mounted) return;
+        showAppSnack(
+          context,
+          imported.reusedCharacter
+              ? '已导入会话(复用角色「${widget.character.name}」)'
+              : '已导入会话,并新建了同名未匹配的角色',
+        );
+      } on ArchiveScanCancelled {
+        if (!context.mounted) return;
+        showAppSnack(context, '已取消导入');
+      } on FormatException catch (e) {
+        if (!context.mounted) return;
+        showAppSnack(context, '导入失败:${e.message}');
+      } catch (e) {
+        if (!context.mounted) return;
+        showAppSnack(context, '导入失败:$e');
+      }
+    } finally {
+      await pickedFile.deleteIfTemporary();
     }
   }
 
@@ -274,8 +274,11 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
         icon: const Icon(Icons.add_comment_outlined),
         label: const Text('新建会话'),
       ),
-      body: infos.when(
-        data: (list) {
+      body: AsyncSection<List<SessionInfo>>(
+        value: infos,
+        compact: false,
+        onRetry: () => ref.invalidate(sessionInfosProvider(widget.characterId)),
+        builder: (context, list) {
           if (list.isEmpty) {
             return EmptyState(
               icon: Icons.chat_bubble_outline,
@@ -291,6 +294,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
           // 搜索时有命中计数,回顶钮由外壳统一提供。
           return SearchableList<SessionInfo>(
             items: list,
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
             searchHint: '搜索会话标题或消息内容',
             noMatchTitle: '没有匹配的会话',
             searchText: (s) =>
@@ -307,7 +311,7 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
                       s.messageCount == 0
                           ? '暂无消息'
                           : '${s.messageCount} 条消息'
-                                '${s.imageCount == 0 ? '' : '：${s.messageCount - s.imageCount} 条文本 + ${s.imageCount} 条图片'}'
+                                '${s.imageCount == 0 ? '' : ':${s.messageCount - s.imageCount} 条文本 + ${s.imageCount} 条图片'}'
                                 '${s.lastMessage == null ? '' : ' · ${_clip(s.lastMessage!)}'}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -367,18 +371,6 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
             },
           );
         },
-        error: (e, _) => EmptyState(
-          icon: Icons.error_outline,
-          title: '加载失败',
-          message: '$e',
-          action: FilledButton.tonalIcon(
-            onPressed: () =>
-                ref.invalidate(sessionInfosProvider(widget.characterId)),
-            icon: const Icon(Icons.refresh),
-            label: const Text('重试'),
-          ),
-        ),
-        loading: () => const Center(child: CircularProgressIndicator()),
       ),
     );
   }
@@ -389,4 +381,51 @@ class _SessionsScreenState extends ConsumerState<SessionsScreen> {
     final oneLine = s.replaceAll(_whitespace, ' ').trim();
     return oneLine.length <= 40 ? oneLine : '${oneLine.substring(0, 40)}…';
   }
+}
+
+/// 会话重命名对话框:controller 归 Dialog 的 State 所有,随路由退场动画
+/// 一并销毁,避免调用方在退场期间提前 dispose 引发 TextField 重建断言。
+class _SessionRenameDialog extends StatefulWidget {
+  final String initial;
+  const _SessionRenameDialog({required this.initial});
+
+  @override
+  State<_SessionRenameDialog> createState() => _SessionRenameDialogState();
+}
+
+class _SessionRenameDialogState extends State<_SessionRenameDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initial);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('重命名会话'),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      decoration: const InputDecoration(labelText: '会话标题'),
+      onSubmitted: (v) => Navigator.pop(context, v),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _controller.text),
+        child: const Text('确定'),
+      ),
+    ],
+  );
 }

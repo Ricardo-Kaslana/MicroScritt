@@ -26,10 +26,13 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     required InterruptToken token,
     RewriteContext? rewrite,
   }) async {
-    if (!ref.read(appSettingsProvider).autoCompactEnabled) return null;
+    // 硬挡检测恒开:总开关只控制「LLM 摘要压缩」,超预算时的机械截断兜底
+    // 必须始终可用,否则请求会原样发出等上游 400。
+    final autoEnabled = ref.read(appSettingsProvider).autoCompactEnabled;
     final threshold = ref.read(appSettingsProvider).autoCompactThreshold;
+    final epoch = _sessionEpoch;
     final capacity = await _resolveContextCapacity();
-    if (capacity == null) return null;
+    if (capacity == null || !_ownsMain(sessionId, epoch)) return null;
     final backend = ref.read(backendProvider);
     final config = ref.read(backendConfigProvider);
     if (backend == null || config == null || !ref.mounted) return null;
@@ -41,7 +44,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
 
     final reserve =
         config.maxTokens ?? ContextBudgetPolicy.defaultOutputReserveTokens;
-    final hardBudget = (capacity * ContextBudgetPolicy.hardFor(threshold)).floor();
+    final hardBudget = (capacity * ContextBudgetPolicy.hardFor(threshold))
+        .floor();
     if (estimateOf(snapshot) + reserve <= hardBudget) return null;
 
     // 重写提醒是单轮临时注入、无法被压缩折叠;把它当作固定段从压缩预算里
@@ -66,19 +70,22 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
 
     // ① LLM 摘要压缩到目标挡:保留条数按"目标占用 − 摘要预留"规划,
     //    压缩后重载消息并重新组装快照再判定(新摘要成为消息数组首条合成消息)。
-    final activeBefore = _liveConversation(currentMessages);
+    final activeBefore = _activeRows(currentMessages);
     final targetHistoryBudget =
         (capacity * ContextBudgetPolicy.target).floor() -
         ContextBudgetPolicy.summaryReserveTokens -
         rewriteTokens;
-    final keepForTarget = planKeepWithinBudget(
+    final keepForTarget = planKeepWithinBudgetWithAttachments(
       active: activeBefore,
       budgetTokens: targetHistoryBudget,
     );
-    if (keepForTarget < activeBefore.length) {
+    final chatBefore = activeBefore.where((m) => m.isChat).length;
+    if (autoEnabled && keepForTarget < chatBefore) {
       // 压缩期间灵岛进入「压缩中」活动态、发送键可中断(摘要请求响应取消
       // 信号 —— 此刻流式尚未开始,不设防时用户没有任何停止入口)。
-      if (ref.mounted) state = state.copyWith(busyCommand: 'compact');
+      if (_ownsMain(sessionId, epoch)) {
+        state = state.copyWith(busyCommand: 'compact');
+      }
       try {
         final done = await service.compact(
           sessionId: sessionId,
@@ -86,15 +93,22 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
           temperature: config.temperature,
           keep: keepForTarget,
           maxSummarizeAttempts: 4, // 首次 + 3 次失败重试
-          onUsage: _accumulateCompactUsage,
+          onUsage: (usage) => _accumulateCompactUsage(
+            usage,
+            sessionId: sessionId,
+            epoch: epoch,
+          ),
           cancelSignal: token.whenCancelled,
         );
         compacted = compacted || done;
       } catch (_) {
         // 压缩 best-effort;摘要彻底失败时走下方机械截断兜底。
       } finally {
-        if (ref.mounted) state = state.copyWith(busyCommand: null);
+        if (_ownsMain(sessionId, epoch)) {
+          state = state.copyWith(busyCommand: null);
+        }
       }
+      if (!_ownsMain(sessionId, epoch)) return null;
       if (compacted) {
         await _refreshFrozenMemory(sessionId);
         memoryRefreshed = true;
@@ -102,7 +116,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       // 组装窗口:全部未折叠活跃行(组装不再按条数裁剪,见 activeWindow)。
       final fresh = await messageRepo.activeWindow(sessionId);
       final rebuilt = await _assembleSnapshot(fresh, rewrite: rewrite);
-      if (rebuilt != null && ref.mounted) {
+      if (rebuilt != null && _ownsMain(sessionId, epoch)) {
         current = rebuilt;
         currentMessages = fresh;
       }
@@ -114,7 +128,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     //    摘要前置后属固定段,不随折叠收缩)。机械折叠也换掉旧消息 → 视同压缩,
     //    通知与记忆刷新同样生效。
     if (!token.cancelled && estimateOf(current) + reserve > hardBudget) {
-      final active = _liveConversation(currentMessages);
+      final active = _activeRows(currentMessages);
       final fixedEstimate = estimateTokensFromChars(
         current.systemPrompt.length +
             (current.leadingSummaryContent?.length ?? 0) +
@@ -127,11 +141,11 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
                   ).length),
       );
       final allowance = hardBudget - reserve - fixedEstimate;
-      final keepToFit = planKeepWithinBudget(
+      final keepToFit = planKeepWithinBudgetWithAttachments(
         active: active,
         budgetTokens: allowance,
       );
-      if (keepToFit < active.length) {
+      if (keepToFit < active.where((m) => m.isChat).length) {
         try {
           final done = await service.foldToFit(
             sessionId: sessionId,
@@ -141,13 +155,14 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         } catch (_) {
           // 兜底也失败(极端 I/O 异常):原样发送,交由服务端报错。
         }
+        if (!_ownsMain(sessionId, epoch)) return null;
         if (compacted && !memoryRefreshed) {
           await _refreshFrozenMemory(sessionId);
           memoryRefreshed = true;
         }
         final fresh = await messageRepo.activeWindow(sessionId);
         final rebuilt = await _assembleSnapshot(fresh, rewrite: rewrite);
-        if (rebuilt != null && ref.mounted) {
+        if (rebuilt != null && _ownsMain(sessionId, epoch)) {
           current = rebuilt;
           currentMessages = fresh;
         }
@@ -159,7 +174,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   }
 
   /// 回复落库后的软挡自动压缩(触发线来自 `AppSettings.autoCompactThreshold`,
-/// 默认 60%;[ContextBudgetPolicy.target] = 20%)。
+  /// 默认 60%;[ContextBudgetPolicy.target] = 20%)。
   ///
   /// 触发依据是**上下文窗口占用量**(估算输入 / 模型容量),不再是掉窗消息
   /// 条数;压缩后占用回落到目标挡,与触发线之间形成自然滞回防抖。
@@ -176,8 +191,10 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   }) async {
     if (!ref.read(appSettingsProvider).autoCompactEnabled) return;
     final threshold = ref.read(appSettingsProvider).autoCompactThreshold;
+    final epoch = _sessionEpoch;
+    if (!_ownsMain(sessionId, epoch)) return;
     final capacity = await _resolveContextCapacity();
-    if (capacity == null) return;
+    if (capacity == null || !_ownsMain(sessionId, epoch)) return;
     final backend = ref.read(backendProvider);
     final config = ref.read(backendConfigProvider);
     if (backend == null || config == null) return;
@@ -185,9 +202,9 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     final messageRepo = ref.read(messageRepositoryProvider);
     // 组装窗口:占用估算必须用与发送同一份输入(全部未折叠活跃行)。
     final messages = await messageRepo.activeWindow(sessionId);
-    if (!ref.mounted) return;
+    if (!_ownsMain(sessionId, epoch)) return;
     final snapshot = await _assembleSnapshot(messages);
-    if (snapshot == null || !ref.mounted) return;
+    if (snapshot == null || !_ownsMain(sessionId, epoch)) return;
 
     final estimated = estimateRequestTokens(
       systemPrompt: snapshot.systemPrompt,
@@ -202,19 +219,23 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       return;
     }
 
-    final active = _liveConversation(messages);
+    final active = _activeRows(messages);
     final targetHistoryBudget =
         (capacity * ContextBudgetPolicy.target).floor() -
         ContextBudgetPolicy.summaryReserveTokens;
-    final keep = planKeepWithinBudget(
+    final keep = planKeepWithinBudgetWithAttachments(
       active: active,
       budgetTokens: targetHistoryBudget,
     );
-    if (keep >= active.length) return; // 高占用来自系统段而非历史,压无可压
+    if (keep >= active.where((m) => m.isChat).length) {
+      return; // 高占用来自系统段而非历史,压无可压
+    }
 
     // 回复已落库后的软挡压缩:同样进入「压缩中」活动态并响应停止
     // (此刻主写流已结束,停止键本不可用 —— 置 busyCommand 让它重新可用)。
-    state = state.copyWith(busyCommand: 'compact');
+    if (_ownsMain(sessionId, epoch)) {
+      state = state.copyWith(busyCommand: 'compact');
+    }
     try {
       final done = await CompactService(backend, messageRepo).compact(
         sessionId: sessionId,
@@ -222,7 +243,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         temperature: config.temperature,
         keep: keep,
         maxSummarizeAttempts: 4, // 首次 + 3 次失败重试
-        onUsage: _accumulateCompactUsage,
+        onUsage: (usage) =>
+            _accumulateCompactUsage(usage, sessionId: sessionId, epoch: epoch),
         stripSkillNames: await enabledSkillNames(),
         cancelSignal: token.whenCancelled,
       );
@@ -244,34 +266,35 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       } else if (!token.cancelled) {
         // 摘要重试耗尽(或无可压产出)且用户没有主动中断:让失败可见,
         // 不再像旧实现那样完全静默。
-        if (ref.mounted) {
-          state = state.copyWith(
-            notice: '自动上下文压缩未完成:历史保持原样,后续仍会尝试',
-          );
+        if (_ownsMain(sessionId, epoch)) {
+          state = state.copyWith(notice: '自动上下文压缩未完成:历史保持原样,后续仍会尝试');
         }
       }
     } catch (_) {
       // 自动压缩是 best-effort:失败不落库、不掉轮。但不能完全静默 ——
       // 用户需要知道这次没有压成(经 ChatState.notice 一次性闪示)。
-      if (ref.mounted) {
+      if (_ownsMain(sessionId, epoch)) {
         state = state.copyWith(notice: '自动上下文压缩失败:历史保持原样,后续仍会尝试');
       }
     } finally {
-      if (ref.mounted) state = state.copyWith(busyCommand: null);
+      if (_ownsMain(sessionId, epoch)) {
+        state = state.copyWith(busyCommand: null);
+      }
     }
   }
 
   /// 删除单条消息(UI 长按删除)并刷新当前消息列表;返回恢复快照供撤销,
   /// 被拒绝(生成中)或行已不存在时返回 null。
   Future<DeletedMessageSnapshot?> deleteMessage(int messageId) async {
-    if (state.streaming || _busy) return null;
+    final sessionId = state.sessionId;
+    if (sessionId == null || state.streaming || _busy) return null;
     _invalidateBackground();
     final snapshot = await ref
         .read(messageRepositoryProvider)
         .deleteWithSnapshot(messageId);
     // 删一条消息对整体上下文的改动通常远小于字符估算的误差(÷3.2),上轮真实
     // 计数仍是最准的锚点 —— 保留它,不让圆环退回估算。
-    await _refreshMessages();
+    await _reloadWindow(sessionId);
     return snapshot;
   }
 
@@ -283,7 +306,34 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     }
     _invalidateBackground();
     await ref.read(messageRepositoryProvider).restoreDeleted(snapshot);
-    await _refreshMessages();
+    await _reloadWindow(snapshot.sessionId);
+  }
+
+  /// 批量删除当前会话的选中消息;返回撤销快照,忙碌或会话未就绪时返回 null。
+  Future<List<DeletedMessageSnapshot>?> deleteMessages(Set<int> ids) async {
+    final sessionId = state.sessionId;
+    if (state.streaming || _busy || sessionId == null || ids.isEmpty) {
+      return null;
+    }
+    _invalidateBackground();
+    final snapshots = await ref
+        .read(messageRepositoryProvider)
+        .deleteManyWithSnapshots(sessionId, ids);
+    await _reloadWindow(sessionId);
+    return snapshots;
+  }
+
+  /// 撤销批量删除;会话已切换/生成中时拒绝,避免恢复进错误的会话。
+  Future<void> restoreMessages(List<DeletedMessageSnapshot> snapshots) async {
+    if (snapshots.isEmpty) return;
+    if (state.streaming ||
+        _busy ||
+        snapshots.any((s) => s.sessionId != state.sessionId)) {
+      return;
+    }
+    _invalidateBackground();
+    await ref.read(messageRepositoryProvider).restoreManyDeleted(snapshots);
+    await _reloadWindow(snapshots.first.sessionId);
   }
 
   /// 编辑消息文本(UI 长按编辑),改写后刷新列表。
@@ -300,7 +350,8 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   /// 字段、文字保留;纯图无正文的清空后什么都不剩 —— 连整条消息一起移除,
   /// 不留一个空白气泡。生成/忙碌期间拒绝,与 [deleteMessage] 同一口径。
   Future<void> deleteMessageImage(int messageId) async {
-    if (state.streaming || _busy) return;
+    final sessionId = state.sessionId;
+    if (sessionId == null || state.streaming || _busy) return;
     final repo = ref.read(messageRepositoryProvider);
     final matches = state.messages.where((m) => m.id == messageId);
     final msg = matches.isEmpty ? null : matches.first;
@@ -312,7 +363,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     } else {
       await repo.clearImage(messageId);
     }
-    await _refreshMessages();
+    await _reloadWindow(sessionId);
   }
 
   /// 按落库的原始描述重新生成某条消息的图片并原地替换。
@@ -322,15 +373,79 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     final sessionId = state.sessionId;
     if (sessionId == null) return '尚未加载会话';
     if (state.regeneratingImageId != null) return '正在重新生成另一张图片,请稍候';
-    final backend = ref.read(imageBackendProvider);
-    if (backend == null) return '尚未配置生图服务';
     final repo = ref.read(messageRepositoryProvider);
     final storedPrompt = await repo.imagePromptFor(messageId);
     if (!ref.mounted || state.sessionId != sessionId) return null;
     final promptForGeneration = storedPrompt?.trim() ?? '';
     if (promptForGeneration.isEmpty) return '这张图片没有可用的原始描述,无法重新生成';
+    return _generateAndReplaceImage(
+      messageId: messageId,
+      expectedPrompt: storedPrompt!,
+      promptForGeneration: promptForGeneration,
+    );
+  }
 
+  /// 按用户确认的新描述只重绘一张图片并原地替换(后台单图提示词改写的第二步)。
+  ///
+  /// [expectedPrompt] 必须是生成建议时读到的旧描述原文:期间旧描述被改/图被删
+  /// 时条件更新失败,不覆盖另一条已变化的图片。成功后 `image_prompt` 与新图一起
+  /// 落库,并同步 [_lastMaintenanceImages],让之后 `/rerun` 仍按同一行替换。
+  Future<String?> regenerateImageWithPrompt(
+    int messageId, {
+    required String newPrompt,
+    required String expectedPrompt,
+  }) async {
+    final sessionId = state.sessionId;
+    if (sessionId == null) return '尚未加载会话';
+    if (state.regeneratingImageId != null) return '正在重新生成另一张图片,请稍候';
+    if (_backgroundInFlight || _backgroundImageTask != null) {
+      return '后台维护正在运行,请稍候再重绘';
+    }
+    if (newPrompt.trim().isEmpty) return '新的图片描述不能为空';
+    if (ref.read(imageBackendProvider) == null) return '尚未配置生图服务';
+    final repo = ref.read(messageRepositoryProvider);
+    final storedPrompt = await repo.imagePromptFor(messageId);
+    if (!ref.mounted || state.sessionId != sessionId) return null;
+    if (storedPrompt == null || storedPrompt.trim().isEmpty) {
+      return '这张图片没有可用的原始描述,无法重新生成';
+    }
+    if (storedPrompt != expectedPrompt) {
+      return '图片描述已被修改,请重新生成新的描述';
+    }
+    final prompt = newPrompt.trim();
+    final error = await _generateAndReplaceImage(
+      messageId: messageId,
+      expectedPrompt: expectedPrompt,
+      promptForGeneration: prompt,
+      newImagePrompt: prompt,
+    );
+    if (error == null) {
+      _updateLastMaintenanceImagePrompt(messageId, prompt);
+      // 仅在建议摘要仍是最新状态时收尾;期间后台维护已写过摘要则不覆盖。
+      if (state.backgroundStatus == BackgroundStatus.succeeded &&
+          state.backgroundSummary == _kImagePromptReadySummary) {
+        state = state.copyWith(backgroundSummary: '图片已按要求重新生成');
+      }
+    }
+    return error;
+  }
+
+  /// 单张图片生成并原地替换的共享实现(原样重绘 / 按新描述重绘共用)。
+  /// 调用方负责目标校验与并发门控;本方法自行置位/清理 [regeneratingImageId],
+  /// 失败一律保留旧图与旧描述。
+  Future<String?> _generateAndReplaceImage({
+    required int messageId,
+    required String expectedPrompt,
+    required String promptForGeneration,
+    String? newImagePrompt,
+  }) async {
+    final sessionId = state.sessionId;
+    if (sessionId == null) return '尚未加载会话';
+    final backend = ref.read(imageBackendProvider);
+    if (backend == null) return '尚未配置生图服务';
+    final repo = ref.read(messageRepositoryProvider);
     final sessionEpoch = _sessionEpoch;
+
     state = state.copyWith(regeneratingImageId: messageId);
     try {
       final ImageResult generated;
@@ -341,21 +456,42 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       }
       final image = generated.images.firstOrNull;
       if (image == null) return '未能生成新图片,请稍后重试';
-      var base64 = image.base64;
       final url = image.url;
-      if (base64 == null && url != null) {
-        base64 = await downloadImageBase64(url);
+      String? imageHash;
+      try {
+        final bytes = image.base64 != null
+            ? safeBase64Decode(image.base64)
+            : url != null
+            ? await downloadImageBytes(url)
+            : null;
+        if (image.base64 != null && bytes == null) {
+          return '重新生成失败:图片数据无效';
+        }
+        if (bytes != null) {
+          // URL 来源保留原字节,否则按哈希修复时重新下载的原图永远对不上;
+          // base64 无再取路径,可按设置压缩。
+          imageHash = (await repo.db.images.putBytes(
+            bytes,
+            compress: image.base64 != null,
+          )).hash;
+        }
+      } catch (e) {
+        return '重新生成失败:${_imageFailureText(e)}';
       }
       if (!ref.mounted ||
           state.sessionId != sessionId ||
           _sessionEpoch != sessionEpoch) {
         return null;
       }
+      if (imageHash == null && (url == null || url.isEmpty)) {
+        return '未能生成新图片,请稍后重试';
+      }
       final replaced = await repo.replaceImage(
         messageId,
-        imageBase64: base64,
+        imageHash: imageHash,
         imageUrl: url,
-        expectedPrompt: storedPrompt!,
+        expectedPrompt: expectedPrompt,
+        newImagePrompt: newImagePrompt,
       );
       if (!replaced) return '原图已被删除或修改,未替换';
       final revision = (state.imageRevisions[messageId] ?? 0) + 1;
@@ -369,6 +505,26 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         state = state.copyWith(regeneratingImageId: null);
       }
     }
+  }
+
+  /// 单图描述被人工改写后同步 `/rerun` 的替换目标:只更新已记录的那一行,
+  /// 不凭空新增目标。列表不可变,重建后整表替换。
+  void _updateLastMaintenanceImagePrompt(int messageId, String prompt) {
+    var found = false;
+    final updated = <BackgroundImagePlacement>[];
+    for (final entry in _lastMaintenanceImages) {
+      if (entry.messageId == messageId) {
+        found = true;
+        updated.add((
+          messageId: entry.messageId,
+          prompt: prompt,
+          replaced: entry.replaced,
+        ));
+      } else {
+        updated.add(entry);
+      }
+    }
+    if (found) _lastMaintenanceImages = List.unmodifiable(updated);
   }
 
   static String _imageFailureText(Object error) {
@@ -390,22 +546,20 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     _busy = true;
     try {
       _invalidateBackground();
+      final epoch = _sessionEpoch;
       await ref.read(messageRepositoryProvider).deleteFrom(assistantMessageId);
-      if (!ref.mounted) return;
-      final messages = await ref
-          .read(messageRepositoryProvider)
-          .bySessionSince(sessionId, sinceSeq: _windowFloor);
-      if (!ref.mounted) return;
+      if (!_ownsMain(sessionId, epoch)) return;
+      final messages = await _reloadWindow(sessionId);
+      if (messages == null) return;
       if (messages.isEmpty || messages.last.role != 'user') {
         // 没有可回应的用户消息(例如被剪到了空/只剩助手),刷新后退出。
-        state = state.copyWith(messages: messages);
         return;
       }
-      state = state.copyWith(messages: messages);
       // 剪断后消费待发通知;行落库在最后一条用户消息之后,组装期位置校正
       // 把它挪到该用户消息之前(字节对齐旧合成位置)。
       await _persistPendingNotices(sessionId);
-      await _generateReply();
+      if (!_ownsMain(sessionId, epoch)) return;
+      await _generateReply(sessionId: sessionId, epoch: epoch);
     } finally {
       _busy = false;
     }
@@ -446,20 +600,21 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     _busy = true;
     try {
       _invalidateBackground();
+      final epoch = _sessionEpoch;
       await ref.read(messageRepositoryProvider).deleteFrom(assistantMessageId);
-      if (!ref.mounted) return null;
-      final messages = await ref
-          .read(messageRepositoryProvider)
-          .bySessionSince(sessionId, sinceSeq: _windowFloor);
-      if (!ref.mounted) return null;
-      state = state.copyWith(messages: messages);
+      if (!_ownsMain(sessionId, epoch)) return null;
+      final messages = await _reloadWindow(sessionId);
+      if (messages == null) return null;
       // 通知落库在剪断之后:组装期位置校正会把它们挪到最新用户行之前。
       await _persistPendingNotices(sessionId);
+      if (!_ownsMain(sessionId, epoch)) return null;
       await _generateReply(
         rewrite: RewriteContext(
           instruction: requirement,
           previousReply: target.content,
         ),
+        sessionId: sessionId,
+        epoch: epoch,
       );
       return null;
     } finally {
@@ -482,7 +637,11 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   /// (contentFlag/quota/gatewayPolicy —— 风控拦截/额度不足/网关策略)且当前
   /// provider 目录还有其它模型时,记下切换目标并把展示名挂到错误横幅;
   /// 其余错误(transient 已由后端透明重试、auth 换模型无意义)不提供建议。
-  Future<void> _offerFallbackModel(UpstreamErrorKind kind) async {
+  Future<void> _offerFallbackModel(
+    UpstreamErrorKind kind, {
+    int? sessionId,
+    int? epoch,
+  }) async {
     const eligible = {
       UpstreamErrorKind.contentFlag,
       UpstreamErrorKind.quota,
@@ -490,7 +649,9 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     };
     if (!eligible.contains(kind)) return;
     final providers = await ref.read(llmProvidersProvider.future);
-    if (!ref.mounted) return;
+    final owns =
+        sessionId == null || _ownsMain(sessionId, epoch ?? _sessionEpoch);
+    if (!owns) return;
     final active = providers.where((p) => p.isActive).toList();
     if (active.isEmpty) return;
     final provider = active.first;
@@ -539,14 +700,15 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
 
     _busy = true;
     try {
+      final epoch = _sessionEpoch;
       // 世界书同步:与 _sendPipeline 同款(见 _syncWorldbook)。
       await _syncWorldbook();
-      if (!ref.mounted) return false;
+      if (!_ownsMain(sessionId, epoch)) return false;
       final beforeCtx = await _runHooks(
         HookTriggerPoint.beforeContextAssembly,
         {'userText': userText},
       );
-      if (!ref.mounted) return false;
+      if (!_ownsMain(sessionId, epoch)) return false;
       final rewritten = beforeCtx['userText'] is String
           ? beforeCtx['userText'] as String
           : userText;
@@ -554,11 +716,14 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       // 该路径不经 _sendPipeline,待发通知同样在此消费落库,
       // 避免滞留到下一次用户发送。
       await _persistPendingNotices(sessionId);
+      if (!_ownsMain(sessionId, epoch)) return false;
+      await _persistPendingVariableInjection(sessionId);
       await ref
           .read(messageRepositoryProvider)
           .append(sessionId: sessionId, role: 'user', content: rewritten);
       await _refreshMessages();
-      await _generateReply();
+      if (!_ownsMain(sessionId, epoch)) return true;
+      await _generateReply(sessionId: sessionId, epoch: epoch);
       return true;
     } finally {
       _busy = false;
@@ -569,8 +734,19 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   /// 进行中)返回 false 并给出可见提示 —— 此前 send 直接静默 return,而 UI
   /// 已先清空输入,用户打的内容凭空消失、无任何提示。
   bool trySend(String text) {
-    if (state.streaming || _busy) {
+    if (state.streaming || _busy || state.busyCommand != null) {
       state = state.copyWith(error: '正在处理中(生成/生图/压缩进行时),请稍候或按停止中断');
+      return false;
+    }
+    if (state.regeneratingImageId != null) {
+      state = state.copyWith(error: '正在重新生成图片,请稍候');
+      return false;
+    }
+    if (state.sessionId == null ||
+        state.character == null ||
+        ref.read(backendProvider) == null) {
+      // 装载窗口或后端缺失:此前返回 true 会让 UI 清空输入,而管线直接空跑。
+      state = state.copyWith(error: '会话尚未加载完成或未配置 LLM,消息未发送');
       return false;
     }
     _busy = true;
@@ -591,7 +767,17 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   /// 异步发送入口(与 [trySend] 对偶,不返回是否受理):正忙时静默返回,
   /// 未预期异常落到错误横幅。正常 UI 路径用 [trySend] 以保留输入框内容。
   Future<void> send(String text) async {
-    if (state.streaming || _busy) return;
+    if (state.streaming ||
+        _busy ||
+        state.busyCommand != null ||
+        state.regeneratingImageId != null) {
+      return;
+    }
+    if (state.sessionId == null ||
+        state.character == null ||
+        ref.read(backendProvider) == null) {
+      return;
+    }
     _busy = true;
     try {
       await _sendPipeline(text);
@@ -609,21 +795,31 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   /// —— 附件行的 seq 因此天然位于它所属的用户消息之前,组装无需重排;
   /// 最后追加用户消息并生成回复。@技能名 记号只在附件里展开:实际落库的
   /// 用户消息保留原话,请求出口再统一剥离触发记号。
-  Future<void> _sendPipeline(String text) async {
+  Future<void> _sendPipeline(
+    String text, {
+    int? expectedSessionId,
+    int? expectedEpoch,
+  }) async {
     final sessionId = state.sessionId;
+    final epoch = _sessionEpoch;
+    if (expectedSessionId != null &&
+        (sessionId != expectedSessionId || epoch != expectedEpoch)) {
+      return;
+    }
     final backend = ref.read(backendProvider);
     if (sessionId == null || state.character == null || backend == null) return;
+    final windowFloor = _windowFloor;
 
     // 世界书可能刚在聊天页外被改(世界书页/状态面板):引擎读的是 ChatState 里的
     // 快照,不重读的话启停/内容/删除都要等重进会话才生效。发送前对齐一次。
     await _syncWorldbook();
-    if (!ref.mounted) return;
+    if (!_ownsMain(sessionId, epoch)) return;
 
     final messageRepo = ref.read(messageRepositoryProvider);
     final beforeCtx = await _runHooks(HookTriggerPoint.beforeContextAssembly, {
       'userText': text,
     });
-    if (!ref.mounted) return;
+    if (!_ownsMain(sessionId, epoch)) return;
     final userText = beforeCtx['userText'] is String
         ? beforeCtx['userText'] as String
         : text;
@@ -634,7 +830,10 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     // 用户实际输入之前,用户输入始终是请求的最后一条消息。
     // 待发通知(压缩/记忆差异)也先落库为附件行,同样位于用户消息之前。
     await _persistPendingNotices(sessionId);
+    if (!_ownsMain(sessionId, epoch)) return;
     await _appendSessionAttachments(sessionId, userText);
+    // 后落库的变量注入行紧贴用户消息:附件段末尾、用户输入之前。
+    await _persistPendingVariableInjection(sessionId);
 
     // 用户消息**原样落库**(含 @技能名 记号):气泡/编辑所见即所得;记号在
     // 组装请求的出口统一剥离(见 _assembleSnapshot 的 stripSkillNames)。
@@ -643,9 +842,15 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       role: 'user',
       content: userText,
     );
-    // 窗口刷新(含刚落的附件行与用户消息),而非全量重读。
-    state = state.copyWith(messages: await _fetchCurrentWindow(sessionId));
-    await _generateReply();
+    // 窗口刷新(含刚落的附件行与用户消息),而非全量重读。窗口下界取本轮
+    // 发起时的值:切会话后 `_windowFloor` 已属于新会话。
+    final refreshed = await messageRepo.bySessionSince(
+      sessionId,
+      sinceSeq: windowFloor,
+    );
+    if (!_ownsMain(sessionId, epoch)) return;
+    state = state.copyWith(messages: refreshed);
+    await _generateReply(sessionId: sessionId, epoch: epoch);
   }
 
   /// 计算并落库本轮附件行(@技能 / 世界书触发):
@@ -723,13 +928,25 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
 
     // ② 世界书触发附件(常驻条目除外)。
     final triggered = assembler.matchTriggered(state.worldbook, matchText);
+    // 名字去重只对"唯一名字"生效:两条不同条目同名(或都无名字且前两个键
+    // 相同)时,按名字跳过会让后者被永久排除;此时退回只按 refId 去重。
+    final nameCounts = <String, int>{};
+    for (final e in state.worldbook) {
+      final name = e.name.trim().isNotEmpty
+          ? e.name
+          : e.keys.where((k) => k.isNotEmpty).take(2).join('、');
+      nameCounts.update(name, (v) => v + 1, ifAbsent: () => 1);
+    }
     for (final e in triggered) {
       final ref = AttachmentRef.worldbook(e.id ?? -1).value;
       if (e.id == null || injectedRefs.contains(ref)) continue;
       final name = e.name.trim().isNotEmpty
           ? e.name
           : e.keys.where((k) => k.isNotEmpty).take(2).join('、');
-      if (injectedWorldbookNames.contains(name)) continue;
+      if ((nameCounts[name] ?? 0) <= 1 &&
+          injectedWorldbookNames.contains(name)) {
+        continue;
+      }
       candidates.add(
         AttachmentCandidate(
           origin: AttachmentOrigin.worldbook,
@@ -773,14 +990,15 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
     _busy = true;
     try {
       _invalidateBackground();
+      final epoch = _sessionEpoch;
       await ref.read(messageRepositoryProvider).deleteFrom(userMessageId);
-      if (!ref.mounted) return;
-      final messages = await ref
-          .read(messageRepositoryProvider)
-          .bySessionSince(sessionId, sinceSeq: _windowFloor);
-      if (!ref.mounted) return;
-      state = state.copyWith(messages: messages);
-      await _sendPipeline(text);
+      if (!_ownsMain(sessionId, epoch)) return;
+      await _reloadWindow(sessionId);
+      await _sendPipeline(
+        text,
+        expectedSessionId: sessionId,
+        expectedEpoch: epoch,
+      );
     } finally {
       _busy = false;
     }
@@ -791,32 +1009,47 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
   /// (那是用户输入改写,只属于普通发送)。
   /// [rewrite] 非空时是"按要求重写最新回复":旧稿与要求只注入当次快照,
   /// 不落库、不随历史进入后续轮次。
-  Future<void> _generateReply({RewriteContext? rewrite}) async {
-    final sessionId = state.sessionId;
+  Future<void> _generateReply({
+    RewriteContext? rewrite,
+    required int sessionId,
+    required int epoch,
+  }) async {
+    if (!_ownsMain(sessionId, epoch)) return;
     final characterId = state.characterId;
     final character = state.character;
     final backend = ref.read(backendProvider);
-    if (sessionId == null || character == null || backend == null) return;
+    if (character == null || backend == null) return;
 
     // 本轮的中断令牌:入口换新实例并捕获,本轮全部的取消判定/唤醒通道都走
     // 这个局部引用 —— 后台轮或下一轮主写换发不影响在飞的本轮,上一轮遗留的
     // 取消也绝不会泄漏到本轮。
     _mainToken = InterruptToken();
     final token = _mainToken;
+    // 本轮归属:会话/代次未变且令牌仍是本轮实例时才允许写 UI 状态、压缩、
+    // 触发后台与持久化会话级汇总。数据库写入始终使用捕获的 sessionId。
+    bool owns() => _ownsMain(sessionId, epoch) && identical(_mainToken, token);
+    // 显示窗口下界属于发起会话:切会话后 load 会重置它,收尾不能再拿新下界
+    // 去读旧会话。
+    final windowFloor = _windowFloor;
 
     final messageRepo = ref.read(messageRepositoryProvider);
     final config = ref.read(backendConfigProvider);
-    if (config == null) return;
+    if (config == null) {
+      if (owns()) {
+        state = state.copyWith(error: '尚未配置 LLM 模型,本轮未生成回复');
+      }
+      return;
+    }
 
     try {
       // 组装窗口:全部未折叠活跃行(组装不再按条数裁剪)。
       var messages = await messageRepo.activeWindow(sessionId);
-      if (!ref.mounted) return;
+      if (!owns()) return;
 
       // 通知(压缩/记忆差异)已由调用方(_sendPipeline/_appendAndGenerate/
       // regenerate)落库为附件行,随历史自然进数组,此处不再合成插入。
       var snapshot = await _assembleSnapshot(messages, rewrite: rewrite);
-      if (snapshot == null || !ref.mounted) return;
+      if (snapshot == null || !owns()) return;
 
       // 硬挡预算检测(API 发送前):估算输入 + 输出预留超容量×80% 时先压缩
       // 再发 —— LLM 摘要压回目标挡(失败 1+3 次),仍超标机械截断兜底。
@@ -830,14 +1063,14 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         token: token,
         rewrite: rewrite,
       );
-      if (!ref.mounted) return;
+      if (!owns()) return;
       if (enforced != null) {
         if (enforced.compacted) {
           _compactNoticePending = true;
           await _persistPendingNotices(sessionId);
           messages = await messageRepo.activeWindow(sessionId);
           final rebuilt = await _assembleSnapshot(messages, rewrite: rewrite);
-          if (rebuilt != null && ref.mounted) snapshot = rebuilt;
+          if (rebuilt != null && owns()) snapshot = rebuilt;
         } else {
           messages = enforced.messages;
           snapshot = enforced.snapshot;
@@ -847,9 +1080,12 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       // 硬挡压缩期间用户按了停止:本轮发送就此中止(用户消息已落库保留,
       // 不再发起生成 —— 与流式中断的语义一致)。
       if (token.cancelled) {
-        if (ref.mounted) {
+        if (owns()) {
           state = state.copyWith(
-            messages: await _fetchCurrentWindow(sessionId),
+            messages: await messageRepo.bySessionSince(
+              sessionId,
+              sinceSeq: windowFloor,
+            ),
           );
         }
         return;
@@ -860,6 +1096,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         HookTriggerPoint.afterContextAssembly,
         {'systemPrompt': snapshot.systemPrompt},
       );
+      if (!owns()) return;
       final effectivePrompt = afterAssembly['systemPrompt'] is String
           ? afterAssembly['systemPrompt'] as String
           : snapshot.systemPrompt;
@@ -871,6 +1108,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         'temperature': config.temperature,
         'maxTokens': config.maxTokens,
       });
+      if (!owns()) return;
       final finalPrompt = beforeGenerate['systemPrompt'] is String
           ? beforeGenerate['systemPrompt'] as String
           : effectivePrompt;
@@ -915,6 +1153,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       );
 
       _setDraft('');
+      if (!owns()) return;
       state = state.copyWith(
         messages: messages,
         streaming: true,
@@ -934,7 +1173,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       UpstreamErrorKind? failureKind;
 
       void flushDraft() {
-        if (!ref.mounted || token.cancelled) return;
+        if (!owns() || token.cancelled) return;
         // 只写独立 draft provider,不再触碰 ChatState —— 这是流式期间唯一的
         // 高频写,拆出后整页 watch 不会被拖着重建。
         _setDraft(buffer.toString());
@@ -982,7 +1221,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
                     throttleTimer?.cancel();
                     throttleTimer = null;
                     failureKind ??= kind;
-                    state = state.copyWith(error: message);
+                    if (owns()) state = state.copyWith(error: message);
                   case ToolCallsEvent():
                     break; // 主写无工具消费方(tools 恒空),忽略。
                   case DoneEvent():
@@ -996,7 +1235,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
                 // 由灵岛展示。此前这里只暂存异常再上抛,而 send/_sendPipeline/
                 // _generateReply 全链路无 catch —— 用户看不到任何提示(打字指示器
                 // 无声消失),还成为未捕获异步异常。
-                if (ref.mounted && state.error == null) {
+                if (owns() && state.error == null) {
                   state = state.copyWith(error: '网络错误:$e');
                 }
                 finished.complete();
@@ -1027,9 +1266,9 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       } finally {
         throttleTimer?.cancel();
         throttleTimer = null;
-        if (ref.mounted) state = state.copyWith(streaming: false);
+        if (owns()) state = state.copyWith(streaming: false);
       }
-      if (!ref.mounted) return;
+      if (!owns()) return;
 
       // 契约漂移预警:连续 ≥3 轮以 contractViolation 失败 → 上游协议
       // 疑似变更,错误横幅加导语(保留最后一轮原文供排查);成功一轮或其它
@@ -1058,13 +1297,17 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
       // 生成失败的备用模型建议:流结束后按失败分类决定是否在
       // 错误横幅挂「切换备用模型」一键动作。被中断的轮次不提供建议。
       if (!token.cancelled && failureKind != null) {
-        await _offerFallbackModel(failureKind!);
+        await _offerFallbackModel(
+          failureKind!,
+          sessionId: sessionId,
+          epoch: epoch,
+        );
       }
 
       // 主写被中断:已生成的部分文本照样落库(不想保留可由用户自行删除),
       // 仍不压缩、不跑后台维护;零事件就停的空草稿不产生空回复。
       if (token.cancelled) {
-        _setDraft('');
+        if (owns()) _setDraft('');
         var finalText = buffer.toString();
         if (finalText.trim().isNotEmpty) {
           final afterStream = await _runHooks(HookTriggerPoint.afterStream, {
@@ -1088,7 +1331,7 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
             );
             messages = await messageRepo.bySessionSince(
               sessionId,
-              sinceSeq: _windowFloor,
+              sinceSeq: windowFloor,
             );
           }
         }
@@ -1096,18 +1339,19 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         // 主写收尾只刷新消息列表,不越权覆盖。
         // 被中断的请求同样消耗了上游计算:按已到达的用量记账(reported 为
         // false 时只计请求次数),不因中断丢账。
+        final usage = TokenUsage(
+          inputTokens: inTok,
+          outputTokens: outTok,
+          cachedInputTokens: cachedTok,
+        );
         await _recordUsage(
           sessionId: sessionId,
           kind: UsageKind.main,
           config: config,
-          usage: TokenUsage(
-            inputTokens: inTok,
-            outputTokens: outTok,
-            cachedInputTokens: cachedTok,
-          ),
-          reported: inTok > 0 || outTok > 0 || cachedTok > 0,
+          usage: usage,
+          reported: usage.hasAny,
         );
-        state = state.copyWith(messages: messages);
+        if (owns()) state = state.copyWith(messages: messages);
         return;
       }
 
@@ -1137,37 +1381,43 @@ abstract class ChatControllerPipeline extends ChatControllerBackground {
         );
         // 软挡自动压缩(按上下文占用率):回复落库后重算占用,达 60% 软挡即把
         // 活跃历史压回 20% 目标挡(摘要失败重试 3 次);best-effort 不掉轮。
-        await _autoCompactIfDue(
-          sessionId: sessionId,
-          model: config.model,
-          token: token,
-        );
+        if (owns()) {
+          await _autoCompactIfDue(
+            sessionId: sessionId,
+            model: config.model,
+            token: token,
+          );
+        }
       }
 
       // 先刷新消息与 token 统计再触发后台维护:回复立即可见,不等待后台 LLM。
       // 窗口刷新:回复落库后按当前窗口下界取回,而非全量重读。
       messages = await messageRepo.bySessionSince(
         sessionId,
-        sinceSeq: _windowFloor,
+        sinceSeq: windowFloor,
       );
-      _setDraft('');
       // 真实输入锚点重锚:inTok 即本轮主写请求(as-sent)的服务端精确计数。
       // 网关本轮未上报(0)时**整组沿用上一次已知的真实快照** —— 上下文规模与
       // 上轮几乎一致,清零只会让圆环退回字符估算(÷3.2,比已知实数更不准),还会
       // 把会话行持久化的锚点冲掉、重进会话后再也拿不回来。
       final hasUsage = inTok > 0;
       // 逐请求统计:记录本轮主写实际消耗(与下方会话级"最近一轮快照"分离)。
+      final requestUsage = TokenUsage(
+        inputTokens: inTok,
+        outputTokens: outTok,
+        cachedInputTokens: cachedTok,
+      );
       await _recordUsage(
         sessionId: sessionId,
         kind: UsageKind.main,
         config: config,
-        usage: TokenUsage(
-          inputTokens: inTok,
-          outputTokens: outTok,
-          cachedInputTokens: cachedTok,
-        ),
-        reported: inTok > 0 || outTok > 0 || cachedTok > 0,
+        usage: requestUsage,
+        reported: requestUsage.hasAny,
       );
+      // 会话已切换:本轮回复已写入发起会话的库(不会丢),但 UI 状态、软挡
+      // 压缩、后台维护与代次相关记账一律不能落到新会话上。
+      if (!owns()) return;
+      _setDraft('');
       state = state.copyWith(
         messages: messages,
         inputTokens: hasUsage ? inTok : state.inputTokens,

@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:microscritt/models/backend_config.dart';
+import 'package:microscritt/backend/anthropic_backend.dart';
 import 'package:microscritt/backend/backend_factory.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/backend/upstream_error.dart';
@@ -14,6 +15,43 @@ import 'package:microscritt/models/chat_message.dart';
 
 /// 测试统一的模型级「最大输出 tokens」:Anthropic 协议必填,由模型配置提供。
 const int testMaxTokens = 4096;
+
+/// 捕获一次请求体;用于逐档验证模型代际与 thinking 映射。
+Future<Map<String, dynamic>> _requestBodyFor({
+  required String model,
+  required ReasoningLevel level,
+  int maxTokens = 200000,
+  double temperature = 0.7,
+}) async {
+  late Map<String, dynamic> body;
+  final client = MockClient((req) async {
+    body = jsonDecode(req.body) as Map<String, dynamic>;
+    return http.Response.bytes(utf8.encode(''), 200);
+  });
+  final backend = createBackend(
+    BackendConfig(
+      provider: BackendProvider.anthropic,
+      baseUrl: 'https://x',
+      apiKey: 'k',
+      model: model,
+      maxTokens: maxTokens,
+    ),
+    client: client,
+  );
+  await backend
+      .generate(
+        LlmRequest(
+          model: model,
+          systemPrompt: 'sys',
+          messages: const [ChatMessage(ChatRole.user, 'hi')],
+          reasoningLevel: level,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        ),
+      )
+      .toList();
+  return body;
+}
 
 void main() {
   test('streams text deltas from Anthropic SSE with system field', () async {
@@ -99,54 +137,185 @@ void main() {
     expect(sent.headers['x-api-key'], 'k');
   });
 
-  test('message_start + message_delta usage snapshots merge into ONE UsageEvent', () async {
-    // message_start 报 input(+初始 output)、message_delta 报最终 output —— 都是
-    // 请求内累计快照;合并取最大、流结束时只发一次,上层按"每请求一次"累加。
+  test(
+    'message_start + message_delta usage snapshots merge into ONE UsageEvent',
+    () async {
+      // message_start 报 input(+初始 output)、message_delta 报最终 output —— 都是
+      // 请求内累计快照;合并取最大、流结束时只发一次,上层按"每请求一次"累加。
+      final body = [
+        'event: message_start',
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1,"cache_read_input_tokens":10}}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi!"}}',
+        '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}',
+        '',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+        '',
+      ].join('\n');
+      final client = MockClient((req) async {
+        return http.Response.bytes(utf8.encode(body), 200);
+      });
+      final backend = createBackend(
+        const BackendConfig(
+          provider: BackendProvider.anthropic,
+          baseUrl: 'https://x',
+          apiKey: 'k',
+          model: 'm',
+          maxTokens: testMaxTokens,
+        ),
+        client: client,
+      );
+
+      final events = await backend
+          .generate(
+            LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: const [ChatMessage(ChatRole.user, 'hi')],
+              temperature: 0.7,
+            ),
+          )
+          .toList();
+
+      final usages = events.whereType<UsageEvent>().toList();
+      expect(usages, hasLength(1));
+      // 官方 input_tokens(25)不含缓存命中(10):总输入按 25 + 10 = 35 归一。
+      expect(usages.single.usage.inputTokens, 35);
+      expect(usages.single.usage.outputTokens, 42);
+      expect(usages.single.usage.cachedInputTokens, 10);
+      expect(usages.single.usage.uncachedInputTokens, 25);
+    },
+  );
+
+  test(
+    'message_stop ends the read immediately (keep-alive gateway does not hang)',
+    () async {
+      // keep-alive 网关出完 message_stop 后仍保活数十秒:不主动 break 会一直
+      // 等到空闲超时,把已完成的请求误报成故障并丢掉 Done/Usage。
+      final stream = StreamController<List<int>>();
+      final body = '${[
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}',
+        '',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+        '',
+      ].join('\n')}\n';
+      stream.add(utf8.encode(body)); // 事件以空行收尾,之后不关流
+      final client = MockClient.streaming(
+        (req, _) async => http.StreamedResponse(stream.stream, 200),
+      );
+      final backend = AnthropicBackend(
+        config: const BackendConfig(
+          provider: BackendProvider.anthropic,
+          baseUrl: 'https://x',
+          apiKey: 'k',
+          model: 'm',
+          maxTokens: testMaxTokens,
+        ),
+        client: client,
+        idleTimeout: const Duration(seconds: 5),
+      );
+
+      final events = await backend
+          .generate(
+            LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: const [ChatMessage(ChatRole.user, 'hi')],
+              temperature: 0.7,
+            ),
+          )
+          .toList()
+          .timeout(const Duration(seconds: 2));
+
+      expect(events.whereType<TextDelta>().map((e) => e.text).join(), 'Hi');
+      expect(events.whereType<DoneEvent>(), isNotEmpty);
+      await stream.close();
+    },
+  );
+
+  test('usage snapshot precedes a stream error (failure keeps usage)', () async {
+    // 上层在 ErrorEvent 到达时即落定失败结果:Error 先于 Usage 会让已计量
+    // token 归零。顺序必须是 Usage → Error。
     final body = [
       'event: message_start',
-      'data: {"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1,"cache_read_input_tokens":10}}}',
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":5}}}',
       '',
-      'event: content_block_delta',
-      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi!"}}',
-      '',
-      'event: message_delta',
-      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}',
-      '',
-      'event: message_stop',
-      'data: {"type":"message_stop"}',
+      'event: error',
+      'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
       '',
     ].join('\n');
-    final client = MockClient((req) async {
-      return http.Response.bytes(utf8.encode(body), 200);
-    });
-    final backend = createBackend(
-      const BackendConfig(
+    final backend = AnthropicBackend(
+      config: const BackendConfig(
         provider: BackendProvider.anthropic,
         baseUrl: 'https://x',
         apiKey: 'k',
         model: 'm',
         maxTokens: testMaxTokens,
       ),
-      client: client,
+      client: MockClient(
+        (req) async => http.Response.bytes(utf8.encode(body), 200),
+      ),
     );
 
     final events = await backend
         .generate(
-          LlmRequest(
+          const LlmRequest(
             model: 'm',
             systemPrompt: 'sys',
-            messages: const [ChatMessage(ChatRole.user, 'hi')],
+            messages: [ChatMessage(ChatRole.user, 'hi')],
             temperature: 0.7,
           ),
         )
         .toList();
 
-    final usages = events.whereType<UsageEvent>().toList();
-    expect(usages, hasLength(1));
-    expect(usages.single.usage.inputTokens, 25);
-    expect(usages.single.usage.outputTokens, 42);
-    expect(usages.single.usage.cachedInputTokens, 10);
+    final usageIndex = events.indexWhere((e) => e is UsageEvent);
+    final errorIndex = events.indexWhere((e) => e is ErrorEvent);
+    expect(usageIndex, isNonNegative);
+    expect(errorIndex, greaterThan(usageIndex));
+    expect((events[usageIndex] as UsageEvent).usage.inputTokens, 15);
   });
+
+  test(
+    'normal stop with no text/thinking/tools surfaces a contentFlag error',
+    () async {
+      final body = [
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+        '',
+      ].join('\n');
+      final backend = AnthropicBackend(
+        config: const BackendConfig(
+          provider: BackendProvider.anthropic,
+          baseUrl: 'https://x',
+          apiKey: 'k',
+          model: 'm',
+          maxTokens: testMaxTokens,
+        ),
+        client: MockClient(
+          (req) async => http.Response.bytes(utf8.encode(body), 200),
+        ),
+      );
+      final events = await backend
+          .generate(
+            const LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: [ChatMessage(ChatRole.user, 'hi')],
+              temperature: 0.7,
+            ),
+          )
+          .toList();
+      final errors = events.whereType<ErrorEvent>().toList();
+      expect(errors, hasLength(1));
+      expect(errors.single.kind, UpstreamErrorKind.contentFlag);
+    },
+  );
 
   test(
     'cacheContext adds an ephemeral cache_control on the last message',
@@ -273,7 +442,8 @@ void main() {
       expect(variableBlock['text'], 'variable part');
       expect(variableBlock.containsKey('cache_control'), isFalse);
       // 消息末条断点仍保留(双断点:system 稳定块 + messages 末条),断点在块内。
-      final lastMsg = (withCache['messages'] as List).last as Map<String, dynamic>;
+      final lastMsg =
+          (withCache['messages'] as List).last as Map<String, dynamic>;
       final block = (lastMsg['content'] as List).single as Map<String, dynamic>;
       expect(block['cache_control'], {'type': 'ephemeral'});
     },
@@ -314,10 +484,9 @@ void main() {
       // system 仍拆成稳定/可变两块,断点只在稳定块。
       final system = body['system'] as List;
       expect(system.length, 2);
-      expect(
-        (system.first as Map<String, dynamic>)['cache_control'],
-        {'type': 'ephemeral'},
-      );
+      expect((system.first as Map<String, dynamic>)['cache_control'], {
+        'type': 'ephemeral',
+      });
       expect(
         (system.last as Map<String, dynamic>).containsKey('cache_control'),
         isFalse,
@@ -512,184 +681,320 @@ void main() {
     expect(body['max_tokens'], 40000);
   });
 
-  test('missing max output tokens fails fast with a configuration error', () async {
-    // Anthropic 的 max_tokens 必填;模型配置与请求都未给时不猜测兜底值,
-    // 本地直接返回配置错误,且不发网络请求。
-    var requests = 0;
-    final backend = createBackend(
-      const BackendConfig(
-        provider: BackendProvider.anthropic,
-        baseUrl: 'https://x',
-        apiKey: 'k',
-        model: 'm',
-      ),
-      client: MockClient((req) async {
-        requests++;
-        return http.Response.bytes(utf8.encode(''), 200);
-      }),
-    );
-    final events = await backend
-        .generate(const LlmRequest(
+  test(
+    'missing max output tokens fails fast with a configuration error',
+    () async {
+      // Anthropic 的 max_tokens 必填;模型配置与请求都未给时不猜测兜底值,
+      // 本地直接返回配置错误,且不发网络请求。
+      var requests = 0;
+      final backend = createBackend(
+        const BackendConfig(
+          provider: BackendProvider.anthropic,
+          baseUrl: 'https://x',
+          apiKey: 'k',
           model: 'm',
-          systemPrompt: 'sys',
-          messages: [ChatMessage(ChatRole.user, 'hi')],
-          temperature: 1,
-        ))
-        .toList();
-    final error = events.single as ErrorEvent;
-    expect(error.kind, UpstreamErrorKind.configuration);
-    expect(error.message, contains('最大输出 tokens'));
-    expect(requests, 0, reason: '配置缺失属本地错误,不应发网络请求');
+        ),
+        client: MockClient((req) async {
+          requests++;
+          return http.Response.bytes(utf8.encode(''), 200);
+        }),
+      );
+      final events = await backend
+          .generate(
+            const LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: [ChatMessage(ChatRole.user, 'hi')],
+              temperature: 1,
+            ),
+          )
+          .toList();
+      final error = events.single as ErrorEvent;
+      expect(error.kind, UpstreamErrorKind.configuration);
+      expect(error.message, contains('最大输出 tokens'));
+      expect(requests, 0, reason: '配置缺失属本地错误,不应发网络请求');
+    },
+  );
+
+  test(
+    'thinking clamps budget to max_tokens and omits temperature (API hard constraints)',
+    () async {
+      // API 硬性约束:max_tokens 必须 > budget_tokens(≥1024),且开启 thinking
+      // 时不得携带 temperature;上限不足时把 budget 收缩到 max_tokens − 1024。
+      late Map<String, dynamic> body;
+      final client = MockClient((req) async {
+        body = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response.bytes(utf8.encode(''), 200);
+      });
+      final backend = createBackend(
+        const BackendConfig(
+          provider: BackendProvider.anthropic,
+          baseUrl: 'https://x',
+          apiKey: 'k',
+          model: 'm',
+          maxTokens: testMaxTokens,
+        ),
+        client: client,
+      );
+
+      // ① 请求未带上限时使用模型配置的 4096:medium 档(10000)预算收缩到 3072。
+      await backend
+          .generate(
+            const LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: [ChatMessage(ChatRole.user, 'hi')],
+              reasoningLevel: ReasoningLevel.medium,
+              temperature: 0.7,
+            ),
+          )
+          .toList();
+      expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 3072});
+      expect(body['max_tokens'], testMaxTokens);
+      expect(body.containsKey('temperature'), isFalse);
+
+      // ② 极小 max_tokens(2048):预算收缩到最低档 1024,上限不动。
+      await backend
+          .generate(
+            const LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: [ChatMessage(ChatRole.user, 'hi')],
+              reasoningLevel: ReasoningLevel.high,
+              maxTokens: 2048,
+              temperature: 1,
+            ),
+          )
+          .toList();
+      expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 1024});
+      expect(body['max_tokens'], 2048);
+
+      // ③ 中等 max_tokens:预算收缩到 max_tokens − 1024,上限不动。
+      await backend
+          .generate(
+            const LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: [ChatMessage(ChatRole.user, 'hi')],
+              reasoningLevel: ReasoningLevel.high,
+              maxTokens: 8192,
+              temperature: 1,
+            ),
+          )
+          .toList();
+      expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 7168});
+      expect(body['max_tokens'], 8192);
+      expect(body.containsKey('temperature'), isFalse);
+
+      // ④ off:temperature 正常携带;请求未带上限仍用模型配置值。
+      await backend
+          .generate(
+            const LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: [ChatMessage(ChatRole.user, 'hi')],
+              temperature: 0.7,
+            ),
+          )
+          .toList();
+      expect(body.containsKey('thinking'), isFalse);
+      expect(body['temperature'], 0.7);
+      expect(body['max_tokens'], testMaxTokens);
+    },
+  );
+
+  test('legacy Claude models map every non-off level to a budget', () async {
+    const expected = {
+      ReasoningLevel.minimal: 2048,
+      ReasoningLevel.low: 5000,
+      ReasoningLevel.medium: 10000,
+      ReasoningLevel.high: 30000,
+      ReasoningLevel.xhigh: 50000,
+      ReasoningLevel.max: 100000,
+    };
+    for (final entry in expected.entries) {
+      final body = await _requestBodyFor(
+        model: 'claude-sonnet-4-5-20250929',
+        level: entry.key,
+      );
+      expect(body['thinking'], {
+        'type': 'enabled',
+        'budget_tokens': entry.value,
+      }, reason: entry.key.name);
+      expect(body.containsKey('temperature'), isFalse);
+      expect(body['max_tokens'], 200000);
+    }
+
+    final off = await _requestBodyFor(
+      model: 'claude-sonnet-4-5-20250929',
+      level: ReasoningLevel.off,
+    );
+    expect(off.containsKey('thinking'), isFalse);
+    expect(off['temperature'], 0.7);
   });
 
-  test('thinking clamps budget to max_tokens and omits temperature (API hard constraints)', () async {
-    // API 硬性约束:max_tokens 必须 > budget_tokens(≥1024),且开启 thinking
-    // 时不得携带 temperature;上限不足时把 budget 收缩到 max_tokens − 1024。
-    late Map<String, dynamic> body;
-    final client = MockClient((req) async {
-      body = jsonDecode(req.body) as Map<String, dynamic>;
-      return http.Response.bytes(utf8.encode(''), 200);
-    });
-    final backend = createBackend(
-      const BackendConfig(
-        provider: BackendProvider.anthropic,
-        baseUrl: 'https://x',
-        apiKey: 'k',
-        model: 'm',
-        maxTokens: testMaxTokens,
-      ),
-      client: client,
-    );
-
-    // ① 请求未带上限时使用模型配置的 4096:medium 档(10000)预算收缩到 3072。
-    await backend.generate(const LlmRequest(
-      model: 'm',
-      systemPrompt: 'sys',
-      messages: [ChatMessage(ChatRole.user, 'hi')],
-      reasoningLevel: ReasoningLevel.medium,
-      temperature: 0.7,
-    )).toList();
-    expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 3072});
-    expect(body['max_tokens'], testMaxTokens);
-    expect(body.containsKey('temperature'), isFalse);
-
-    // ② 极小 max_tokens(2048):预算收缩到最低档 1024,上限不动。
-    await backend.generate(const LlmRequest(
-      model: 'm',
-      systemPrompt: 'sys',
-      messages: [ChatMessage(ChatRole.user, 'hi')],
-      reasoningLevel: ReasoningLevel.high,
-      maxTokens: 2048,
-      temperature: 1,
-    )).toList();
-    expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 1024});
-    expect(body['max_tokens'], 2048);
-
-    // ③ 中等 max_tokens:预算收缩到 max_tokens − 1024,上限不动。
-    await backend.generate(const LlmRequest(
-      model: 'm',
-      systemPrompt: 'sys',
-      messages: [ChatMessage(ChatRole.user, 'hi')],
-      reasoningLevel: ReasoningLevel.high,
+  test('legacy xhigh/max budgets still shrink to the output cap', () async {
+    final body = await _requestBodyFor(
+      model: 'claude-sonnet-4-5',
+      level: ReasoningLevel.max,
       maxTokens: 8192,
-      temperature: 1,
-    )).toList();
+    );
     expect(body['thinking'], {'type': 'enabled', 'budget_tokens': 7168});
     expect(body['max_tokens'], 8192);
-    expect(body.containsKey('temperature'), isFalse);
-
-    // ④ off:temperature 正常携带;请求未带上限仍用模型配置值。
-    await backend.generate(const LlmRequest(
-      model: 'm',
-      systemPrompt: 'sys',
-      messages: [ChatMessage(ChatRole.user, 'hi')],
-      temperature: 0.7,
-    )).toList();
-    expect(body.containsKey('thinking'), isFalse);
-    expect(body['temperature'], 0.7);
-    expect(body['max_tokens'], testMaxTokens);
   });
 
-  test('mid-stream type:error event yields ErrorEvent with the provider message (not swallowed)', () async {
-    // overloaded/rate-limit 等错误以 SSE 事件形态出现在流中途:不在 switch 里
-    // 显式处理就会被静默漏过,缓冲区空/半截,上层误判成"解析失败"。
-    final body = [
-      'event: content_block_delta',
-      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}',
-      '',
-      'event: error',
-      'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
-      '',
-    ].join('\n');
-    final client = MockClient((req) async {
-      return http.Response.bytes(utf8.encode(body), 200);
-    });
-    final backend = createBackend(
-      const BackendConfig(
-        provider: BackendProvider.anthropic,
-        baseUrl: 'https://x',
-        apiKey: 'k',
-        model: 'm',
+  test('Claude 4.6+ maps levels to adaptive effort', () async {
+    const expected = {
+      ReasoningLevel.minimal: 'low',
+      ReasoningLevel.low: 'low',
+      ReasoningLevel.medium: 'medium',
+      ReasoningLevel.high: 'high',
+      ReasoningLevel.xhigh: 'xhigh',
+      ReasoningLevel.max: 'max',
+    };
+    for (final entry in expected.entries) {
+      final body = await _requestBodyFor(
+        model: 'claude-opus-4-6-v1',
+        level: entry.key,
         maxTokens: testMaxTokens,
-      ),
-      client: client,
-    );
-
-    final events = await backend
-        .generate(
-          LlmRequest(
-            model: 'm',
-            systemPrompt: 'sys',
-            messages: const [ChatMessage(ChatRole.user, 'hi')],
-            temperature: 0.7,
-          ),
-        )
-        .toList();
-
-    expect(events.whereType<TextDelta>().map((e) => e.text).join(), 'Hi');
-    final errors = events.whereType<ErrorEvent>().toList();
-    expect(errors, hasLength(1));
-    expect(errors.single.message, contains('Overloaded'));
+      );
+      expect(body['thinking'], {'type': 'adaptive'}, reason: entry.key.name);
+      expect(body['output_config'], {
+        'effort': entry.value,
+      }, reason: entry.key.name);
+      expect(body.containsKey('temperature'), isFalse);
+      expect(body['max_tokens'], testMaxTokens);
+    }
   });
 
-  test('stream ending without message_stop surfaces an ErrorEvent (connection closed early)', () async {
-    // 连接被提前掐断时 http 层静默完成、不抛错 —— 不检测就会表现为"模型未返回
-    // 任何内容"的解析失败;透出后上层按可重试的后端故障处理。
-    final body = [
-      'event: content_block_delta',
-      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}',
-      '',
-    ].join('\n');
-    final client = MockClient((req) async {
-      return http.Response.bytes(utf8.encode(body), 200);
-    });
-    final backend = createBackend(
-      const BackendConfig(
-        provider: BackendProvider.anthropic,
-        baseUrl: 'https://x',
-        apiKey: 'k',
-        model: 'm',
-        maxTokens: testMaxTokens,
-      ),
-      client: client,
+  test('date-suffixed model IDs pick the right thinking generation', () async {
+    final legacy = await _requestBodyFor(
+      model: 'anthropic.claude-sonnet-4-20250514',
+      level: ReasoningLevel.high,
+      maxTokens: 40000,
     );
+    expect(legacy['thinking'], {'type': 'enabled', 'budget_tokens': 30000});
 
-    final events = await backend
-        .generate(
-          LlmRequest(
-            model: 'm',
-            systemPrompt: 'sys',
-            messages: const [ChatMessage(ChatRole.user, 'hi')],
-            temperature: 0.7,
-          ),
-        )
-        .toList();
-
-    expect(events.whereType<DoneEvent>(), isEmpty);
-    final errors = events.whereType<ErrorEvent>().toList();
-    expect(errors, hasLength(1));
-    expect(errors.single.message, contains('message_stop'));
+    final adaptive = await _requestBodyFor(
+      model: 'claude-sonnet-4-6-20250514',
+      level: ReasoningLevel.high,
+      maxTokens: 40000,
+    );
+    expect(adaptive['thinking'], {'type': 'adaptive'});
+    expect(adaptive['output_config'], {'effort': 'high'});
   });
+
+  test('adaptive off modes avoid illegal thinking payloads', () async {
+    final disabled = await _requestBodyFor(
+      model: 'claude-opus-4-6',
+      level: ReasoningLevel.off,
+    );
+    expect(disabled['thinking'], {'type': 'disabled'});
+    expect(disabled['temperature'], 0.7);
+    expect(disabled.containsKey('output_config'), isFalse);
+
+    final betweenTools = await _requestBodyFor(
+      model: 'claude-sonnet-5-5',
+      level: ReasoningLevel.off,
+    );
+    expect(betweenTools['thinking'], {'type': 'between_tools'});
+    expect(betweenTools.containsKey('temperature'), isFalse);
+
+    final omitted = await _requestBodyFor(
+      model: 'claude-opus-5-5',
+      level: ReasoningLevel.off,
+    );
+    expect(omitted.containsKey('thinking'), isFalse);
+    expect(omitted.containsKey('temperature'), isFalse);
+    expect(omitted.containsKey('output_config'), isFalse);
+  });
+
+  test(
+    'mid-stream type:error event yields ErrorEvent with the provider message (not swallowed)',
+    () async {
+      // overloaded/rate-limit 等错误以 SSE 事件形态出现在流中途:不在 switch 里
+      // 显式处理就会被静默漏过,缓冲区空/半截,上层误判成"解析失败"。
+      final body = [
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}',
+        '',
+        'event: error',
+        'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+        '',
+      ].join('\n');
+      final client = MockClient((req) async {
+        return http.Response.bytes(utf8.encode(body), 200);
+      });
+      final backend = createBackend(
+        const BackendConfig(
+          provider: BackendProvider.anthropic,
+          baseUrl: 'https://x',
+          apiKey: 'k',
+          model: 'm',
+          maxTokens: testMaxTokens,
+        ),
+        client: client,
+      );
+
+      final events = await backend
+          .generate(
+            LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: const [ChatMessage(ChatRole.user, 'hi')],
+              temperature: 0.7,
+            ),
+          )
+          .toList();
+
+      expect(events.whereType<TextDelta>().map((e) => e.text).join(), 'Hi');
+      final errors = events.whereType<ErrorEvent>().toList();
+      expect(errors, hasLength(1));
+      expect(errors.single.message, contains('Overloaded'));
+    },
+  );
+
+  test(
+    'stream ending without message_stop surfaces an ErrorEvent (connection closed early)',
+    () async {
+      // 连接被提前掐断时 http 层静默完成、不抛错 —— 不检测就会表现为"模型未返回
+      // 任何内容"的解析失败;透出后上层按可重试的后端故障处理。
+      final body = [
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}',
+        '',
+      ].join('\n');
+      final client = MockClient((req) async {
+        return http.Response.bytes(utf8.encode(body), 200);
+      });
+      final backend = createBackend(
+        const BackendConfig(
+          provider: BackendProvider.anthropic,
+          baseUrl: 'https://x',
+          apiKey: 'k',
+          model: 'm',
+          maxTokens: testMaxTokens,
+        ),
+        client: client,
+      );
+
+      final events = await backend
+          .generate(
+            LlmRequest(
+              model: 'm',
+              systemPrompt: 'sys',
+              messages: const [ChatMessage(ChatRole.user, 'hi')],
+              temperature: 0.7,
+            ),
+          )
+          .toList();
+
+      expect(events.whereType<DoneEvent>(), isEmpty);
+      final errors = events.whereType<ErrorEvent>().toList();
+      expect(errors, hasLength(1));
+      expect(errors.single.message, contains('message_stop'));
+    },
+  );
 
   test('cancelling the subscription closes the connection (abort)', () async {
     // 回归防护「打断后请求在服务端跑到自然结束」:响应字节流永不完成(模型
@@ -702,18 +1007,26 @@ void main() {
       ),
     );
     final backend = createBackend(
-      const BackendConfig(provider: BackendProvider.anthropic, baseUrl: 'https://x', apiKey: 'k', model: 'm', maxTokens: testMaxTokens),
+      const BackendConfig(
+        provider: BackendProvider.anthropic,
+        baseUrl: 'https://x',
+        apiKey: 'k',
+        model: 'm',
+        maxTokens: testMaxTokens,
+      ),
       client: client,
     );
 
     final events = <LlmEvent>[];
     final sub = backend
-        .generate(LlmRequest(
-          model: 'm',
-          systemPrompt: 'sys',
-          messages: const [ChatMessage(ChatRole.user, 'hi')],
-          temperature: 0.7,
-        ))
+        .generate(
+          LlmRequest(
+            model: 'm',
+            systemPrompt: 'sys',
+            messages: const [ChatMessage(ChatRole.user, 'hi')],
+            temperature: 0.7,
+          ),
+        )
         .listen(events.add);
     await Future<void>.delayed(const Duration(milliseconds: 20));
     await sub.cancel();
@@ -727,7 +1040,8 @@ class _CloseTrackingClient extends MockClient {
   // 显式转发到 streaming 具名构造:super 参数会错误绑定到无名构造的形参类型。
   // ignore: use_super_parameters
   _CloseTrackingClient.streaming(
-    Future<http.StreamedResponse> Function(http.BaseRequest, http.ByteStream) fn,
+    Future<http.StreamedResponse> Function(http.BaseRequest, http.ByteStream)
+    fn,
   ) : super.streaming(fn);
   @override
   void close() {

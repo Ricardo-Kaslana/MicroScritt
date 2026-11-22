@@ -44,6 +44,10 @@ abstract class ChatControllerSession extends ChatControllerContext {
     required int sessionId,
     required CharacterCard character,
   }) async {
+    // 切换会话即中止在飞主写:旧流后续的 await 会因代次变化丢弃状态写入,
+    // 但先取消令牌能让网络流尽快断开,避免继续消耗用量并跑到新会话里压缩。
+    _mainToken.cancel();
+    _mainToken = InterruptToken();
     _invalidateBackground();
     _sessionEpoch++;
     final epoch = _backgroundEpoch;
@@ -101,7 +105,7 @@ abstract class ChatControllerSession extends ChatControllerContext {
     _backgroundCursorSeq = null;
     _auditCounter = 0;
     // 基线上下文预览:打开会话即能看到"当前上下文里有什么",不必先发一条消息。
-    // 变量不参与主写组装(只进后台 agent 上下文),故此处不读 variables;
+    // 变量默认不参与主写组装(Agentic 注入走附件行),故此处不读 variables;
     // 技能同理不进组装(只有 @ 触发附件,随消息历史进数组)。
     final snapshot = ContextAssembler().assemble(
       character: character,
@@ -146,13 +150,22 @@ abstract class ChatControllerSession extends ChatControllerContext {
     await _reassembleContext();
   }
 
-  /// 按当前窗口下界抓取消息(不重算边界)。[load] 经
-  /// `MessageRepository.sessionWindow` 计算下界;运行期刷新(发送/压缩/回滚)
-  /// 用本方法 —— 分页补进来的历史在刷新后保持在窗。
-  Future<List<Message>> _fetchCurrentWindow(int sessionId) {
-    return ref
+  /// 按当前窗口口径整体重载:删除可能移除了窗口下界所在行,继续用旧
+  /// [floor] 会把剩余历史全部滤掉(表现为聊天页空窗口、无法补页)。重算
+  /// 边界并同步 `canLoadOlder`;返回 null 表示会话已切换,调用方应放弃。
+  Future<List<Message>?> _reloadWindow(int sessionId) async {
+    final epoch = _sessionEpoch;
+    final window = await ref
         .read(messageRepositoryProvider)
-        .bySessionSince(sessionId, sinceSeq: _windowFloor);
+        .sessionWindow(
+          sessionId: sessionId,
+          displayCount: ChatControllerBase._historyWindowRows,
+        );
+    if (!_ownsMain(sessionId, epoch)) return null;
+    _windowFloor = window.floor;
+    final rows = window.rows;
+    state = state.copyWith(messages: rows, canLoadOlder: window.floor != null);
+    return rows;
   }
 
   /// 向上分页:在当前窗口之前再补一页历史(显示口径行)。由聊天页贴顶时
@@ -163,6 +176,7 @@ abstract class ChatControllerSession extends ChatControllerContext {
     final sessionId = state.sessionId;
     if (sessionId == null || !state.canLoadOlder || _loadingOlder) return;
     if (state.streaming || _busy) return;
+    final epoch = _sessionEpoch;
     final floor = _windowFloor;
     if (floor == null) return;
     _loadingOlder = true;
@@ -175,7 +189,7 @@ abstract class ChatControllerSession extends ChatControllerContext {
             beforeSeq: floor,
             limit: ChatControllerBase._historyPageRows,
           );
-      if (!ref.mounted) return;
+      if (!_ownsMain(sessionId, epoch)) return;
       if (page.isEmpty) {
         state = state.copyWith(canLoadOlder: false, loadingOlder: false);
         return;
@@ -210,9 +224,16 @@ abstract class ChatControllerSession extends ChatControllerContext {
   Future<bool> revealMessage(int messageId) async {
     final sessionId = state.sessionId;
     if (sessionId == null || !ref.mounted || _loadingOlder) return false;
+    // 连点/并发定位:只允许最新一次请求改写显示窗口。先发请求的 DB 查询
+    // 晚到时若仍按自己的结果落库,会把窗口从新目标 B 拉回旧目标 A。
+    final request = ++_revealWindowSeq;
     final repo = ref.read(messageRepositoryProvider);
     final target = await repo.locate(messageId);
-    if (!ref.mounted || state.sessionId != sessionId) return false;
+    if (!ref.mounted ||
+        state.sessionId != sessionId ||
+        request != _revealWindowSeq) {
+      return false;
+    }
     if (target == null || target.sessionId != sessionId || !target.visible) {
       return false;
     }
@@ -223,7 +244,11 @@ abstract class ChatControllerSession extends ChatControllerContext {
       );
     }
     final messages = await repo.bySessionSince(sessionId, sinceSeq: target.seq);
-    if (!ref.mounted || state.sessionId != sessionId) return false;
+    if (!ref.mounted ||
+        state.sessionId != sessionId ||
+        request != _revealWindowSeq) {
+      return false;
+    }
     if (!messages.any((m) => m.id == messageId)) return false;
     // 让在飞的旧窗口刷新失效(它按旧 floor 读,晚到会覆盖掉目标)。
     _messageFetchSeq++;

@@ -15,6 +15,7 @@ import '../backend/upstream_error.dart';
 import '../models/prompt_item.dart';
 import '../context/attachment_budget.dart';
 import '../context/context_assembler.dart';
+import '../data/image_codec.dart';
 import '../data/message_repository.dart';
 import '../engine/background_agent.dart';
 import '../engine/background_engine.dart';
@@ -51,6 +52,10 @@ part 'chat_controller_pipeline.dart';
 part 'chat_controller_commands.dart';
 part 'chat_controller_session.dart';
 part 'chat_controller_background.dart';
+
+/// 单图提示词改写已产出建议、等待用户确认重绘时的状态摘要。第二步只在它
+/// 仍是最新摘要时替换为完成文案,避免覆盖期间启动的后台维护摘要。
+const String _kImagePromptReadySummary = '新的图片描述已生成,确认后重新生成';
 
 /// [ChatController] 的共享状态基类:全部可变字段(忙碌门控/窗口游标/中断
 /// 令牌/记忆冻结副本/后台游标等)集中在此;各 mixin part 携带方法组,
@@ -114,6 +119,12 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
   /// 消息列表刷新序号:并发刷新(后台追加图片 / 原地替换 / 发送收尾)时只允许
   /// 最新一次查询结果落进 state,晚到的旧快照不得覆盖新图。
   int _messageFetchSeq = 0;
+
+  /// 定位扩窗序号:并发/连点搜索与导航时,只允许最新一次 [revealMessage]
+  /// 把显示窗口换成自己的结果。旧请求的 DB 查询晚到时据此作废 —— 否则
+  /// 后发请求已把窗口移到目标 B,先发请求晚到的 `bySessionSince(A)` 还会
+  /// 再把窗口改回 A,随后定位循环找不到 B,表现为「跳转抖动且到不了」。
+  int _revealWindowSeq = 0;
 
   /// 会话装载代次:图片重新生成在写库前据此识别会话切换(A→B→A 也能区分)。
   int _sessionEpoch = 0;
@@ -195,16 +206,22 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
     _backgroundTargetSeq = null;
     _backgroundPending = false;
     _backgroundPendingImage = false;
+    _pendingVariableInjection = null;
     _lastMaintenanceAfterSeq = null;
     _lastMaintenanceThroughSeq = null;
     _lastMaintenanceImages = const [];
     _activeImageRecord = null;
     _backgroundImageTask = null;
-    if (ref.mounted && state.backgroundStatus == BackgroundStatus.running) {
-      state = state.copyWith(
-        backgroundStatus: BackgroundStatus.interrupted,
-        backgroundSummary: '后台维护已中断',
-      );
+    if (ref.mounted) {
+      if (state.backgroundStatus == BackgroundStatus.running) {
+        state = state.copyWith(
+          backgroundStatus: BackgroundStatus.interrupted,
+          backgroundSummary: '后台维护已中断',
+          nextSuggestions: const [],
+        );
+      } else if (state.nextSuggestions.isNotEmpty) {
+        state = state.copyWith(nextSuggestions: const []);
+      }
     }
   }
 
@@ -215,6 +232,12 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
       state.sessionId == sessionId &&
       _backgroundEpoch == epoch &&
       identical(_backgroundToken, token);
+
+  /// 主写/上下文写点的归属判定:会话与代次一致才允许写 UI 状态、触发后台。
+  /// 切换会话时 [load] 递增代数并取消主写令牌,在飞轮随后据此丢弃结果;
+  /// 数据库写仍使用调用方捕获的 sessionId,不会写错库。
+  bool _ownsMain(int sessionId, int epoch) =>
+      ref.mounted && _sessionEpoch == epoch && state.sessionId == sessionId;
 
   /// 生效中的记忆冻结副本:组装"第 0 条消息"用的文本。
   ///
@@ -236,6 +259,11 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
   /// 库内容再变(哈希不同)时下一次输入再发一次。null 表示尚无已通知版本。
   int? _memoryDiffNotifiedHash;
 
+  /// 后台 Agentic 待注入主写上下文的变量快照(键 → 提交后最终值)。
+  /// 在下一条用户消息落库前由 [_persistPendingVariableInjection] 消费为
+  /// 附件行;切会话/历史改写/重跑入口清空,避免陈旧快照复活。
+  Map<String, String>? _pendingVariableInjection;
+
   /// 中断当前正在进行的生成:主写流式被截断(已生成的部分文本落库保留),
   /// 后台维护被跳过。
   /// 主写与后台可并发在飞(各持自己的令牌),两侧同时打断;无在飞轮时是
@@ -245,6 +273,23 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
     _backgroundToken.cancel();
     _backgroundPending = false;
     _backgroundPendingImage = false;
+    // 在没有在飞后台轮的早退残局里,状态可能停在 running 而 finally 已跑完;
+    // 此时停止键必须能立即把状态收敛,不能留下幽灵「维护中」。
+    if (ref.mounted &&
+        !_backgroundInFlight &&
+        state.backgroundStatus == BackgroundStatus.running) {
+      state = state.copyWith(
+        backgroundStatus: BackgroundStatus.interrupted,
+        backgroundSummary: '后台维护已中断',
+        nextSuggestions: const [],
+      );
+    }
+  }
+
+  /// 关闭/忽略下一步建议底单:丢弃本批(纯内存,下次后台轮重新生成)。
+  void dismissNextSuggestions() {
+    if (!ref.mounted || state.nextSuggestions.isEmpty) return;
+    state = state.copyWith(nextSuggestions: const []);
   }
 
   /// 是否有一条正在进行的主写回复可被中断(流式中、后台维护中或压缩中)。
@@ -258,24 +303,31 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
   /// 压缩摘要(compact)调用的 token 用量累加进会话的第三桶记账。
   /// 压缩在发送管线内联执行,频率低、用量小,单独记账不与主写/后台混淆。
   /// (发送管线与命令层都用 —— 放共享基类,继承链各层可见。)
-  void _accumulateCompactUsage(TokenUsage usage) {
-    state = state.copyWith(
-      compactInputTokens: state.compactInputTokens + usage.inputTokens,
-      compactOutputTokens: state.compactOutputTokens + usage.outputTokens,
-      compactCachedInputTokens:
-          state.compactCachedInputTokens + usage.cachedInputTokens,
-    );
+  ///
+  /// [sessionId]/[epoch] 由调用方捕获:压缩请求可能在切会话后收尾,用量仍应
+  /// 记到发起压缩的会话,而 UI 桶只在归属未变时才允许写当前状态。
+  void _accumulateCompactUsage(TokenUsage usage, {int? sessionId, int? epoch}) {
+    final target = sessionId ?? state.sessionId;
+    final owned =
+        target != null &&
+        state.sessionId == target &&
+        (epoch == null || _sessionEpoch == epoch);
+    if (owned) {
+      state = state.copyWith(
+        compactInputTokens: state.compactInputTokens + usage.inputTokens,
+        compactOutputTokens: state.compactOutputTokens + usage.outputTokens,
+        compactCachedInputTokens:
+            state.compactCachedInputTokens + usage.cachedInputTokens,
+      );
+    }
     // 摘要每次尝试都回调一次(含上游未上报全零):计入逐请求统计的请求次数。
     unawaited(
       _recordUsage(
-        sessionId: state.sessionId,
+        sessionId: target,
         kind: UsageKind.compact,
         config: ref.read(backendConfigProvider),
         usage: usage,
-        reported:
-            usage.inputTokens > 0 ||
-            usage.outputTokens > 0 ||
-            usage.cachedInputTokens > 0,
+        reported: usage.hasAny,
       ),
     );
   }
@@ -311,16 +363,11 @@ abstract class ChatControllerBase extends Notifier<ChatState> {
     } catch (_) {}
   }
 
-  /// 活跃对话消息(真实对话行:非 system、未压缩、非空内容、非附件),
-  /// 与 ContextAssembler 的过滤口径一致;旧→新排序。(纯函数,实例方法形态
-  /// 便于继承链各层免限定调用。)
-  List<Message> _liveConversation(List<Message> all) => all
+  /// 活跃可达行(含附件):压缩预算必须把它们一起算,否则保留的对话行
+  /// 会连同其世界书/技能附件超预算。
+  List<Message> _activeRows(List<Message> all) => all
       .where(
-        (m) =>
-            m.isChat &&
-            m.role != 'system' &&
-            !m.isCompacted &&
-            m.content.isNotEmpty,
+        (m) => m.role != 'system' && !m.isCompacted && m.content.isNotEmpty,
       )
       .toList();
 }

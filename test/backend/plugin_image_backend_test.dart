@@ -288,7 +288,10 @@ function step(ctx) {
                 'method': 'POST',
                 'url': 'stream',
                 'json': {'a': 1},
-                'stopWhen': {'contains': '](', 'regex': r'!\[[^\]]*\]\((https?://[^)\s]+)\)'},
+                'stopWhen': {
+                  'contains': '](',
+                  'regex': r'!\[[^\]]*\]\((https?://[^)\s]+)\)',
+                },
               },
             });
           }
@@ -329,7 +332,11 @@ function step(ctx) {
             return jsonEncode({
               'action': 'http',
               'state': null,
-              'request': {'method': 'POST', 'url': 'stream', 'json': {'a': 1}},
+              'request': {
+                'method': 'POST',
+                'url': 'stream',
+                'json': {'a': 1},
+              },
             });
           }
           expect(script, isNot(contains(r'\"partial\":true')));
@@ -344,6 +351,54 @@ function step(ctx) {
       );
 
       await backend.generateImage('x');
+      expect(evaluations, 2);
+    },
+  );
+
+  test(
+    'catastrophic stopWhen regex runs off-isolate with a window/time budget',
+    () async {
+      // (a+)+$ 对长串 a + 末尾 ! 是典型灾难性回溯;整段同步匹配会卡死 UI。
+      // 只给尾部窗口 + 可 kill isolate,预算到点按未命中继续读流。
+      final server = await serveHeldEventStream([
+        'data: ]( ${'a' * 60000}!\n\n',
+        'data: tail\n\n',
+      ], hold: const Duration(milliseconds: 100));
+      addTearDown(() => server.close(force: true));
+      var evaluations = 0;
+      final backend = PluginImageBackend(
+        config: config(origin(server)),
+        plugin: plugin(),
+        timeout: const Duration(seconds: 20),
+        evaluator: (script) async {
+          evaluations++;
+          if (evaluations == 1) {
+            return jsonEncode({
+              'action': 'http',
+              'state': null,
+              'request': {
+                'method': 'POST',
+                'url': 'stream',
+                'json': {'a': 1},
+                'stopWhen': {'contains': '](', 'regex': r'(a+)+$'},
+              },
+            });
+          }
+          expect(script, isNot(contains(r'\"partial\":true')));
+          expect(script, contains('data: tail'));
+          return jsonEncode({
+            'action': 'done',
+            'images': [
+              {'base64': imageBase64},
+            ],
+          });
+        },
+      );
+
+      final sw = Stopwatch()..start();
+      await backend.generateImage('x');
+      sw.stop();
+      expect(sw.elapsed, lessThan(const Duration(seconds: 5)));
       expect(evaluations, 2);
     },
   );

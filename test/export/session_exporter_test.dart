@@ -1,153 +1,219 @@
-// 会话导出测试:归档 v4 字段(元数据/用量/消息/会话状态)与未知会话的空信封。
+// 会话导出公开入口:v5 元数据、消息、世界书与头像协议边界。
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/character_repository.dart';
+import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/memory_repository.dart';
 import 'package:microscritt/data/message_repository.dart';
 import 'package:microscritt/data/session_repository.dart';
 import 'package:microscritt/data/variable_repository.dart';
 import 'package:microscritt/data/worldbook_repository.dart';
 import 'package:microscritt/export/session_exporter.dart';
+import 'package:microscritt/import/zip_store_reader.dart';
 import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/models/message.dart';
 import 'package:microscritt/models/variable.dart';
 import 'package:microscritt/models/worldbook_entry.dart';
+import '../support/image_fixture.dart';
 import '../support/test_database.dart';
 
+Future<Uint8List> _entry(ZipStoreReader reader, String name) async {
+  final output = BytesBuilder(copy: false);
+  final entry = reader.entries.singleWhere(
+    (candidate) => candidate.name == name,
+  );
+  await for (final chunk in reader.openEntry(entry)) {
+    output.add(chunk);
+  }
+  return output.takeBytes();
+}
+
+Future<Map<String, dynamic>> _meta(ZipStoreReader reader) async =>
+    jsonDecode(utf8.decode(await _entry(reader, 'meta.json')))
+        as Map<String, dynamic>;
+
+Future<List<Map<String, dynamic>>> _messages(ZipStoreReader reader) async {
+  final bytes = await _entry(reader, 'messages.ndjson');
+  if (bytes.isEmpty) return const [];
+  return [
+    for (final line in const LineSplitter().convert(utf8.decode(bytes)))
+      jsonDecode(line) as Map<String, dynamic>,
+  ];
+}
+
 void main() {
-  test('exports session metadata, state and all messages including compacted', () async {
-    final db = await openTestDb();
-    final charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
-    final sessionId = await SessionRepository(db).create(charId, '王都之旅');
-    final messages = MessageRepository(db);
-    await messages.append(sessionId: sessionId, role: 'user', content: 'hi');
-    await messages.append(sessionId: sessionId, role: 'assistant', content: 'hello');
-    await messages.insertSystem(sessionId: sessionId, content: 'summary');
-    await messages.markCompacted([1], compactOf: 3);
-    // 附件行(v4 起随档导出 kind/refId):世界书触发注入的形态。
-    await messages.append(
-      sessionId: sessionId,
-      role: 'user',
-      content: '<system-reminder>王都的描述。</system-reminder>',
-      kind: MessageKind.attachment,
-      refId: 'wb:7',
-    );
-    await VariableRepository(db).upsert(sessionId, 'hp', '10', access: VariableAccess.full);
-    await VariableRepository(db).upsert(
-      sessionId,
-      'constant',
-      'gold',
-      access: VariableAccess.readonly,
-    );
-    await MemoryRepository(db).set(sessionId, '用户喜欢简洁文风');
-    await SessionRepository(db).updateTokenUsage(
-      sessionId: sessionId,
-      inputTokens: 100,
-      outputTokens: 50,
-      cachedInputTokens: 0,
-      backgroundInputTokens: 0,
-      backgroundOutputTokens: 0,
-      backgroundCachedInputTokens: 0,
-    );
+  TestWidgetsFlutterBinding.ensureInitialized();
 
-    final json = await SessionExporter(db).export(sessionId: sessionId);
-    final decoded = jsonDecode(json) as Map<String, dynamic>;
-    expect(decoded['version'], 4);
+  late AppDatabase db;
+  late Directory tmp;
 
-    // 会话元数据 + token 用量。
-    final session = decoded['session'] as Map<String, dynamic>;
-    expect(session['title'], '王都之旅');
-    expect(session['characterId'], charId);
-    expect(session['createdAt'], isNotEmpty);
-    final usage = session['usage'] as Map<String, dynamic>;
-    expect(usage['inputTokens'], 100);
-    expect(usage['outputTokens'], 50);
-
-    expect((decoded['character'] as Map)['name'], 'Alice');
-    final msgs = decoded['messages'] as List;
-    expect(msgs.length, 4);
-
-    expect(msgs[0]['role'], 'user');
-    expect(msgs[0]['content'], 'hi');
-    expect(msgs[0]['seq'], 0);
-    expect(msgs[0]['isCompacted'], isTrue);
-    // v4:compactOf 是摘要行的"消息数组内索引"(库里行 id=3 → 数组下标 2),
-    // 不再透出与目标库无关的原库行 id。
-    expect(msgs[0]['compactOf'], 2);
-    expect(msgs[0]['kind'], isNull); // 普通行不带 kind 键
-
-    expect(msgs[1]['role'], 'assistant');
-    expect(msgs[1]['content'], 'hello');
-    expect(msgs[1]['isCompacted'], isFalse);
-    expect(msgs[1]['compactOf'], isNull);
-
-    expect(msgs[2]['role'], 'system');
-    expect(msgs[2]['content'], 'summary');
-
-    // 附件行往返保真:kind 与来源标识都进档。
-    expect(msgs[3]['kind'], 'attachment');
-    expect(msgs[3]['refId'], 'wb:7');
-
-    // 会话级状态:变量/权限/记忆;技能不再是会话状态。
-    expect(decoded['variables'], {'hp': '10', 'constant': 'gold'});
-    expect(decoded['variableAccess'], {'hp': 'full', 'constant': 'readonly'});
-    expect(decoded['memory'], '用户喜欢简洁文风');
-    // 全局技能(v37 起)不属于任何会话,归档不携带 skills 节。
-    expect(decoded.containsKey('skills'), isFalse);
+  setUp(() async {
+    db = await openTestDb();
+    tmp = await Directory.systemTemp.createTemp('session_exporter');
   });
 
-  test('character part carries avatar and current worldbook (same as card export)', () async {
-    final db = await openTestDb();
-    final charId = await CharacterRepository(db).insert(
-      const CharacterCard(name: 'Alice').withAvatar('aGVsbG8='),
+  tearDown(() async {
+    await db.db.close();
+    if (tmp.existsSync()) tmp.deleteSync(recursive: true);
+  });
+
+  Future<ZipStoreReader> exportReader(int sessionId) async {
+    final file = File('${tmp.path}/$sessionId.msarc');
+    await file.writeAsBytes(
+      await SessionExporter(db).export(sessionId: sessionId),
     );
-    await WorldbookRepository(db).replaceForCharacter(
-      charId,
-      const [
-        WorldbookEntry(
-          characterId: 0,
-          name: '王都',
-          keys: ['王都'],
-          constant: true,
-          content: '王都的描述。',
-        ),
-      ],
-    );
+    return ZipStoreReader.open(file);
+  }
+
+  test(
+    'exports session metadata, state and all messages including compacted',
+    () async {
+      final charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      final sessionId = await SessionRepository(db).create(charId, '王都之旅');
+      final messages = MessageRepository(db);
+      final first = await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: 'hi',
+      );
+      await messages.append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: 'hello',
+      );
+      final summary = await messages.insertSystem(
+        sessionId: sessionId,
+        content: 'summary',
+      );
+      await messages.markCompacted([first.id!], compactOf: summary);
+      await messages.append(
+        sessionId: sessionId,
+        role: 'user',
+        content: '<system-reminder>王都的描述。</system-reminder>',
+        kind: MessageKind.attachment,
+        refId: 'wb:7',
+      );
+      await VariableRepository(
+        db,
+      ).upsert(sessionId, 'hp', '10', access: VariableAccess.full);
+      await VariableRepository(
+        db,
+      ).upsert(sessionId, 'constant', 'gold', access: VariableAccess.readonly);
+      await MemoryRepository(db).set(sessionId, '用户喜欢简洁文风');
+      await SessionRepository(db).updateTokenUsage(
+        sessionId: sessionId,
+        inputTokens: 100,
+        outputTokens: 50,
+        cachedInputTokens: 0,
+        backgroundInputTokens: 0,
+        backgroundOutputTokens: 0,
+        backgroundCachedInputTokens: 0,
+      );
+
+      final reader = await exportReader(sessionId);
+      try {
+        final meta = await _meta(reader);
+        expect(meta['version'], 5);
+        final session = meta['session'] as Map<String, dynamic>;
+        expect(session['title'], '王都之旅');
+        expect(session['characterId'], charId);
+        expect((session['usage'] as Map)['inputTokens'], 100);
+        expect((session['usage'] as Map)['outputTokens'], 50);
+        expect((meta['character'] as Map)['name'], 'Alice');
+        expect(meta['variables'], {'hp': '10', 'constant': 'gold'});
+        expect(meta['variableAccess'], {'hp': 'full', 'constant': 'readonly'});
+        expect(meta['memory'], '用户喜欢简洁文风');
+        expect(meta.containsKey('skills'), isFalse);
+
+        final rows = await _messages(reader);
+        expect(rows, hasLength(4));
+        expect(rows[0]['isCompacted'], isTrue);
+        expect(rows[0]['compactOf'], 2);
+        expect(rows[0].containsKey('kind'), isFalse);
+        expect(rows[1]['content'], 'hello');
+        expect(rows[2]['role'], 'system');
+        expect(rows[3]['kind'], 'attachment');
+        expect(rows[3]['refId'], 'wb:7');
+      } finally {
+        await reader.close();
+      }
+    },
+  );
+
+  test('character carries asset avatar and current worldbook', () async {
+    final avatar = await putTestImage(db);
+    final charId = await CharacterRepository(
+      db,
+    ).insert(CharacterCard(name: 'Alice', avatarHash: avatar));
+    await WorldbookRepository(db).replaceForCharacter(charId, const [
+      WorldbookEntry(
+        characterId: 0,
+        name: '王都',
+        keys: ['王都'],
+        constant: true,
+        content: '王都的描述。',
+      ),
+    ]);
     final sessionId = await SessionRepository(db).create(charId, 's');
-    await MessageRepository(db).append(sessionId: sessionId, role: 'user', content: 'hi');
+    await MessageRepository(
+      db,
+    ).append(sessionId: sessionId, role: 'user', content: 'hi');
 
-    final decoded = jsonDecode(await SessionExporter(db).export(sessionId: sessionId)) as Map<String, dynamic>;
-    final character = decoded['character'] as Map<String, dynamic>;
-    // 头像补回(toStorageJson 剥掉,导出必须还原)。
-    expect(character['avatar'], 'aGVsbG8=');
-    // 世界书随会话导出(以本端当前条目为准)。
-    final book = character['character_book'] as Map<String, dynamic>?;
-    expect(book, isNotNull);
+    final reader = await exportReader(sessionId);
+    try {
+      final meta = await _meta(reader);
+      final character = meta['character'] as Map<String, dynamic>;
+      expect(character['avatar'], testPngBase64);
+      expect(character['character_book'], isNotNull);
+      expect(meta['characterAvatarHash'], avatar);
+      expect(await _entry(reader, 'assets/$avatar'), testPngBytes());
+    } finally {
+      await reader.close();
+    }
   });
 
-  test('includes image base64 and exports empty fields for an unknown session', () async {
-    final db = await openTestDb();
-    final charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Bob'));
-    final sessionId = await SessionRepository(db).create(charId, 's');
-    await MessageRepository(db).append(
-      sessionId: sessionId,
-      role: 'assistant',
-      content: '',
-      imageBase64: 'aGVsbG8=',
-      imagePrompt: 'a cave, silver light',
-    );
+  test(
+    'messages contain imageHash and unknown sessions have no assets',
+    () async {
+      final charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Bob'));
+      final sessionId = await SessionRepository(db).create(charId, 's');
+      final hash = await putTestImage(db);
+      await MessageRepository(db).append(
+        sessionId: sessionId,
+        role: 'assistant',
+        content: '',
+        imageHash: hash,
+        imagePrompt: 'a cave, silver light',
+      );
 
-    final json = jsonDecode(await SessionExporter(db).export(sessionId: sessionId)) as Map<String, dynamic>;
-    expect((json['messages'] as List).single['imageBase64'], 'aGVsbG8=');
-    expect((json['messages'] as List).single['imagePrompt'], 'a cave, silver light');
+      final reader = await exportReader(sessionId);
+      try {
+        final row = (await _messages(reader)).single;
+        expect(row['imageHash'], hash);
+        expect(row['imagePrompt'], 'a cave, silver light');
+        expect(row.containsKey('imageBase64'), isFalse);
+      } finally {
+        await reader.close();
+      }
 
-    final unknown = jsonDecode(await SessionExporter(db).export(sessionId: 999)) as Map<String, dynamic>;
-    expect(unknown['character'], isEmpty);
-    expect(unknown['messages'], isEmpty);
-    expect(unknown.containsKey('session'), isFalse);
-    expect(unknown['memory'], isNull);
-    expect(unknown['variables'], isEmpty);
-    expect(unknown['variableAccess'], isEmpty);
-  });
+      final unknown = await exportReader(999);
+      try {
+        final meta = await _meta(unknown);
+        expect(meta['character'], isEmpty);
+        expect(meta.containsKey('session'), isFalse);
+        expect(meta['memory'], isNull);
+        expect(await _messages(unknown), isEmpty);
+        expect(unknown.entries, hasLength(2));
+      } finally {
+        await unknown.close();
+      }
+    },
+  );
 }

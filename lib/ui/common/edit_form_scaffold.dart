@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'inline_spinner.dart';
 import 'unsaved_changes_guard.dart';
 
 /// 编辑页骨架。
@@ -48,11 +49,6 @@ class EditFormScaffold extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    Widget spinner({required Color color, double size = 16}) => SizedBox(
-      width: size,
-      height: size,
-      child: CircularProgressIndicator(strokeWidth: 2, color: color),
-    );
     final scaffold = Scaffold(
       appBar: AppBar(
         title: Text(title),
@@ -60,7 +56,9 @@ class EditFormScaffold extends StatelessWidget {
           ...actions,
           TextButton(
             onPressed: saving ? null : onSave,
-            child: saving ? spinner(color: scheme.primary) : Text(saveLabel),
+            child: saving
+                ? InlineSpinner(color: scheme.primary)
+                : Text(saveLabel),
           ),
         ],
       ),
@@ -73,7 +71,7 @@ class EditFormScaffold extends StatelessWidget {
             FilledButton(
               onPressed: saving ? null : onSave,
               child: saving
-                  ? spinner(color: scheme.onPrimary, size: 18)
+                  ? InlineSpinner(color: scheme.onPrimary, size: 18)
                   : Text(saveLabel),
             ),
           ],

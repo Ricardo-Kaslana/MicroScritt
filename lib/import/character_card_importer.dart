@@ -24,7 +24,7 @@ class CharacterCardImporter {
   /// 按文件类型分派:PNG 走 [fromPng],其余一律按 UTF-8 JSON 文本解析。
   ///
   /// [includePngImageAsAvatar] 为 false 时不把整张 PNG base64 成头像 —— 导入
-  /// UI 手里已有原始字节,直接走 `shrinkImageBytes` 能省掉一次 20MB 级
+  /// UI 手里已有原始字节,直接走 `shrinkImageBytesToBytes` 能省掉一次 20MB 级
   /// base64 编码与随后的 base64 解码(两次大拷贝)。
   static CharacterCard fromBytes(
     Uint8List bytes, {
@@ -48,16 +48,29 @@ class CharacterCardImporter {
     final jsonStr = decodeCharaPayload(b64);
     final card = fromJsonString(jsonStr);
     // 头像 = 这张卡本身的图片(仅当 JSON 里没有内嵌头像时)。
-    return card.avatarBase64 == null && includeImageAsAvatar
-        ? card.withAvatar(base64Encode(png))
+    return card.importedAvatarBase64 == null && includeImageAsAvatar
+        ? card.replacingImportedAvatar(base64Encode(png))
         : card;
   }
 
-  /// 解析卡 JSON 文本;剥 UTF-8 BOM,不是合法卡对象时抛 [FormatException]。
+  /// 解析卡 JSON 文本;剥 UTF-8 BOM,顶层必须是对象且带非空名称,否则抛
+  /// [FormatException](不再让类型强转以 TypeError 逃逸到 UI)。
   static CharacterCard fromJsonString(String jsonStr) {
     final text = jsonStr.startsWith('\uFEFF') ? jsonStr.substring(1) : jsonStr;
-    final json = jsonDecode(text) as Map<String, dynamic>;
-    return CharacterCard.fromJson(json);
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(text);
+    } catch (e) {
+      throw FormatException('角色卡不是有效的 JSON:$e');
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('角色卡顶层必须是 JSON 对象');
+    }
+    final card = CharacterCard.fromJson(decoded);
+    if (card.name.trim().isEmpty) {
+      throw const FormatException('角色卡缺少有效的名称');
+    }
+    return card;
   }
 
   /// 角色卡文本块解码为 JSON 字符串:剥 data URI 前缀(若有)→ base64(标准或

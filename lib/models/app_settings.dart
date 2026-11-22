@@ -8,23 +8,41 @@ library;
 enum AppThemeMode { system, light, dark }
 
 /// 推理等级(对话输入框的模型选择器里可设)。
-/// 会透传到 LLM 请求,openai 后端映射为 `reasoning_effort`,anthropic 为 thinking budget。
+/// 会透传到 LLM 请求,openai 后端映射为 `reasoning_effort`,anthropic 按
+/// 模型代际映射为 thinking 预算或 adaptive + output_config.effort。
 enum ReasoningLevel {
   off,
+  minimal,
   low,
   medium,
-  high;
+  high,
+  xhigh,
+  max;
 
   static ReasoningLevel fromWire(String s) =>
       ReasoningLevel.values.where((r) => r.name == s).firstOrNull ??
       ReasoningLevel.off;
 
-  /// 面向 UI 的中文标签。
+  /// 面向 UI 的英文档位标签(滑块刻度、输入卡徽标与选择条共用)。
   String get label => switch (this) {
-    ReasoningLevel.off => '关闭',
-    ReasoningLevel.low => '低',
-    ReasoningLevel.medium => '中',
-    ReasoningLevel.high => '高',
+    ReasoningLevel.off => 'Off',
+    ReasoningLevel.minimal => 'Minimal',
+    ReasoningLevel.low => 'Low',
+    ReasoningLevel.medium => 'Medium',
+    ReasoningLevel.high => 'High',
+    ReasoningLevel.xhigh => 'XHigh',
+    ReasoningLevel.max => 'Max',
+  };
+
+  /// 七档滑块刻度用的短标签:窄卡片里七列全称会互相挤压。
+  String get shortLabel => switch (this) {
+    ReasoningLevel.off => 'Off',
+    ReasoningLevel.minimal => 'Min',
+    ReasoningLevel.low => 'Low',
+    ReasoningLevel.medium => 'Med',
+    ReasoningLevel.high => 'High',
+    ReasoningLevel.xhigh => 'XH',
+    ReasoningLevel.max => 'Max',
   };
 }
 
@@ -144,6 +162,16 @@ class AppSettings {
   /// 状态面板确认后才移入回收站。
   final bool backgroundDeletionConfirm;
 
+  /// Agentic 后台是否允许把选中的变量注入主写上下文(默认关,schema v74)。
+  /// 仅在变量维护开启且运行模式为 agentic 时生效:后台 agent 经
+  /// `setVariableInjection` 选键,提交后按最终变量板生成一条
+  /// `notice:varinj:<ms>` 附件行,随下一条用户消息进入组装。
+  final bool backgroundVariableInjection;
+
+  /// Agentic 后台收尾时是否给出下一步建议(默认关,schema v74)。
+  /// 建议是用户口吻、可直接发送的完整发言,由聊天页底单展示;关闭/忽略即丢弃。
+  final bool backgroundNextSuggestions;
+
   /// 当前 LLM 推理等级(对话输入框的模型选择器里设置)。
   final ReasoningLevel reasoningLevel;
 
@@ -157,6 +185,14 @@ class AppSettings {
   /// 内置对话高亮(`“…”`/`「…」`/`"…"` 台词斜体+强调色)开关(默认开启)。
   /// 这是渲染管线内建行为而非正则脚本,故单独落库;纯正则脚本页入口切换。
   final bool dialogueHighlightEnabled;
+
+  /// 入库前压缩新图片(默认关,schema v73)。开启后长边超过
+  /// [imageCompressLongEdge] 的图片在写入资产库前重编码为 2048px;只影响
+  /// 之后入库的图片,GIF 保留动画,透明图保持 PNG。
+  final bool compressImages;
+
+  /// 新图片入库压缩的长边上限。
+  static const int imageCompressLongEdge = 2048;
 
   /// 上下文自动压缩总开关(默认开启)。
   /// 开启后自动压缩按**上下文窗口占用量**触发(回复落库后达到
@@ -220,7 +256,10 @@ class AppSettings {
     this.backgroundCharacterAnchor = true,
     this.backgroundMemoryAnchor = true,
     this.backgroundDeletionConfirm = false,
+    this.backgroundVariableInjection = false,
+    this.backgroundNextSuggestions = false,
     this.autoCompactEnabled = true,
+    this.compressImages = false,
     this.autoCompactThreshold = defaultAutoCompactThreshold,
     this.maxAutoAttachments = 5,
   });
@@ -234,6 +273,7 @@ class AppSettings {
     double? chatBackgroundBlur,
     bool? dialogueHighlightEnabled,
     bool? autoCompactEnabled,
+    bool? compressImages,
     double? autoCompactThreshold,
     int? maxAutoAttachments,
     ReasoningLevel? backgroundReasoningLevel,
@@ -241,6 +281,8 @@ class AppSettings {
     bool? backgroundCharacterAnchor,
     bool? backgroundMemoryAnchor,
     bool? backgroundDeletionConfirm,
+    bool? backgroundVariableInjection,
+    bool? backgroundNextSuggestions,
     // 用哨兵区分「未传(保留旧值)」与「显式清空(null = 跟随主写)」。
     Object? backgroundModelId = _unset,
   }) => AppSettings(
@@ -253,6 +295,7 @@ class AppSettings {
     dialogueHighlightEnabled:
         dialogueHighlightEnabled ?? this.dialogueHighlightEnabled,
     autoCompactEnabled: autoCompactEnabled ?? this.autoCompactEnabled,
+    compressImages: compressImages ?? this.compressImages,
     autoCompactThreshold: autoCompactThreshold ?? this.autoCompactThreshold,
     maxAutoAttachments: maxAutoAttachments ?? this.maxAutoAttachments,
     backgroundReasoningLevel:
@@ -264,6 +307,10 @@ class AppSettings {
         backgroundMemoryAnchor ?? this.backgroundMemoryAnchor,
     backgroundDeletionConfirm:
         backgroundDeletionConfirm ?? this.backgroundDeletionConfirm,
+    backgroundVariableInjection:
+        backgroundVariableInjection ?? this.backgroundVariableInjection,
+    backgroundNextSuggestions:
+        backgroundNextSuggestions ?? this.backgroundNextSuggestions,
     backgroundModelId: identical(backgroundModelId, _unset)
         ? this.backgroundModelId
         : backgroundModelId as int?,

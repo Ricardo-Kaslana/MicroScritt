@@ -8,22 +8,39 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'session_archive_limits.dart';
+
 /// 会话归档的流式 JSON 读取:只做合法的词法切分(字符串/括号/标量),
 /// 值本身仍交给 `jsonDecode` 解码 —— 不做第二套 JSON 语义实现。
 ///
 /// 缓冲随读随丢:已消费位置超过 64KB 时截掉前缀,内存占用与已扫描长度
 /// 无关,只与单个值的大小相关(通常最坏是单条消息的图片)。
 class JsonStreamScanner {
+  /// 单个值默认收集上限:与 v5 meta / v4 头部上限同源。
+  static const int defaultMaxValueBytes = SessionArchiveLimits.maxMetaBytes;
+
   final StreamIterator<String> _source;
+
+  /// 单个值收集上限:扫描期间累计写入 StringBuffer 的码元数超过即失败。
+  /// 码元数不大于 UTF-8 字节数,对 ASCII(归档里的 base64/JSON 主体)完全
+  /// 等同;非 ASCII 的真实字节更多,该上限仍是有效的内存边界。
+  final int maxValueBytes;
+
   String _buf = '';
   int _pos = 0;
   bool _eof = false;
   bool _firstKey = true;
   bool _arrayFirst = true;
+  int _collected = 0;
+  int _collectLimit = 0;
 
-  JsonStreamScanner(Stream<String> chars) : _source = StreamIterator(chars);
+  JsonStreamScanner(
+    Stream<String> chars, {
+    this.maxValueBytes = defaultMaxValueBytes,
+  }) : _source = StreamIterator(chars);
 
-  static bool _isWhitespace(int c) => c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D;
+  static bool _isWhitespace(int c) =>
+      c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D;
 
   Future<bool> _fill() async {
     if (_eof) return false;
@@ -104,7 +121,9 @@ class JsonStreamScanner {
     }
     if (key is! String) throw const FormatException('JSON 结构错误(键名必须是字符串)');
     await _skipWhitespace();
-    if (await _readOrThrow() != 0x3A) throw const FormatException('JSON 结构错误(缺少冒号)');
+    if (await _readOrThrow() != 0x3A) {
+      throw const FormatException('JSON 结构错误(缺少冒号)');
+    }
     return key;
   }
 
@@ -137,8 +156,9 @@ class JsonStreamScanner {
     return collect ? raw : '';
   }
 
-  /// 读取并完整解码一个值(整体进内存);值语法错误抛 [FormatException]。
-  /// 用于头部字段,不要用它读 messages 数组。
+  /// 读取并完整解码一个值(整体进内存);值语法错误或超过
+  /// [maxValueBytes] 抛 [FormatException]。用于头部字段,不要用它读
+  /// messages 数组。
   Future<Object?> readSmallValue() async {
     final raw = await _scanValue(collect: true);
     try {
@@ -168,6 +188,10 @@ class JsonStreamScanner {
     }
     final c = _buf.codeUnitAt(_pos);
     final out = collect ? StringBuffer() : null;
+    if (collect) {
+      _collected = 0;
+      _collectLimit = maxValueBytes;
+    }
     if (c == 0x22) {
       await _scanString(out);
       return out?.toString() ?? '';
@@ -184,13 +208,35 @@ class JsonStreamScanner {
       }
       final ch = _buf.codeUnitAt(_pos);
       if (ch == 0x2C || ch == 0x5D || ch == 0x7D || _isWhitespace(ch)) break;
-      out?.writeCharCode(ch);
+      _writeChar(out, ch);
       length++;
       _pos++;
       _compactIfNeeded();
     }
     if (length == 0) throw const FormatException('JSON 结构错误(缺少值)');
     return out?.toString() ?? '';
+  }
+
+  /// 收集一段原文并累计值大小;超过 [maxValueBytes] 直接失败,不让单个
+  /// 超大 JSON 值把内存打穿。
+  void _writeText(StringBuffer? out, String text) {
+    if (out == null) return;
+    final next = _collected + text.length;
+    _checkCollectLimit(next);
+    _collected = next;
+    out.write(text);
+  }
+
+  void _writeChar(StringBuffer? out, int code) {
+    if (out == null) return;
+    _checkCollectLimit(_collected + 1);
+    _collected++;
+    out.writeCharCode(code);
+  }
+
+  void _checkCollectLimit(int next) {
+    if (next <= _collectLimit) return;
+    throw FormatException('JSON 值超过 ${maxValueBytes ~/ (1024 * 1024)}MiB 上限');
   }
 
   /// 扫描一个字符串(当前字符必须是开引号),原文(含引号)写入 [out]。
@@ -200,8 +246,10 @@ class JsonStreamScanner {
       _compactIfNeeded();
       if (!await _fill()) throw const FormatException('文件被截断');
     }
-    if (_buf.codeUnitAt(_pos) != 0x22) throw const FormatException('JSON 结构错误(缺少字符串)');
-    out?.writeCharCode(0x22);
+    if (_buf.codeUnitAt(_pos) != 0x22) {
+      throw const FormatException('JSON 结构错误(缺少字符串)');
+    }
+    _writeChar(out, 0x22);
     _pos++;
     while (true) {
       if (_pos >= _buf.length) {
@@ -211,7 +259,7 @@ class JsonStreamScanner {
       final quote = _buf.indexOf('"', _pos);
       final backslash = _buf.indexOf('\\', _pos);
       if (quote < 0 && backslash < 0) {
-        out?.write(_buf.substring(_pos));
+        _writeText(out, _buf.substring(_pos));
         _pos = _buf.length;
         continue;
       }
@@ -221,23 +269,23 @@ class JsonStreamScanner {
           ? quote
           : (quote < backslash ? quote : backslash);
       if (next > _pos) {
-        out?.write(_buf.substring(_pos, next));
+        _writeText(out, _buf.substring(_pos, next));
         _pos = next;
       }
       if (_buf.codeUnitAt(_pos) == 0x22) {
-        out?.writeCharCode(0x22);
+        _writeChar(out, 0x22);
         _pos++;
         _compactIfNeeded();
         return;
       }
       // 反斜杠:原样复制它和紧随的一个字符(\uXXXX 的后 4 位按普通字符复制)。
-      out?.writeCharCode(0x5C);
+      _writeChar(out, 0x5C);
       _pos++;
       if (_pos >= _buf.length) {
         _compactIfNeeded();
         if (!await _fill()) throw const FormatException('文件被截断');
       }
-      out?.writeCharCode(_buf.codeUnitAt(_pos));
+      _writeChar(out, _buf.codeUnitAt(_pos));
       _pos++;
       _compactIfNeeded();
     }
@@ -250,8 +298,10 @@ class JsonStreamScanner {
       if (!await _fill()) throw const FormatException('文件被截断');
     }
     final open = _buf.codeUnitAt(_pos);
-    if (open != 0x7B && open != 0x5B) throw const FormatException('JSON 结构错误(缺少容器)');
-    out?.writeCharCode(open);
+    if (open != 0x7B && open != 0x5B) {
+      throw const FormatException('JSON 结构错误(缺少容器)');
+    }
+    _writeChar(out, open);
     _pos++;
     var depth = 1;
     while (depth > 0) {
@@ -261,12 +311,12 @@ class JsonStreamScanner {
       }
       final index = _nextStructural(_pos);
       if (index < 0) {
-        out?.write(_buf.substring(_pos));
+        _writeText(out, _buf.substring(_pos));
         _pos = _buf.length;
         continue;
       }
       if (index > _pos) {
-        out?.write(_buf.substring(_pos, index));
+        _writeText(out, _buf.substring(_pos, index));
         _pos = index;
       }
       final ch = _buf.codeUnitAt(_pos);
@@ -274,7 +324,7 @@ class JsonStreamScanner {
         await _scanString(out);
         continue;
       }
-      out?.writeCharCode(ch);
+      _writeChar(out, ch);
       _pos++;
       if (ch == 0x7B || ch == 0x5B) {
         depth++;
@@ -300,7 +350,7 @@ class JsonStreamScanner {
 /// `messages` 的重复键按 `jsonDecode` 的"后者覆盖"语义处理:
 /// [messagesArrays] 记录出现次数,[messageCount] 是最后一个数组的长度。
 class SessionArchiveHeader {
-  /// 归档版本;缺失/非整数为 0(按 v1 处理)。
+  /// 归档版本;`readHeader` 只接受 1–4,缺失/非整数直接失败。
   final int version;
 
   /// 会话元数据与 token 用量;旧档可能缺失。
@@ -354,18 +404,26 @@ class ArchiveScanCancelled implements Exception {
 /// 扫描,单条消息(主体是图片 base64)是内存占用的主要来源。
 class SessionArchiveReader {
   final File file;
-  const SessionArchiveReader(this.file);
+
+  /// 单个头部值的收集上限;测试可收紧以覆盖超限路径。
+  final int maxValueBytes;
+
+  const SessionArchiveReader(
+    this.file, {
+    this.maxValueBytes = JsonStreamScanner.defaultMaxValueBytes,
+  });
 
   JsonStreamScanner _open() => JsonStreamScanner(
     // 非法 UTF-8 字节以替换字符读入,结构校验仍由扫描器负责;截断文件在
     // 扫描层报错,不会静默丢字节。
     file.openRead().transform(const Utf8Decoder(allowMalformed: true)),
+    maxValueBytes: maxValueBytes,
   );
 
   /// 第一遍扫描:校验顶层结构与 EOF,读取头部字段与消息条数。
   ///
-  /// 缺少 `messages` 或结构损坏抛 [FormatException];读到 EOF 才返回,
-  /// 截断文件在这里就被拦下,调用方不会写半截数据。
+  /// 缺少 `messages`、版本缺失/非 1–4 或结构损坏抛 [FormatException];读到
+  /// EOF 才返回,截断文件在这里就被拦下,调用方不会写半截数据。
   Future<SessionArchiveHeader> readHeader() async {
     final scanner = _open();
     try {
@@ -386,7 +444,10 @@ class SessionArchiveReader {
         switch (key) {
           case 'version':
             final value = await scanner.readSmallValue();
-            version = value is int ? value : 0;
+            if (value is! int || value < 1 || value > 4) {
+              throw FormatException('不支持的会话归档版本:$value(仅支持 1–4)');
+            }
+            version = value;
           case 'messages':
             messagesArrays++;
             messageCount = await _countMessages(scanner);
@@ -418,6 +479,9 @@ class SessionArchiveReader {
       await scanner.endObjectAndVerifyEof();
       if (messagesArrays == 0) {
         throw const FormatException('不是会话导出文件(缺少 messages)');
+      }
+      if (version == 0) {
+        throw const FormatException('会话归档缺少 version(仅支持 1–4)');
       }
       return SessionArchiveHeader(
         version: version,

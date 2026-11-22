@@ -303,15 +303,59 @@ void main() {
           kind: MessageKind.attachment,
           refId: 'notice:memdiff:42',
         ),
-        Message(sessionId: 1, role: 'user', content: 'hi', seq: 4),
+        Message(
+          sessionId: 1,
+          role: 'user',
+          content: ContextAssembler.variableInjectionNotice({'hp': '8'}),
+          seq: 4,
+          kind: MessageKind.attachment,
+          refId: 'notice:varinj:1700000000001',
+        ),
+        Message(sessionId: 1, role: 'user', content: 'hi', seq: 5),
       ],
     );
     final seg = snapshot.segments.firstWhere((s) => s.key == 'attachments');
     expect(seg.label, '附件');
     expect(seg.subEntries.map((s) => s.label.split(' · ').first).toList(),
-        ['技能', '世界书', '压缩通知', '记忆差异']);
+        ['技能', '世界书', '压缩通知', '记忆差异', '变量注入']);
     // 世界书子项显示条目名(落库时名字已回退为触发关键词),而不只是"世界书"。
     expect(seg.subEntries[1].label, startsWith('世界书 · 剑之诅咒'));
+  });
+
+  test('variable injection notice collapses whitespace, caps values and body', () {
+    final longValue = List.filled(60, 'long').join('\n');
+    final many = {
+      'hp': ' 8\n',
+      'big': longValue,
+      for (var i = 0; i < 40; i++) 'k$i': 'v' * 120,
+    };
+    final text = ContextAssembler.variableInjectionNotice(many);
+    expect(text, startsWith('<system-reminder>'));
+    expect(text, endsWith('</system-reminder>'));
+    expect(text, contains('- hp: 8'));
+    // 值被压成单行(换行不进入注入段)。
+    expect(text, contains('- big: long long'));
+    expect(text, contains('更多变量已省略'));
+    expect(
+      text.length,
+      lessThanOrEqualTo(
+        ContextAssembler.maxVariableInjectionNoticeChars + 200,
+      ),
+    );
+    expect(text, isNot(contains('long\nlong')));
+  });
+
+  test('variable injection notice truncates a single oversized value', () {
+    final text = ContextAssembler.variableInjectionNotice({
+      'huge': 'x' * (ContextAssembler.maxVariableInjectionValueChars + 50),
+    });
+    expect(text, contains('…'));
+    expect(
+      text.length,
+      lessThan(
+        ContextAssembler.maxVariableInjectionNoticeChars + 200,
+      ),
+    );
   });
 
   test('constant worldbook entries always inject into the stable system segment', () {
@@ -516,7 +560,7 @@ void main() {
       items: const [],
       history: const [
         Message(sessionId: 1, role: 'user', content: 'hi', seq: 0),
-        Message(sessionId: 1, role: 'assistant', content: '', seq: 1, imageBase64: 'aGVsbG8='),
+        Message(sessionId: 1, role: 'assistant', content: '', seq: 1, imageHash: '0000000000000000000000000000000000000000000000000000000000000000'),
         Message(sessionId: 1, role: 'assistant', content: 'hello', seq: 2),
       ],
     );

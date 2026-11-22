@@ -14,6 +14,7 @@ import '../../models/worldbook_entry.dart';
 import '../../state/chat_controller.dart';
 import '../../state/providers.dart';
 import '../common/form_field.dart';
+import '../common/form_row.dart';
 import '../common/section_header.dart';
 import '../common/info_button.dart';
 import 'status_dialogs.dart';
@@ -170,16 +171,9 @@ class _DesktopSidebar extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-            child: Text(
-              '工作区',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.6,
-              ),
-            ),
+          const SectionHeader(
+            '工作区',
+            padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
           ),
           for (final item in StatusDesktopSection.values)
             _StatusNavTile(
@@ -256,7 +250,7 @@ class _StatusNavTile extends StatelessWidget {
                 children: [
                   Icon(
                     icon,
-                    size: 19,
+                    size: 20,
                     color: selected ? scheme.primary : scheme.onSurfaceVariant,
                   ),
                   const SizedBox(width: 10),
@@ -669,53 +663,59 @@ class _SettingsGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     const gap = 16.0;
     final anchor = _AnchorSettingsCard(characterId: characterId);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxWidth = constraints.maxWidth;
-        if (maxWidth >= 1000) {
-          return IntrinsicHeight(
-            child: Row(
+    // ListTile 的固有高度不含 minVerticalPadding:桌面 compact 密度下目标行高
+    // 40,尾部 InfoButton 把实际行高抬到 46,而固有高度仍报 40,等高卡会少算
+    // 6px 而溢出。网格内都是 dense 单行开关,收紧纵向内边距让两者一致。
+    return ListTileTheme.merge(
+      minVerticalPadding: 0,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxWidth = constraints.maxWidth;
+          if (maxWidth >= kStatusDesktopBreakpoint) {
+            return IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Expanded(child: _MaintenanceSettingsCard()),
+                  const SizedBox(width: gap),
+                  const Expanded(child: _ModelSettingsCard()),
+                  const SizedBox(width: gap),
+                  Expanded(child: anchor),
+                ],
+              ),
+            );
+          }
+          if (maxWidth >= 640) {
+            return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Expanded(child: _MaintenanceSettingsCard()),
-                const SizedBox(width: gap),
-                const Expanded(child: _ModelSettingsCard()),
-                const SizedBox(width: gap),
-                Expanded(child: anchor),
+                const IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(child: _MaintenanceSettingsCard()),
+                      SizedBox(width: gap),
+                      Expanded(child: _ModelSettingsCard()),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: gap),
+                anchor,
               ],
-            ),
-          );
-        }
-        if (maxWidth >= 640) {
+            );
+          }
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(child: _MaintenanceSettingsCard()),
-                    SizedBox(width: gap),
-                    Expanded(child: _ModelSettingsCard()),
-                  ],
-                ),
-              ),
+              const _MaintenanceSettingsCard(),
+              const SizedBox(height: gap),
+              const _ModelSettingsCard(),
               const SizedBox(height: gap),
               anchor,
             ],
           );
-        }
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const _MaintenanceSettingsCard(),
-            const SizedBox(height: gap),
-            const _ModelSettingsCard(),
-            const SizedBox(height: gap),
-            anchor,
-          ],
-        );
-      },
+        },
+      ),
     );
   }
 }
@@ -726,7 +726,6 @@ class _MaintenanceSettingsCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
     final features = ref.watch(backgroundFeaturesProvider);
     final settings = ref.watch(appSettingsProvider);
     return SurfaceCard(
@@ -747,27 +746,43 @@ class _MaintenanceSettingsCard extends ConsumerWidget {
             value: features.image,
             onChanged: (_) => _toggleFeature(ref, 'image'),
           ),
-          SwitchListTile(
+          SettingsSwitchTile(
             contentPadding: EdgeInsets.zero,
             dense: true,
-            secondary: const Icon(Icons.fact_check_outlined, size: 20),
-            title: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('变量删除前确认', style: theme.textTheme.bodyMedium),
-                const SizedBox(width: 2),
-                InfoButton(onTap: () => showDeletionConfirmHelpDialog(context)),
-              ],
+            icon: Icons.fact_check_outlined,
+            iconSize: 20,
+            title: '变量删除前确认',
+            titleStyle: theme.textTheme.bodyMedium,
+            titleTrailing: InfoButton(
+              onTap: () => showDeletionConfirmHelpDialog(context),
             ),
             value: settings.backgroundDeletionConfirm,
             onChanged: (v) => _setDeletionConfirm(ref, v),
           ),
-          const SizedBox(height: 4),
-          Text(
-            '严格模式只影响后台删除:请求先进入待确认,确认后才移入回收站。',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
+          const SizedBox(height: 8),
+          StatusCardSectionTitle(
+            icon: Icons.auto_awesome,
+            title: 'Agentic 增强',
+            trailing: InfoButton(
+              onTap: () => showAgenticEnhancementsHelpDialog(context),
             ),
+          ),
+          const SizedBox(height: 4),
+          _SwitchRow(
+            icon: Icons.input,
+            label: '变量注入主写',
+            enabled:
+                settings.backgroundMode == BackgroundMode.agentic &&
+                features.variables,
+            value: settings.backgroundVariableInjection,
+            onChanged: (v) => _setVariableInjection(ref, v),
+          ),
+          _SwitchRow(
+            icon: Icons.lightbulb_outline,
+            label: '下一步建议',
+            enabled: settings.backgroundMode == BackgroundMode.agentic,
+            value: settings.backgroundNextSuggestions,
+            onChanged: (v) => _setNextSuggestions(ref, v),
           ),
         ],
       ),
@@ -876,23 +891,28 @@ class _AnchorSettingsCard extends ConsumerWidget {
 class _SwitchRow extends StatelessWidget {
   final IconData icon;
   final String label;
+  final bool enabled;
   final bool value;
   final ValueChanged<bool> onChanged;
 
   const _SwitchRow({
     required this.icon,
     required this.label,
+    this.enabled = true,
     required this.value,
     required this.onChanged,
   });
 
   @override
   Widget build(BuildContext context) {
-    return SwitchListTile(
+    return SettingsSwitchTile(
       contentPadding: EdgeInsets.zero,
       dense: true,
-      secondary: Icon(icon, size: 20),
-      title: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+      icon: icon,
+      iconSize: 20,
+      title: label,
+      enabled: enabled,
+      titleStyle: Theme.of(context).textTheme.bodyMedium,
       value: value,
       onChanged: onChanged,
     );
@@ -986,6 +1006,24 @@ Future<void> _toggleAnchor(WidgetRef ref, String key) {
 
 Future<void> _setDeletionConfirm(WidgetRef ref, bool enabled) {
   return persistBackgroundDeletionConfirm(
+    enabled: enabled,
+    appSettingsSetter: (s) => ref.read(appSettingsProvider.notifier).state = s,
+    repo: ref.read(appSettingsRepositoryProvider),
+    current: ref.read(appSettingsProvider),
+  );
+}
+
+Future<void> _setVariableInjection(WidgetRef ref, bool enabled) {
+  return persistBackgroundVariableInjection(
+    enabled: enabled,
+    appSettingsSetter: (s) => ref.read(appSettingsProvider.notifier).state = s,
+    repo: ref.read(appSettingsRepositoryProvider),
+    current: ref.read(appSettingsProvider),
+  );
+}
+
+Future<void> _setNextSuggestions(WidgetRef ref, bool enabled) {
+  return persistBackgroundNextSuggestions(
     enabled: enabled,
     appSettingsSetter: (s) => ref.read(appSettingsProvider.notifier).state = s,
     repo: ref.read(appSettingsRepositoryProvider),

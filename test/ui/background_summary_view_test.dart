@@ -47,8 +47,17 @@ void main() {
     expect(find.textContaining('建议删除变量 temp,待确认'), findsNothing);
   });
 
-  testWidgets('审计摘要以标题行与统计条呈现', (tester) async {
-    await pumpSummary(tester, '审计完成:更新 3 键,删除 1 键');
+  testWidgets('变量注入按注入分组展示键名', (tester) async {
+    await pumpSummary(tester, '变量 mood=calm · 注入变量 mood focus');
+
+    expect(find.text('注入'), findsOneWidget);
+    expect(find.text('focus'), findsOneWidget);
+    // 变量更新与注入分组并存,不再整段回退为纯文本。
+    expect(find.text('mood = calm', findRichText: true), findsOneWidget);
+    expect(find.textContaining('注入变量'), findsNothing);
+  });
+
+  testWidgets('审计摘要以标题行与统计条呈现', (tester) async {    await pumpSummary(tester, '审计完成:更新 3 键,删除 1 键');
 
     expect(find.text('审计完成'), findsOneWidget);
     expect(find.text('更新 3 键'), findsOneWidget);

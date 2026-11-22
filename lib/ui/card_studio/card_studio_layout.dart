@@ -1,8 +1,10 @@
-/// AI 制卡工作台的断点与宽度刻度(本页私有,不跨页 import 设置页常量)。
+/// AI 制卡工作台的断点与宽度刻度。
 library;
 
+import '../common/layout_breakpoints.dart';
+
 /// 桌面双栏断点(与设置/状态面板一致)。
-const double kCardStudioDesktopBreakpoint = 1000;
+const double kCardStudioDesktopBreakpoint = kDesktopBreakpoint;
 
 /// 桌面左侧对话栏宽度。
 const double kCardStudioChatWidth = 400;

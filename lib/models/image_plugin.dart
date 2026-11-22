@@ -384,6 +384,26 @@ class ImagePlugin {
       },
   });
 
+  /// 编码完整单文件插件包(manifest + code)。
+  ///
+  /// 与 [toManifestJson] 的差别是带 `code`;键序固定,供文本配置文件导出与
+  /// 手动比对时保持稳定。
+  String toPackageJson() => jsonEncode({
+    'formatVersion': kImagePluginFormatVersion,
+    'id': id,
+    'name': name,
+    'version': version,
+    'settings': [for (final field in fields) field.toJson()],
+    'permissions': permissions.toJson(),
+    if (usesStandardParams) 'usesStandardParams': true,
+    if (supportsTest || supportsListModels)
+      'operations': {
+        if (supportsTest) 'test': true,
+        if (supportsListModels) 'listModels': true,
+      },
+    'code': code,
+  });
+
   static Map<String, dynamic> _object(Object? value, String name) {
     if (value is! Map<String, dynamic>) {
       throw FormatException('$name 必须是 JSON 对象');

@@ -57,6 +57,44 @@ JSON.stringify(__ctx);
               ? false
               : '本平台 bridge 缺 jsSetMemoryLimit,内存上限不生效(死循环用例仍覆盖 interrupt handler)');
 
+  test('open circuit short-circuits evaluation and recovers after the cooldown', () async {
+    // 不依赖真实 15s 外层超时:直接打开熔断验证短路与冷却恢复路径。
+    final runtime = JsHookRuntime(
+      circuitCooldown: const Duration(milliseconds: 100),
+    );
+    runtime.debugTripCircuit();
+    expect(runtime.debugCircuitOpen, isTrue);
+    // 熔断期间即使脚本本身合法也立即按失败返回,不再派生 isolate。
+    expect(await runtime.evaluate('1 + 1'), isNull);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(runtime.debugCircuitOpen, isFalse);
+  });
+
+  test('outer timeout records and trips the circuit until the cooldown ends', () async {
+    // 外层竞速超时是被放弃 isolate 的泄漏点:触发后必须熔断,后续 hook
+    // 调用直接短路;冷却结束后放行一次探测即恢复。
+    final runtime = JsHookRuntime(
+      // 缩短 QuickJS 超时,让被放弃的 isolate 很快自行收敛;外层竞速先触发。
+      jsTimeout: const Duration(milliseconds: 1000),
+      outerTimeout: const Duration(milliseconds: 100),
+      circuitCooldown: const Duration(milliseconds: 200),
+    );
+    final sw = Stopwatch()..start();
+    expect(await runtime.evaluate('while(true){}'), isNull);
+    sw.stop();
+    expect(sw.elapsed, lessThan(const Duration(seconds: 2)));
+    expect(runtime.debugCircuitOpen, isTrue);
+
+    final short = Stopwatch()..start();
+    expect(await runtime.evaluate('1 + 1'), isNull);
+    short.stop();
+    expect(short.elapsedMilliseconds, lessThan(50));
+
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(runtime.debugCircuitOpen, isFalse);
+    expect(await runtime.evaluate('1 + 1'), '2');
+  }, skip: available ? false : 'quickjs 动态库不可用(宿主环境缺 DLL)');
+
   test('death-loop script is interrupted instead of hanging forever', () async {
     final sw = Stopwatch()..start();
     final result = await JsHookRuntime().evaluate('while(true){}');

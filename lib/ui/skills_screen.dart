@@ -14,13 +14,18 @@ import '../models/skill.dart';
 import '../models/worldbook_entry.dart';
 import '../state/providers.dart';
 import 'common/app_menu.dart';
+import 'common/app_sheet.dart';
+import 'common/app_snack_bar.dart';
+import 'common/async_section.dart';
 import 'common/confirm_dialog.dart';
 import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
 import 'common/form_field.dart';
+import 'common/inline_spinner.dart';
 import 'common/list_page_scaffold.dart';
 import 'common/resource_io.dart';
 import 'common/section_header.dart';
+import 'common/sheet_header.dart';
 import 'common/toggle_delete_tile.dart';
 
 /// 技能列表页(设置页「内容与扩展 · 技能」入口)。
@@ -139,13 +144,7 @@ class SkillsScreen extends ConsumerWidget {
               await ref.read(skillRepositoryProvider).setEnabled(s.id!, v);
               ref.invalidate(skillsProvider);
               if (!context.mounted) return;
-              ScaffoldMessenger.of(context)
-                ..hideCurrentSnackBar()
-                ..showSnackBar(
-                  SnackBar(
-                    content: Text(v ? '已启用「${s.name}」' : '已停用「${s.name}」'),
-                  ),
-                );
+              showAppSnack(context, v ? '已启用「${s.name}」' : '已停用「${s.name}」');
             },
             onDelete: () => _delete(context, ref, s),
             onTap: () => Navigator.push(
@@ -212,15 +211,11 @@ class _SkillEditScreenState extends ConsumerState<SkillEditScreen> {
     if (_saving) return;
     final name = _name.text.trim();
     if (name.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('名称不能为空')));
+      showAppSnack(context, '名称不能为空');
       return;
     }
     if (_content.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('内容不能为空')));
+      showAppSnack(context, '内容不能为空');
       return;
     }
     setState(() => _saving = true);
@@ -248,6 +243,9 @@ class _SkillEditScreenState extends ConsumerState<SkillEditScreen> {
       }
       ref.invalidate(skillsProvider);
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      // 写库失败:留在本页保留表单,明确提示失败原因。
+      if (mounted) showAppSnack(context, '保存失败: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -364,16 +362,16 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
           ]);
       ref.invalidate(skillsProvider);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            skipped > 0
-                ? '已导入 $imported 个技能,$skipped 个与现有技能同名已跳过'
-                : '已导入 $imported 个技能',
-          ),
-        ),
+      showAppSnack(
+        context,
+        skipped > 0
+            ? '已导入 $imported 个技能,$skipped 个与现有技能同名已跳过'
+            : '已导入 $imported 个技能',
       );
       Navigator.pop(context);
+    } catch (e) {
+      // 批量写库失败:留在本页保留勾选,明确提示失败原因。
+      if (mounted) showAppSnack(context, '导入失败: $e');
     } finally {
       if (mounted) setState(() => _importing = false);
     }
@@ -396,11 +394,7 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
                   ? null
                   : _importSelected,
               icon: _importing
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
+                  ? const InlineSpinner()
                   : const Icon(Icons.download_outlined),
               label: Text(
                 _importing ? '导入中…' : '导入选中 (${_selectedIds.length})',
@@ -412,18 +406,18 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
 
   Widget _buildCharacterPicker() {
     final charactersAsync = ref.watch(charactersProvider);
-    return charactersAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) =>
-          EmptyState(icon: Icons.error_outline, title: '加载失败', message: '$e'),
-      data: (records) => records.isEmpty
+    return AsyncSection<List<CharacterRecord>>(
+      value: charactersAsync,
+      compact: false,
+      onRetry: () => ref.invalidate(charactersProvider),
+      builder: (context, records) => records.isEmpty
           ? const EmptyState(
               icon: Icons.person_off_outlined,
               title: '暂无角色卡',
               message: '先在首页导入或创建角色卡。',
             )
           : ListView.builder(
-              padding: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
               itemCount: records.length,
               itemBuilder: (context, i) {
                 final r = records[i];
@@ -444,7 +438,7 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
 
   Widget _buildEntryPicker() {
     if (_loadingEntries) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: InlineSpinner(size: 36, strokeWidth: 4));
     }
     if (_error != null) {
       return EmptyState(
@@ -478,7 +472,7 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
                 child: Text(
                   '勾选条目导入为技能(无描述、同名跳过);点条目查看完整内容。',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.outline,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                 ),
               ),
@@ -503,7 +497,7 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
         ),
         Expanded(
           child: ListView.builder(
-            padding: const EdgeInsets.only(top: 8, bottom: 96),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
             itemCount: _entries.length,
             itemBuilder: (context, i) {
               final e = _entries[i];
@@ -547,8 +541,10 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
 
   /// 底部弹层查看条目完整内容:名称 + 触发方式(常驻/关键词/正则)+ 可复制全文。
   void _showEntryContent(BuildContext context, WorldbookEntry e) {
-    showModalBottomSheet<void>(
-      context: context,
+    showAppSheet<void>(
+      context,
+      isScrollControlled: false,
+      showDragHandle: true,
       builder: (sheetContext) => ConstrainedBox(
         constraints: BoxConstraints(
           maxHeight: MediaQuery.of(sheetContext).size.height * 0.75,
@@ -559,28 +555,11 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(
-                children: [
-                  Icon(
-                    e.constant
-                        ? Icons.anchor_outlined
-                        : Icons.menu_book_outlined,
-                    size: 20,
-                    color: Theme.of(sheetContext).colorScheme.primary,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      e.displayLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
+              ChatSheetHeader(
+                icon: e.constant
+                    ? Icons.anchor_outlined
+                    : Icons.menu_book_outlined,
+                title: e.displayLabel,
               ),
               const SizedBox(height: 4),
               Text(
@@ -591,7 +570,7 @@ class _SkillImportScreenState extends ConsumerState<SkillImportScreen> {
                     : '关键词:${e.keys.join(', ')}',
                 style: TextStyle(
                   fontSize: 12,
-                  color: Theme.of(sheetContext).colorScheme.outline,
+                  color: Theme.of(sheetContext).colorScheme.onSurfaceVariant,
                 ),
               ),
               const SizedBox(height: 12),

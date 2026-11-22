@@ -405,12 +405,12 @@ void main() {
       final b = build();
       await exec(b.spec, 'setAvatarPrompt', {'prompt': '1girl, red hair'});
       expect(b.staging.avatarPrompt, '1girl, red hair');
-      b.staging.avatarBase64 = 'OLD';
+      b.staging.avatarHash = 'OLD';
       b.staging.generatedPrompt = '1girl, red hair';
 
       await exec(b.spec, 'setAvatarPrompt', {'prompt': '1girl, blue hair'});
       expect(b.staging.avatarPrompt, '1girl, blue hair');
-      expect(b.staging.avatarBase64, isNull);
+      expect(b.staging.avatarHash, isNull);
 
       await exec(b.spec, 'setAvatarPrompt', {'prompt': '   '});
       expect(b.staging.avatarPrompt, isNull);
@@ -495,6 +495,151 @@ void main() {
       await exec(b.spec, 'readDraft', {'offset': -1}),
       contains('offset'),
     );
+  });
+
+  test('readDraft pages long entry content with contentOffset/contentLimit', () async {
+    final content = List.generate(500, (i) => '第$i行 "quoted" 正文').join('\n');
+    expect(content.length, greaterThan(CardProfile.readEntryCharsMax));
+    final b = build(
+      staging: CardStaging(
+        baseEntries: [
+          WorldbookEntry(
+            id: 5,
+            characterId: 7,
+            name: '长条目',
+            keys: const ['k'],
+            content: content,
+          ),
+        ],
+        characterId: 7,
+      ),
+    );
+
+    final pages = <String>[];
+    int? offset;
+    int? totalChars;
+    while (true) {
+      final raw = await exec(b.spec, 'readDraft', {
+        'entryId': 5,
+        if (offset != null) 'contentOffset': offset,
+      });
+      expect(raw.length, lessThan(4000));
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      totalChars ??= decoded['contentChars'] as int;
+      expect(decoded['contentChars'], totalChars);
+      expect(decoded['contentChars'], content.length);
+      final page = decoded['content'] as String;
+      expect(page.length, lessThanOrEqualTo(CardProfile.readEntryCharsMax));
+      pages.add(page);
+      offset = decoded['nextOffset'] as int?;
+      if (offset == null) break;
+    }
+    expect(pages.length, greaterThan(1));
+    expect(pages.join(), content);
+
+    final clamped = jsonDecode(await exec(b.spec, 'readDraft', {
+      'entryId': 5,
+      'contentLimit': 99999,
+    })) as Map<String, dynamic>;
+    expect(
+      clamped['contentLimit'],
+      lessThanOrEqualTo(CardProfile.readEntryCharsMax),
+    );
+
+    expect(
+      await exec(b.spec, 'readDraft', {'entryId': 5, 'contentOffset': -1}),
+      contains('contentOffset'),
+    );
+    await expectLater(
+      exec(b.spec, 'readDraft', {'entryId': 5, 'contentLimit': 'x'}),
+      throwsA(isA<AgentToolFailure>()),
+    );
+  });
+
+  test('readDraft entry detail keeps valid JSON under the cap with huge keys', () async {
+    final keys = [
+      for (var i = 0; i < CardProfile.maxEntryKeys; i++)
+        '${'k' * 40}${i.toString().padLeft(2, '0')}',
+    ];
+    final content = 'x' * 6000;
+    final b = build(
+      staging: CardStaging(
+        baseEntries: [
+          WorldbookEntry(
+            id: 9,
+            characterId: 7,
+            name: '巨键条目',
+            keys: keys,
+            content: content,
+          ),
+        ],
+        characterId: 7,
+      ),
+    );
+
+    final pages = <String>[];
+    int? offset;
+    while (true) {
+      final raw = await exec(b.spec, 'readDraft', {
+        'entryId': 9,
+        'contentLimit': 3000,
+        if (offset != null) 'contentOffset': offset,
+      });
+      expect(raw.length, lessThan(4000));
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      expect(decoded['contentChars'], content.length);
+      expect(
+        (decoded['keys'] as List).length,
+        lessThanOrEqualTo(CardProfile.maxEntryKeys),
+      );
+      pages.add(decoded['content'] as String);
+      offset = decoded['nextOffset'] as int?;
+      if (offset == null) break;
+    }
+    expect(pages.join(), content);
+  });
+
+  test('readDraft 40-entry summary page shrinks within the result cap', () async {
+    final b = build(
+      staging: CardStaging(
+        baseEntries: [
+          for (var i = 1; i <= 40; i++)
+            WorldbookEntry(
+              id: i,
+              characterId: 7,
+              name: 'N' * 40,
+              keys: const ['k'],
+              content: 'c' * 1000,
+              position: i,
+            ),
+        ],
+        characterId: 7,
+      ),
+    );
+    b.staging.avatarPrompt = 'p' * 1200;
+
+    final ids = <int>{};
+    int? offset;
+    var pages = 0;
+    while (true) {
+      final raw = await exec(b.spec, 'readDraft', {
+        'limit': 40,
+        if (offset != null) 'offset': offset,
+      });
+      expect(raw.length, lessThan(4000));
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      expect(decoded['entryPage']['total'], 40);
+      final entries = decoded['entries'] as List;
+      expect(entries.length, lessThanOrEqualTo(40));
+      for (final item in entries) {
+        ids.add((item as Map<String, dynamic>)['id'] as int);
+      }
+      offset = (decoded['entryPage'] as Map<String, dynamic>)['nextOffset'] as int?;
+      pages++;
+      expect(pages, lessThan(10));
+      if (offset == null) break;
+    }
+    expect(ids, hasLength(40));
   });
 
   test('readDraft reads one card field in pages within the result cap', () async {

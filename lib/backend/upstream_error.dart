@@ -32,6 +32,10 @@ enum UpstreamErrorKind {
   /// 非上游故障,不应重试;补全模型配置后可直接重发。
   configuration,
 
+  /// 请求超出模型上下文容量(400 且正文含上下文超长签名)。非瞬态:
+  /// 原样重试必然再次失败,处置是压缩历史或换更大上下文的模型。
+  contextLength,
+
   /// 契约不符:SSE 载荷损坏、未知字段被拒、只回工具调用、以及一切
   /// "响应形状对不上已知协议"的情形 —— 上游协议漂移的首要信号。
   contractViolation;
@@ -45,6 +49,7 @@ enum UpstreamErrorKind {
         UpstreamErrorKind.rateLimit => '触发限流',
         UpstreamErrorKind.transient => '瞬态故障',
         UpstreamErrorKind.configuration => '配置错误',
+        UpstreamErrorKind.contextLength => '上下文超长',
         UpstreamErrorKind.contractViolation => '契约不符',
       };
 
@@ -57,6 +62,7 @@ enum UpstreamErrorKind {
         UpstreamErrorKind.rateLimit => '请求频率超限;稍后重试',
         UpstreamErrorKind.transient => '网络或服务端临时故障;可重试',
         UpstreamErrorKind.configuration => '模型配置不完整;请在设置 → LLM Provider 的模型编辑中补全所需字段',
+        UpstreamErrorKind.contextLength => '请求超出模型上下文容量;请压缩历史或切换到更大上下文的模型',
         UpstreamErrorKind.contractViolation => '响应与已知契约不符 —— 上游协议可能已变更;请用「测试连接」复核',
       };
 }
@@ -108,6 +114,22 @@ const List<String> _rateLimitSignatures = [
   'too many requests',
 ];
 
+/// 上下文超长签名:OpenAI/Anthropic 及其兼容网关的常见文案。命中即
+/// [UpstreamErrorKind.contextLength](非瞬态,重试无意义),优先于 400
+/// 的通用「契约不符」判定。
+const List<String> _contextLengthSignatures = [
+  'context_length_exceeded',
+  'maximum context length',
+  'context length exceeded',
+  'exceeds the context window',
+  'context window',
+  'prompt is too long',
+  'input is too long',
+  'too many tokens',
+  'context 超长',
+  '上下文长度',
+];
+
 /// 按状态码 + 服务端错误类型 + 正文特征归类一次上游失败。
 ///
 /// [statusCode] 为流中途错误负载(200 响应内的 `{"error":{...}}` 块)时传
@@ -123,6 +145,9 @@ UpstreamErrorKind classifyUpstreamFailure({int? statusCode, String? errorType, S
   if (has(_authSignatures)) return UpstreamErrorKind.auth;
   if (has(_policySignatures)) return UpstreamErrorKind.gatewayPolicy;
   if (has(_quotaSignatures)) return UpstreamErrorKind.quota;
+  // 上下文超长是确定性失败:与「契约漂移」共用 400,但处置完全不同
+  // (压缩/换模型,而不是重试或排查协议)。
+  if (has(_contextLengthSignatures)) return UpstreamErrorKind.contextLength;
 
   final status = statusCode;
   if (status != null) {
@@ -142,7 +167,40 @@ UpstreamErrorKind classifyUpstreamFailure({int? statusCode, String? errorType, S
 
   // 无状态码(流中途错误负载):正文特征已试过,再试限流特征,默认瞬态。
   if (has(_rateLimitSignatures)) return UpstreamErrorKind.rateLimit;
+  // invalid_request_error 是确定性请求错误(参数/长度/结构不合法):归非瞬态,
+  // 否则 agent 会把同一条注定失败的请求重试到尝试耗尽并重复计费。
+  if (type.contains('invalid_request') || type.contains('invalid request')) {
+    return UpstreamErrorKind.contractViolation;
+  }
   return UpstreamErrorKind.transient;
+}
+
+final RegExp _bearerPattern = RegExp(
+  r'\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}',
+  caseSensitive: false,
+);
+final RegExp _skKeyPattern = RegExp(r'\bsk-[A-Za-z0-9_-]{6,}');
+final RegExp _keyFieldPattern = RegExp(
+  r'''("?(?:api[_-]?key|x-api-key|authorization)"?\s*[:=]\s*"?)([^\s"',}]{8,})''',
+  caseSensitive: false,
+);
+final RegExp _longTokenPattern = RegExp(r'\b[A-Za-z0-9_-]{40,}\b');
+
+/// 上游错误文本的统一脱敏:服务端可能回显请求头或密钥。
+///
+/// 先按本次请求的 [apiKey] 精确替换(长度足够时),再遮蔽 Bearer 令牌、
+/// `sk-` 前缀密钥、`api_key: ...` 形态的字段值与超长 token 串。宁可多遮蔽
+/// 诊断文本,也不让密钥进入错误横幅/日志。
+String redactSecrets(String text, {String? apiKey}) {
+  var out = text;
+  if (apiKey != null && apiKey.length >= 4) {
+    out = out.replaceAll(apiKey, '***');
+  }
+  out = out.replaceAllMapped(_bearerPattern, (m) => '${m.group(1)} ***');
+  out = out.replaceAll(_skKeyPattern, 'sk-***');
+  out = out.replaceAllMapped(_keyFieldPattern, (m) => '${m.group(1)}***');
+  out = out.replaceAll(_longTokenPattern, '***');
+  return out;
 }
 
 /// 从非 2xx 响应体中尽力提取服务端错误类型与消息,供 [classifyUpstreamFailure]

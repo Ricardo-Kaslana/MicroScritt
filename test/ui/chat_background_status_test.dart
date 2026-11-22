@@ -1,10 +1,12 @@
 // 聊天页后台状态与主写控制:后台维护收尾的灵岛闪示、流式中断键与部分回复
 // 落库、空记忆初始化提示的出现/初始化/关闭。
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:microscritt/models/app_settings.dart';
 import 'package:microscritt/models/backend_config.dart';
 import 'package:microscritt/backend/llm_backend.dart';
 import 'package:microscritt/data/character_repository.dart';
@@ -13,9 +15,11 @@ import 'package:microscritt/data/memory_repository.dart';
 import 'package:microscritt/data/message_repository.dart';
 import 'package:microscritt/data/session_repository.dart';
 import 'package:microscritt/models/character_card.dart';
+import 'package:microscritt/models/llm_tool.dart';
 import 'package:microscritt/state/chat_controller.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/chat_screen.dart';
+import '../support/scripted_llm_backend.dart';
 import '../support/test_database.dart';
 
 /// 主写返回 reply.,后台调用返回一段状态 JSON —— 模拟真实双写引擎。
@@ -456,4 +460,89 @@ void main() {
       await tester.runAsync(() => db.db.close());
     },
   );
+
+  testWidgets('agentic suggestions auto-open the sheet and ignore drops the batch', (
+    tester,
+  ) async {
+    late final AppDatabase db;
+    late final int charId;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
+      sessionId = await SessionRepository(db).create(charId, 's1');
+    });
+
+    List<LlmEvent> step(String name, Map<String, Object?> args) => [
+      ToolCallsEvent([
+        ToolCall(id: name, name: name, arguments: jsonEncode(args)),
+      ]),
+      const DoneEvent(),
+    ];
+    final backend = ScriptedLlmBackend([
+      [const TextDelta('reply.'), const DoneEvent()],
+      step('setNextSuggestions', {
+        'suggestions': ['我环顾四周。', '我后退半步。'],
+      }),
+      step('finish', const {}),
+    ]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          databaseProvider.overrideWithValue(db),
+          backendConfigProvider.overrideWith(
+            (ref) => const BackendConfig(
+              provider: BackendProvider.openai,
+              baseUrl: 'https://x',
+              apiKey: 'k',
+              model: 'm',
+            ),
+          ),
+          backendProvider.overrideWith((ref) => backend),
+          appSettingsProvider.overrideWith(
+            (ref) => const AppSettings(
+              backgroundMode: BackgroundMode.agentic,
+              backgroundNextSuggestions: true,
+            ),
+          ),
+        ],
+        child: MaterialApp(
+          home: ChatScreen(
+            sessionId: sessionId,
+            characterId: charId,
+            character: const CharacterCard(name: 'Alice'),
+          ),
+        ),
+      ),
+    );
+    await _pumpUntilLoaded(tester);
+
+    await tester.enterText(find.byType(TextField), 'hi');
+    await tester.pump();
+    await tester.tap(find.byTooltip('发送'));
+    await tester.pump();
+
+    // 后台收尾后自动弹底单;轮询等它出现(后台轮是 unawaited)。
+    await tester.runAsync(() async {
+      for (var i = 0; i < 100; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        await tester.pump();
+        if (find.text('下一步建议').evaluate().isNotEmpty) break;
+      }
+      await tester.pumpAndSettle();
+    });
+    expect(find.text('下一步建议'), findsOneWidget);
+    expect(find.text('我环顾四周。'), findsOneWidget);
+    expect(find.text('我后退半步。'), findsOneWidget);
+
+    await tester.tap(find.text('忽略本批建议'));
+    await tester.pumpAndSettle();
+    expect(find.text('下一步建议'), findsNothing);
+    expect(find.text('我环顾四周。'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() => db.db.close());
+  });
 }

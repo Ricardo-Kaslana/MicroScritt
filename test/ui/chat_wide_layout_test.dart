@@ -114,7 +114,7 @@ Future<void> _waitForMessagesPumping(WidgetTester tester, int expected) async {
   );
 }
 
-/// 长正文:把气泡撑到各自的宽度上限(助手与输入卡同宽 856 / 用户 520)。
+/// 长正文:把气泡撑到各自的宽度上限(助手与输入卡同宽 = 列宽 − 24 / 用户 520)。
 final _longText = '这是一段足够长的正文内容,用来把气泡撑到宽度上限,验证宽窗下的列收敛。' * 6;
 
 /// 有限帧推进(替代 pumpAndSettle):发送后灵动岛处于后台维护实况模式,
@@ -189,6 +189,17 @@ Future<void> _pumpChat(
 }
 
 void main() {
+  test('会话列宽在断点两侧连续,超过 880 后封顶', () {
+    // 880 以下吃满;880 起封顶居中;999/1000 同宽,输入卡不再跳变,
+    // 宽屏也不会再把输入卡横向拉长。
+    expect(chatColumnMaxWidth(390), 390);
+    expect(chatColumnMaxWidth(880), kChatColumnMaxWidth);
+    expect(chatColumnMaxWidth(999), kChatColumnMaxWidth);
+    expect(chatColumnMaxWidth(1000), kChatColumnMaxWidth);
+    expect(chatColumnMaxWidth(1400), kChatColumnMaxWidth);
+    expect(chatColumnMaxWidth(1600), kChatColumnMaxWidth);
+  });
+
   testWidgets('宽窗:消息/输入区收敛进居中列,AppBar 贴窗格两缘', (tester) async {
     // 1100:已进入居中列布局,但未到 1200 的侧栏阈值 —— 本组用例只守列收敛。
     tester.view
@@ -214,13 +225,13 @@ void main() {
     await _pumpFrames(tester);
 
     final edges = _columnEdges(1100);
-    expect(edges.left, 110);
+    expect(edges.left, closeTo((1100 - chatColumnMaxWidth(1100)) / 2, 1));
     final rects = _bubbleRects(tester);
     expect(rects.length, 2);
-    // 助手气泡贴列左缘(外框含 12 边距),上限与输入卡同宽:856 + 24 = 880。
+    // 助手气泡贴列左缘(外框含 12 边距),上限与输入卡同宽:1100 时列宽 880。
     final assistant = rects.reduce((a, b) => a.left < b.left ? a : b);
     expect(assistant.left, closeTo(edges.left, 1));
-    expect(assistant.width, closeTo(880, 1));
+    expect(assistant.width, closeTo(chatColumnMaxWidth(1100), 1));
     // 用户气泡贴列右缘,封顶 520 + 24 = 544 —— 不再飞到窗口右缘。
     // 助手气泡撑满后两者右缘相同(列右缘),按宽度区分:更窄的是用户气泡。
     final user = rects.reduce((a, b) => a.width < b.width ? a : b);
@@ -287,7 +298,7 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
-  testWidgets('中宽与窄窗:保持满宽布局', (tester) async {
+  testWidgets('窄窗满宽、中宽收敛:880 起列宽封顶', (tester) async {
     tester.view
       ..physicalSize = const Size(900, 700)
       ..devicePixelRatio = 1.0;
@@ -310,12 +321,14 @@ void main() {
     await _waitForMessages(tester, 2);
     await _pumpFrames(tester);
 
-    // 900 < 阈值:助手贴窗口左缘、用户贴窗口右缘(原舒适布局不动)。
+    // 900 已超过 880 阅读列宽:列居中留白,输入卡不再拉满整窗。
+    final edges900 = _columnEdges(900);
     var rects = _bubbleRects(tester);
     var assistant = rects.reduce((a, b) => a.left < b.left ? a : b);
     var user = rects.reduce((a, b) => a.right > b.right ? a : b);
-    expect(assistant.left, closeTo(0, 1));
-    expect(user.right, closeTo(900, 1));
+    expect(assistant.left, closeTo(edges900.left, 1));
+    expect(assistant.width, closeTo(chatColumnMaxWidth(900), 1));
+    expect(user.right, closeTo(edges900.right, 1));
 
     // 缩到手机宽度再拉回宽窗:布局随窗口实时切换,不残留旧约束。
     tester.view.physicalSize = const Size(390, 844);
@@ -350,11 +363,11 @@ void main() {
     late final AppDatabase db;
     late final int sid;
     await tester.runAsync(() async {
-      art = await _pngBase64();
       db = await openTestDb();
+      art = (await db.images.putBytes(base64Decode(await _pngBase64()))).hash;
       final charId = await CharacterRepository(
         db,
-      ).insert(CharacterCard(name: 'Alice', avatarBase64: art));
+      ).insert(CharacterCard(name: 'Alice', avatarHash: art));
       sid = await SessionRepository(db).create(charId, 's');
       await MessageRepository(
         db,
@@ -365,7 +378,7 @@ void main() {
       tester,
       db: db,
       sessionId: sid,
-      character: CharacterCard(name: 'Alice', avatarBase64: art),
+      character: CharacterCard(name: 'Alice', avatarHash: art),
       backgroundEnabled: true,
     );
     await _waitForMessages(tester, 1);
@@ -379,14 +392,20 @@ void main() {
     tester.view.physicalSize = const Size(990, 900);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 16));
-    expect(tester.state(find.byKey(const ValueKey('chat-background'))), same(bg));
+    expect(
+      tester.state(find.byKey(const ValueKey('chat-background'))),
+      same(bg),
+    );
     expect(tester.state(find.byType(MessageList)), same(list));
 
     // 1200 断点(侧栏收展)同样只动侧栏槽,不重建内容层。
     tester.view.physicalSize = const Size(1410, 900);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 16));
-    expect(tester.state(find.byKey(const ValueKey('chat-background'))), same(bg));
+    expect(
+      tester.state(find.byKey(const ValueKey('chat-background'))),
+      same(bg),
+    );
     expect(tester.state(find.byType(MessageList)), same(list));
 
     // 收尾:卸载并让侧栏数据查询等在途 DB future 落定后再关库。
@@ -409,11 +428,11 @@ void main() {
     late final AppDatabase db;
     late final int sid;
     await tester.runAsync(() async {
-      art = await _pngBase64();
       db = await openTestDb();
+      art = (await db.images.putBytes(base64Decode(await _pngBase64()))).hash;
       final charId = await CharacterRepository(
         db,
-      ).insert(CharacterCard(name: 'Alice', avatarBase64: art));
+      ).insert(CharacterCard(name: 'Alice', avatarHash: art));
       sid = await SessionRepository(db).create(charId, 's');
       await MessageRepository(
         db,
@@ -424,7 +443,7 @@ void main() {
       tester,
       db: db,
       sessionId: sid,
-      character: CharacterCard(name: 'Alice', avatarBase64: art),
+      character: CharacterCard(name: 'Alice', avatarHash: art),
       backgroundEnabled: true,
     );
     await _waitForMessages(tester, 1);
@@ -449,11 +468,11 @@ void main() {
     late final AppDatabase db;
     late final int sid;
     await tester.runAsync(() async {
-      art = await _pngBase64();
       db = await openTestDb();
+      art = (await db.images.putBytes(base64Decode(await _pngBase64()))).hash;
       final charId = await CharacterRepository(
         db,
-      ).insert(CharacterCard(name: 'Alice', avatarBase64: art));
+      ).insert(CharacterCard(name: 'Alice', avatarHash: art));
       sid = await SessionRepository(db).create(charId, 's');
       await MessageRepository(
         db,
@@ -465,7 +484,7 @@ void main() {
       tester,
       db: db,
       sessionId: sid,
-      character: CharacterCard(name: 'Alice', avatarBase64: art),
+      character: CharacterCard(name: 'Alice', avatarHash: art),
       backgroundEnabled: true,
       boundaryKey: shotKey,
     );

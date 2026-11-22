@@ -12,6 +12,7 @@ import '../import/worldbook_importer.dart';
 import '../models/worldbook_entry.dart';
 import '../state/providers.dart';
 import 'common/app_menu.dart';
+import 'common/app_snack_bar.dart';
 import 'common/confirm_dialog.dart';
 import 'common/empty_state.dart';
 import 'common/export_helper.dart';
@@ -20,9 +21,10 @@ import 'common/list_page_scaffold.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/section_header.dart';
 import 'common/toggle_delete_tile.dart';
+import 'common/unsaved_changes_guard.dart';
 
 /// 角色的世界书管理:条目触发(关键词/常驻)后拼进上下文;从角色操作菜单
-/// 「世界书」进入,新建/编辑跳 `WorldbookEntryEditScreen`。
+/// 「世界书管理」进入,新建/编辑跳 `WorldbookEntryEditScreen`。
 ///
 /// 导入导出以独立世界书文件(ST World Info 形态)为准,见
 /// [WorldbookExporter] / [WorldbookImporter]:导出遵循 ST 形态,导入兼容
@@ -196,12 +198,8 @@ class WorldbookScreen extends ConsumerWidget {
     ),
   );
 
-  static void _snack(BuildContext context, String message) {
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
-  }
+  static void _snack(BuildContext context, String message) =>
+      showAppSnack(context, message);
 
   void _openNewEntry(BuildContext context) {
     Navigator.push(
@@ -348,6 +346,9 @@ class _WorldbookEntryEditScreenState
   late bool _enabled;
   bool _saving = false;
 
+  /// 打开编辑器时的表单快照(未保存修改的判定基准)。
+  late String _initialSignature;
+
   bool get _isNew => widget.entry == null;
 
   @override
@@ -360,7 +361,12 @@ class _WorldbookEntryEditScreenState
     _useRegex = e?.useRegex ?? false;
     _constant = e?.constant ?? false;
     _enabled = e?.enabled ?? true;
+    _initialSignature = _signature();
   }
+
+  String _signature() =>
+      '${_name.text}\u0000${_keys.text}\u0000${_content.text}\u0000'
+      '$_useRegex\u0000$_constant\u0000$_enabled';
 
   @override
   void dispose() {
@@ -377,16 +383,13 @@ class _WorldbookEntryEditScreenState
       .toList();
 
   Future<void> _save() async {
+    if (_saving) return;
     if (_content.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('内容不能为空')));
+      showAppSnack(context, '内容不能为空');
       return;
     }
     if (_parsedKeys.isEmpty && !_constant) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请填关键词,或勾选常驻')));
+      showAppSnack(context, '请填关键词,或勾选常驻');
       return;
     }
     setState(() => _saving = true);
@@ -422,6 +425,9 @@ class _WorldbookEntryEditScreenState
           .replaceForCharacter(widget.characterId, updated);
       ref.invalidate(worldbookProvider(widget.characterId));
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      // 整组重写失败:留在本页保留输入,明确提示失败原因。
+      if (mounted) showAppSnack(context, '保存失败: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -429,58 +435,62 @@ class _WorldbookEntryEditScreenState
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_isNew ? '新建条目' : '编辑条目'),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          GroupCard(
-            children: [
-              FormTextField(
-                controller: _name,
-                label: '名称',
-                hint: '列表里显示的标题(可不填;留空时用首关键词)',
-              ),
-              const SizedBox(height: 16),
-              FormTextField(
-                controller: _keys,
-                label: '关键词(逗号分隔)',
-                hint: '消息中出现任一关键词即触发',
-              ),
-              const SizedBox(height: 16),
-              FormTextField(controller: _content, label: '内容 *', lines: 6),
-            ],
-          ),
-          const SizedBox(height: 16),
-          SwitchListTile(
-            title: const Text('常驻(无需关键词)'),
-            value: _constant,
-            onChanged: (v) => setState(() => _constant = v),
-          ),
-          SwitchListTile(
-            title: const Text('关键词按正则匹配'),
-            value: _useRegex,
-            onChanged: (v) => setState(() => _useRegex = v),
-          ),
-          SwitchListTile(
-            title: const Text('启用'),
-            value: _enabled,
-            onChanged: (v) => setState(() => _enabled = v),
-          ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _saving ? null : _save,
-            child: const Text('保存'),
-          ),
-        ],
+    return UnsavedChangesGuard(
+      hasChanges: () => _signature() != _initialSignature,
+      changes: [_name, _keys, _content],
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(_isNew ? '新建条目' : '编辑条目'),
+          actions: [
+            TextButton(
+              onPressed: _saving ? null : _save,
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+        body: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            GroupCard(
+              children: [
+                FormTextField(
+                  controller: _name,
+                  label: '名称',
+                  hint: '列表里显示的标题(可不填;留空时用首关键词)',
+                ),
+                const SizedBox(height: 16),
+                FormTextField(
+                  controller: _keys,
+                  label: '关键词(逗号分隔)',
+                  hint: '消息中出现任一关键词即触发',
+                ),
+                const SizedBox(height: 16),
+                FormTextField(controller: _content, label: '内容 *', lines: 6),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SwitchListTile(
+              title: const Text('常驻(无需关键词)'),
+              value: _constant,
+              onChanged: (v) => setState(() => _constant = v),
+            ),
+            SwitchListTile(
+              title: const Text('关键词按正则匹配'),
+              value: _useRegex,
+              onChanged: (v) => setState(() => _useRegex = v),
+            ),
+            SwitchListTile(
+              title: const Text('启用'),
+              value: _enabled,
+              onChanged: (v) => setState(() => _enabled = v),
+            ),
+            const SizedBox(height: 16),
+            FilledButton(
+              onPressed: _saving ? null : _save,
+              child: const Text('保存'),
+            ),
+          ],
+        ),
       ),
     );
   }

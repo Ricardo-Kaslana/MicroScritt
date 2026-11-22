@@ -12,6 +12,37 @@ void main() {
     expect(back.isCompacted, false);
   });
 
+  test('image hash roundtrips and drives local/visual image flags', () {
+    const hash =
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const m = Message(
+      sessionId: 1,
+      role: 'assistant',
+      content: '',
+      seq: 0,
+      imageHash: hash,
+    );
+    final map = m.toMap();
+    expect(map['image_hash'], hash);
+    expect(map.containsKey('image_base64'), isFalse);
+    final back = Message.fromMap(map);
+    expect(back.imageHash, hash);
+    expect(back.hasImage, isTrue);
+    expect(back.hasVisualImage, isTrue);
+    expect(back.copyWith(content: 'caption').imageHash, hash);
+    expect(back.copyWith(content: 'caption').hasImage, isTrue);
+
+    const emptyHash = Message(
+      sessionId: 1,
+      role: 'assistant',
+      content: '',
+      seq: 0,
+      imageHash: '',
+    );
+    expect(emptyHash.hasImage, isFalse);
+    expect(emptyHash.hasVisualImage, isFalse);
+  });
+
   test('image prompt roundtrips and counts as a visual image', () {
     const m = Message(
       sessionId: 1,
@@ -27,7 +58,12 @@ void main() {
     expect(back.imagePrompt, '1girl, silver hair');
     expect(back.hasVisualImage, isTrue);
 
-    const textOnly = Message(sessionId: 1, role: 'assistant', content: 'hi', seq: 0);
+    const textOnly = Message(
+      sessionId: 1,
+      role: 'assistant',
+      content: 'hi',
+      seq: 0,
+    );
     expect(textOnly.hasVisualImage, isFalse);
     expect(textOnly.imagePrompt, isNull);
   });

@@ -12,15 +12,15 @@ class UserProfile {
   /// 用户名(显示名),可能为空(未设置)。
   final String name;
 
-  /// 头像 base64(可能为 data URI 或纯 base64),可能为空(未上传)。
-  final String? avatarBase64;
+  /// 头像文件资产 SHA-256;字节由 ImageAssetStore 管理。
+  final String? avatarHash;
 
-  const UserProfile({this.id, this.name = '', this.avatarBase64});
+  const UserProfile({this.id, this.name = '', this.avatarHash});
 
-  UserProfile copyWith({int? id, String? name, String? avatarBase64}) => UserProfile(
+  UserProfile copyWith({int? id, String? name, String? avatarHash}) => UserProfile(
     id: id ?? this.id,
     name: name ?? this.name,
-    avatarBase64: avatarBase64 ?? this.avatarBase64,
+    avatarHash: avatarHash ?? this.avatarHash,
   );
 }
 
@@ -30,4 +30,3 @@ String replaceUserPlaceholder(String text, String? userName) {
   if (userName == null || userName.isEmpty) return text;
   return text.replaceAll('{{user}}', userName);
 }
-

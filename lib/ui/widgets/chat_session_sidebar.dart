@@ -17,8 +17,13 @@ import 'package:flutter_riverpod/legacy.dart';
 import '../../data/character_repository.dart';
 import '../../data/session_repository.dart';
 import '../../state/providers.dart';
+import '../common/motion.dart';
 import '../common/app_menu.dart';
 import '../common/app_search_field.dart';
+import '../common/async_section.dart';
+import '../common/empty_state.dart';
+import '../common/hash_image.dart';
+import '../common/inline_spinner.dart';
 
 /// 侧栏检索词(跨页面重建保留;不随侧栏卸载回收)。
 final _sidebarQueryProvider = StateProvider<String>((ref) => '');
@@ -137,40 +142,20 @@ class _ChatSessionSidebarState extends ConsumerState<ChatSessionSidebar> {
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
             ),
             Expanded(
-              child: groups.when(
-                loading: () => const Center(child: CircularProgressIndicator()),
-                error: (e, _) => Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '会话加载失败',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.error,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        TextButton(
-                          onPressed: () =>
-                              ref.invalidate(sessionGroupsProvider),
-                          child: const Text('重试'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                data: (all) {
+              child: AsyncSection<List<SessionGroup>>(
+                value: groups,
+                errorTitle: '会话加载失败',
+                onRetry: () => ref.invalidate(sessionGroupsProvider),
+                builder: (context, all) {
                   final entries = _entries(all, query);
                   if (entries.isEmpty) {
-                    return Center(
-                      child: Text(
-                        query.isEmpty ? '还没有会话' : '没有匹配的会话',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: scheme.outline,
-                        ),
-                      ),
+                    return EmptyState(
+                      compact: true,
+                      icon: query.isEmpty
+                          ? Icons.forum_outlined
+                          : Icons.search_off,
+                      title: query.isEmpty ? '还没有会话' : '没有匹配的会话',
+                      message: query.isEmpty ? '在角色卡里开始一段新对话。' : '换一个关键词试试。',
                     );
                   }
                   return ListView(
@@ -413,7 +398,7 @@ class _GroupHeaderState extends ConsumerState<_GroupHeader> {
     final scheme = theme.colorScheme;
     final character = widget.character;
     final avatar = ref.watch(characterAvatarProvider(character.id));
-    final bytes = avatar.value;
+    final avatarHash = avatar.value;
     final name = _characterName(character);
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
@@ -422,11 +407,10 @@ class _GroupHeaderState extends ConsumerState<_GroupHeader> {
         children: [
           // 头像 24(此前 16 太小,缩小截图或字体缩放后几乎看不清)。组头
           // 行高与右侧「+」键(28)对齐。
-          CircleAvatar(
+          HashAvatar(
+            hash: avatarHash,
             radius: 12,
             backgroundColor: scheme.secondaryContainer,
-            foregroundImage: bytes == null ? null : MemoryImage(bytes),
-            onForegroundImageError: bytes == null ? null : (_, __) {},
             child: Text(
               name.characters.first,
               style: TextStyle(
@@ -449,11 +433,7 @@ class _GroupHeaderState extends ConsumerState<_GroupHeader> {
           if (widget.creating)
             Padding(
               padding: const EdgeInsets.all(6),
-              child: SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
+              child: const InlineSpinner(size: 14),
             )
           else
             // 隐藏时同时退出命中测试:悬停前点不可见区域不应误建会话;
@@ -462,7 +442,10 @@ class _GroupHeaderState extends ConsumerState<_GroupHeader> {
               ignoring: !_hovered,
               child: AnimatedOpacity(
                 opacity: _hovered ? 1 : 0,
-                duration: const Duration(milliseconds: 120),
+                duration: motionDurationOf(
+                  context,
+                  const Duration(milliseconds: 120),
+                ),
                 child: IconButton(
                   tooltip: '新建会话',
                   onPressed: widget.onCreate,
@@ -578,7 +561,10 @@ class _SessionRowState extends State<_SessionRow> {
                     ),
                   AnimatedOpacity(
                     opacity: _hovered || selected ? 1 : 0,
-                    duration: const Duration(milliseconds: 120),
+                    duration: motionDurationOf(
+                      context,
+                      const Duration(milliseconds: 120),
+                    ),
                     child: widget.menu,
                   ),
                 ],

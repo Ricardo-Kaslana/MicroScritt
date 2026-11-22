@@ -8,11 +8,12 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../data/image_codec.dart';
 import '../data/message_repository.dart';
 import '../state/providers.dart';
 import 'common/app_search_field.dart';
 import 'common/empty_state.dart';
+import 'common/inline_spinner.dart';
+import 'common/hash_image.dart';
 import 'common/scroll_to_top_fab.dart';
 import 'widgets/rich_message_text.dart';
 
@@ -30,8 +31,8 @@ class ChatSearchScreen extends ConsumerStatefulWidget {
   /// 助手消息一栏显示的角色名。
   final String characterName;
 
-  /// 角色头像(base64);为 null/坏数据时回退到图标。
-  final String? characterAvatarBase64;
+  /// 角色头像资产 hash;为 null/文件缺失时回退到图标。
+  final String? characterAvatarHash;
 
   /// 上次搜索关键词:重新打开时恢复输入并直接检索。
   final String initialQuery;
@@ -43,7 +44,7 @@ class ChatSearchScreen extends ConsumerStatefulWidget {
     super.key,
     required this.sessionId,
     required this.characterName,
-    this.characterAvatarBase64,
+    this.characterAvatarHash,
     this.initialQuery = '',
     this.onQueryChanged,
   });
@@ -193,7 +194,7 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
             onChanged: _onChanged,
           ),
           if (_loading) const LinearProgressIndicator(minHeight: 2),
-          Expanded(child: _body(context, scheme, user.name, user.avatarBase64)),
+          Expanded(child: _body(context, scheme, user.name, user.avatarHash)),
         ],
       ),
     );
@@ -203,7 +204,7 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
     BuildContext context,
     ColorScheme scheme,
     String userName,
-    String? userAvatarBase64,
+    String? userAvatarHash,
   ) {
     if (_error != null) {
       return EmptyState(
@@ -225,7 +226,7 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
       );
     }
     if (_loading && _hits.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: InlineSpinner(size: 36, strokeWidth: 4));
     }
     if (_searched && _hits.isEmpty) {
       return EmptyState(
@@ -293,9 +294,9 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
                   return ListTile(
                     key: ValueKey('chat-search-hit-${hit.hit.messageId}'),
                     leading: _SearchResultAvatar(
-                      avatarBase64: isUser
-                          ? userAvatarBase64
-                          : widget.characterAvatarBase64,
+                      avatarHash: isUser
+                          ? userAvatarHash
+                          : widget.characterAvatarHash,
                       fallbackIcon: isUser
                           ? Icons.person_outline
                           : Icons.auto_awesome_outlined,
@@ -383,45 +384,27 @@ class _ChatSearchScreenState extends ConsumerState<ChatSearchScreen> {
   }
 }
 
-/// 搜索结果头像:有可解码头像时显示图片,否则回退到角色/用户图标。
-///
-/// StatefulWidget 缓存解码结果与 ImageProvider:列表随输入/结果刷新反复
-/// 重建,base64 未变时不重复解码。
-class _SearchResultAvatar extends StatefulWidget {
-  final String? avatarBase64;
+/// 搜索结果头像:hash 文件存在时显示降采样图片,否则回退角色/用户图标。
+class _SearchResultAvatar extends ConsumerWidget {
+  final String? avatarHash;
   final IconData fallbackIcon;
   final Color backgroundColor;
   final Color foregroundColor;
 
   const _SearchResultAvatar({
-    required this.avatarBase64,
+    required this.avatarHash,
     required this.fallbackIcon,
     required this.backgroundColor,
     required this.foregroundColor,
   });
 
   @override
-  State<_SearchResultAvatar> createState() => _SearchResultAvatarState();
-}
-
-class _SearchResultAvatarState extends State<_SearchResultAvatar> {
-  String? _key;
-  MemoryImage? _provider;
-
-  @override
-  Widget build(BuildContext context) {
-    if (_key != widget.avatarBase64) {
-      _key = widget.avatarBase64;
-      final bytes = safeBase64Decode(widget.avatarBase64);
-      _provider = bytes == null ? null : MemoryImage(bytes);
-    }
-    return CircleAvatar(
+  Widget build(BuildContext context, WidgetRef ref) {
+    return HashAvatar(
+      hash: avatarHash,
       radius: 16,
-      backgroundColor: widget.backgroundColor,
-      backgroundImage: _provider,
-      child: _provider == null
-          ? Icon(widget.fallbackIcon, size: 18, color: widget.foregroundColor)
-          : null,
+      backgroundColor: backgroundColor,
+      child: Icon(fallbackIcon, size: 18, color: foregroundColor),
     );
   }
 }

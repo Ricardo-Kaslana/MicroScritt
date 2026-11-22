@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 import '../models/llm_provider.dart';
 import '../models/llm_units.dart';
+import 'common/app_snack_bar.dart';
 import 'common/form_field.dart';
 
 /// 新建/编辑一个模型目录条目(模型 ID / 展示名 / 上下文容量 / 最大输出 /
@@ -81,7 +82,7 @@ class _ModelEditSheetState extends State<ModelEditSheet> {
           children: [
             Text(
               widget.existing == null ? '添加模型' : '编辑模型',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 16),
             FormTextField(
@@ -127,21 +128,35 @@ class _ModelEditSheetState extends State<ModelEditSheet> {
                 final displayName = _displayName.text.trim();
                 final contextCap = parseTokenShorthand(_context.text) ?? 0;
                 if (modelId.isEmpty || displayName.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请填写模型 ID 与展示名称')));
+                  showAppSnack(context, '请填写模型 ID 与展示名称');
                   return;
                 }
                 if (contextCap <= 0) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请填写有效的上下文容量(如 128k、1m)')));
+                  showAppSnack(context, '请填写有效的上下文容量(如 128k、1m)');
                   return;
                 }
-                final maxOut = parseTokenShorthand(_maxOutput.text);
+                // 最大输出可留空(OpenAI 兼容协议按上游默认),填了就必须是
+                // 正的有限数;超大/零值由 parseTokenShorthand 判 null,这里给出
+                // 可见错误而不是把异常抛进按钮回调。
+                final maxOutRaw = _maxOutput.text.trim();
+                int? maxOut;
+                if (maxOutRaw.isNotEmpty) {
+                  maxOut = parseTokenShorthand(maxOutRaw);
+                  if (maxOut == null) {
+                    showAppSnack(
+                      context,
+                      '最大输出 tokens 需为正整数或简写(如 8k、256k),且不超过 10 亿',
+                    );
+                    return;
+                  }
+                }
                 final tempRaw = _temperature.text.trim();
                 // 清空即采用模型默认温度(唯一默认值 1);填了就必须合法。
                 var temp = LlmModelEntry.defaultTemperature;
                 if (tempRaw.isNotEmpty) {
                   final parsed = double.tryParse(tempRaw);
                   if (parsed == null || parsed < 0 || parsed > 2) {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Temperature 需为 0.0 – 2.0 之间的数字')));
+                    showAppSnack(context, 'Temperature 需为 0.0 – 2.0 之间的数字');
                     return;
                   }
                   temp = parsed;

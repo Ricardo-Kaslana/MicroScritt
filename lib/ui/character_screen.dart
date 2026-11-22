@@ -20,18 +20,22 @@ import '../import/worldbook_importer.dart';
 import '../models/character_card.dart';
 import '../models/ui_prefs.dart';
 import '../models/worldbook_entry.dart';
+import '../state/card_studio_draft_assets.dart';
 import '../state/providers.dart';
 import '../state/ui_prefs_sync.dart';
 import 'card_studio/card_studio_screen.dart';
 import 'character_edit_screen.dart';
 import 'common/app_menu.dart';
+import 'common/app_snack_bar.dart';
+import 'common/async_section.dart';
 import 'common/confirm_dialog.dart';
 import 'common/empty_state.dart';
 import 'common/export_helper.dart';
 import 'common/pick_file_bytes.dart';
 import 'common/progress_task.dart';
 import 'common/searchable_list.dart';
-import '../data/shrink_image.dart';
+import 'common/section_header.dart';
+import '../data/image_asset_input.dart';
 import 'sessions_screen.dart';
 import 'settings_screen.dart';
 import 'widgets/character_avatar_preview.dart';
@@ -63,12 +67,8 @@ class CharacterScreen extends ConsumerWidget {
     unawaited(syncUiPrefsFile(ref));
   }
 
-  void _toast(BuildContext context, String message) {
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context)
-      ..removeCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
-  }
+  void _toast(BuildContext context, String message) =>
+      showAppSnack(context, message);
 
   static String _readLabel(int read, int total) {
     if (total <= 0) return '读取文件…';
@@ -123,27 +123,18 @@ class CharacterScreen extends ConsumerWidget {
           final entries = WorldbookImporter.extract(card0);
           if (controller.cancelled) return null;
 
-          // 头像/背景缩到安全尺寸再落库:Android SQLite CursorWindow ~2MB,
-          // 大卡头像(整张几 MB PNG 的 base64)不缩会造成列表/详情读取
-          // "Row too big"。PNG 卡直接用原始字节缩放,不再走整图 base64 往返;
-          // 卡 JSON 自带头像时仍以 JSON 为准(与 importer 的优先级一致)。
+          // base64 只在外部卡协议边界出现;PNG 原字节与内嵌头像都先缩图,
+          // 再写入内容寻址资产库。卡 JSON 自带头像时优先于 PNG 图片本体。
           controller.report(message: '处理头像与背景…');
           await WidgetsBinding.instance.endOfFrame;
-          var card = card0;
-          final inlineAvatar = card0.avatarBase64;
-          if (inlineAvatar != null && inlineAvatar.isNotEmpty) {
-            final shrunk = await shrinkBase64Image(inlineAvatar);
-            if (shrunk != null) card = card.replacingAvatar(shrunk);
-          } else if (isPng) {
-            final shrunk = await shrinkImageBytes(bytes);
-            if (shrunk != null) card = card.replacingAvatar(shrunk);
-          }
-          final shrunkBackground = await shrinkBase64Image(
-            card0.backgroundBase64,
-          );
-          if (shrunkBackground != null) {
-            card = card.replacingBackground(shrunkBackground);
-          }
+          final db = ref.read(databaseProvider);
+          final inlineAvatar = card0.importedAvatarBase64;
+          final avatarHash = inlineAvatar != null && inlineAvatar.isNotEmpty
+              ? await assetizeBase64Image(db, inlineAvatar)
+              : isPng
+              ? await assetizeImageBytes(db, bytes)
+              : null;
+          final card = card0.replacingAvatar(avatarHash);
           if (controller.cancelled) return null;
 
           controller.report(message: '写入数据库…');
@@ -187,6 +178,15 @@ class CharacterScreen extends ConsumerWidget {
     );
     if (!confirmed || !context.mounted) return;
     await ref.read(characterRepositoryProvider).deleteWithCascade(id);
+    // 角色已删,孤立提案不再保留;只有文件清理成功后才释放草稿图片引用。
+    final draftFile = ref.read(cardStudioDraftFileProvider);
+    if (draftFile != null) {
+      await clearCardStudioDraftAndRelease(
+        ref.read(databaseProvider),
+        draftFile,
+        id,
+      );
+    }
     ref.invalidate(charactersProvider);
     ref.invalidate(sessionGroupsProvider);
   }
@@ -253,13 +253,35 @@ class CharacterScreen extends ConsumerWidget {
             return null;
           }
           final (card, worldbook) = loaded;
+          String? avatarBase64;
+          final avatarHash = card.avatarHash;
+          if (avatarHash != null) {
+            try {
+              final avatarBytes = await ref
+                  .read(databaseProvider)
+                  .images
+                  .fileFor(avatarHash)
+                  .readAsBytes();
+              avatarBase64 = base64Encode(avatarBytes);
+            } catch (_) {
+              // 原图缺失时 JSON 仍导出卡面;PNG 导出使用名字占位图。
+            }
+          }
           controller.report(message: isPng ? '生成 PNG…' : '生成导出文件…');
           await WidgetsBinding.instance.endOfFrame;
-          // 世界书随卡导出:以本端当前条目为准覆盖 character_book(见 exporter 注释)。
+          // 只有文件导出边界把资产字节还原为外部协议 base64。
           return isPng
-              ? CharacterCardPngExporter.export(card, worldbook: worldbook)
+              ? CharacterCardPngExporter.export(
+                  card,
+                  worldbook: worldbook,
+                  avatarBase64: avatarBase64,
+                )
               : utf8.encoder.convert(
-                  CharacterCardExporter.export(card, worldbook: worldbook),
+                  CharacterCardExporter.export(
+                    card,
+                    worldbook: worldbook,
+                    avatarBase64: avatarBase64,
+                  ),
                 );
         },
       );
@@ -310,7 +332,7 @@ class CharacterScreen extends ConsumerWidget {
         ),
         const MenuAction(
           value: 'worldbook',
-          label: '世界书',
+          label: '世界书管理',
           icon: Icons.book_outlined,
         ),
         const MenuAction(
@@ -446,8 +468,14 @@ class CharacterScreen extends ConsumerWidget {
         icon: const Icon(Icons.add),
         label: const Text('添加'),
       ),
-      body: characters.when(
-        data: (list) => list.isEmpty
+      body: AsyncSection<List<CharacterRecord>>(
+        value: characters,
+        compact: false,
+        onRetry: () {
+          ref.invalidate(charactersProvider);
+          ref.invalidate(sessionGroupsProvider);
+        },
+        builder: (context, list) => list.isEmpty
             ? EmptyState(
                 icon: Icons.person_add_alt_1_outlined,
                 title: '暂无角色',
@@ -513,20 +541,6 @@ class CharacterScreen extends ConsumerWidget {
                   ),
                 ),
               ),
-        error: (e, _) => EmptyState(
-          icon: Icons.error_outline,
-          title: '加载失败',
-          message: '$e',
-          action: FilledButton.tonalIcon(
-            onPressed: () {
-              ref.invalidate(charactersProvider);
-              ref.invalidate(sessionGroupsProvider);
-            },
-            icon: const Icon(Icons.refresh),
-            label: const Text('重试'),
-          ),
-        ),
-        loading: () => const Center(child: CircularProgressIndicator()),
       ),
     );
   }
@@ -588,68 +602,66 @@ class _CharacterCardView extends StatelessWidget {
   Widget build(BuildContext context) {
     final card = record.card;
     final scheme = Theme.of(context).colorScheme;
-    return Card(
+    return SurfaceCard(
       margin: const EdgeInsets.symmetric(horizontal: 16),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onOpen,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(10),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // 左侧竖图头像:角色立绘多为竖图,用固定 3:4 竖版裁切,不再被 16:7 宽横幅
-                  // 压扁/裁掉头部。无头像时用渐变底 + 姓名首字占位。
-                  SizedBox(
-                    width: 96,
-                    // 头像在 data_json/列里不一定带(列表投影已把大 BLOB 排除),
-                    // 一律走惰性加载:有则显示,读取失败/为空回退占位。
-                    child: AspectRatio(
-                      aspectRatio: 3 / 4,
-                      child: CharacterAvatarPreview(
-                        recordId: record.id,
-                        card: card,
+      padding: EdgeInsets.zero,
+      onTap: onOpen,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 左侧竖图头像:角色立绘多为竖图,用固定 3:4 竖版裁切,不再被 16:7 宽横幅
+                // 压扁/裁掉头部。无头像时用渐变底 + 姓名首字占位。
+                SizedBox(
+                  width: 96,
+                  // 头像在 data_json/列里不一定带(列表投影已把大 BLOB 排除),
+                  // 一律走惰性加载:有则显示,读取失败/为空回退占位。
+                  child: AspectRatio(
+                    aspectRatio: 3 / 4,
+                    child: CharacterAvatarPreview(
+                      recordId: record.id,
+                      card: card,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        card.name,
+                        style: Theme.of(context).textTheme.titleMedium,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          card.name,
-                          style: Theme.of(context).textTheme.titleMedium,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        if (card.description.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 2),
-                            child: Text(
-                              card.description,
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: scheme.onSurfaceVariant),
-                            ),
+                      if (card.description.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            card.description,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: scheme.onSurfaceVariant),
                           ),
-                      ],
-                    ),
+                        ),
+                    ],
                   ),
-                  IconButton(
-                    tooltip: '更多操作',
-                    icon: const Icon(Icons.more_vert),
-                    onPressed: onActions,
-                  ),
-                ],
-              ),
+                ),
+                IconButton(
+                  tooltip: '更多操作',
+                  icon: const Icon(Icons.more_vert),
+                  onPressed: onActions,
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -738,7 +750,7 @@ class _CharacterGridTile extends StatelessWidget {
                   backgroundColor: const Color(0x4D000000),
                   foregroundColor: Colors.white,
                 ),
-                icon: const Icon(Icons.more_vert, size: 18),
+                icon: const Icon(Icons.more_vert, size: 20),
               ),
             ),
           ],

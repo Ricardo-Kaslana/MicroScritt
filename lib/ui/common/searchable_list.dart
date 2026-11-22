@@ -155,9 +155,9 @@ class _SearchableListState<T> extends State<SearchableList<T>> {
                   alignment: Alignment.centerLeft,
                   child: Text(
                     query.isEmpty ? '长按或拖动条目可调整顺序' : '搜索状态下不可调整顺序',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: scheme.outline),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
               ),

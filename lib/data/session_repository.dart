@@ -5,6 +5,7 @@
 library;
 
 import 'database.dart';
+import 'message_repository.dart';
 
 /// 一个会话及其累计 token 用量。
 class Session {
@@ -52,7 +53,7 @@ class SessionInfo {
   final DateTime createdAt;
   final int messageCount;
 
-  /// 其中带图的消息数(image_base64/image_url 任一非空);图文混排消息
+  /// 其中带图的消息数(image_hash/image_url 任一非空);图文混排消息
   /// 也计入此项 —— 与 [messageCount] 构成"文本 = 总数 - 图片"的干净划分。
   final int imageCount;
   final String? lastMessage;
@@ -150,9 +151,7 @@ class SessionRepository {
   Future<void> setPinned(int id, bool pinned) async {
     await db.db.update(
       'sessions',
-      {
-        'pinned_at': pinned ? DateTime.now().millisecondsSinceEpoch : null,
-      },
+      {'pinned_at': pinned ? DateTime.now().millisecondsSinceEpoch : null},
       where: 'id = ?',
       whereArgs: [id],
     );
@@ -190,11 +189,33 @@ class SessionRepository {
   }
 
   /// sqflite 默认不启用外键级联,手动在单事务内清理依赖行(消息/变量/记忆/
-  /// 生图指导)。技能是全局目录,不随会话删除。
+  /// 生图指导)及每条消息持有的图片资产引用。技能是全局目录,不随会话删除。
   Future<void> deleteWithCascade(int id) async {
     await db.db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        columns: ['image_hash'],
+        where: 'session_id = ? AND image_hash IS NOT NULL',
+        whereArgs: [id],
+      );
       await txn.delete('messages', where: 'session_id = ?', whereArgs: [id]);
+      for (final row in rows) {
+        final hash = row['image_hash'] as String?;
+        if (hash != null && hash.isNotEmpty) {
+          await db.images.release(txn, hash);
+        }
+      }
       await txn.delete('variables', where: 'session_id = ?', whereArgs: [id]);
+      await txn.delete(
+        'variable_trash',
+        where: 'session_id = ?',
+        whereArgs: [id],
+      );
+      await txn.delete(
+        'variable_deletion_proposals',
+        where: 'session_id = ?',
+        whereArgs: [id],
+      );
       await txn.delete('memories', where: 'session_id = ?', whereArgs: [id]);
       await txn.delete(
         'image_guides',
@@ -203,12 +224,15 @@ class SessionRepository {
       );
       await txn.delete('sessions', where: 'id = ?', whereArgs: [id]);
     });
+    // 级联删除绕过 MessageRepository 的写路径,必须显式失效其全量缓存,
+    // 否则迟到的 bySession 调用能看到已删除会话的完整转写。
+    MessageRepository.invalidateSession(db.db, id);
   }
 
   /// 角色的全部会话 + 消息数 + 带图数 + 最后一条消息预览,单条聚合查询。
   /// 口径与聊天页可见消息一致(`role != 'system' && kind == 'chat'`):
   /// 附件旁路行、压缩摘要等内部行不计入条数、也不作末条预览。
-  /// 带图口径与气泡一致(image_base64 非空串或 image_url 非空);
+  /// 带图口径与消息模型一致(image_hash 或 image_url 非空);
   /// 末条是图片消息(正文为空)时预览显示「图片消息」而非空白。
   /// 排序按「最近有可见消息」倒序(messages.id 全局自增,可直接当活动时间轴);
   /// 空会话排在最后,彼此按创建时间倒序。
@@ -227,12 +251,13 @@ class SessionRepository {
       SELECT s.id AS id, s.character_id AS character_id, s.title AS title, s.created_at AS created_at,
              s.pinned_at AS pinned_at,
              COUNT(m.id) AS message_count,
-             SUM(CASE WHEN (m.image_base64 IS NOT NULL AND m.image_base64 != '') OR m.image_url IS NOT NULL
+             SUM(CASE WHEN (m.image_hash IS NOT NULL AND m.image_hash != '')
+                            OR (m.image_url IS NOT NULL AND m.image_url != '')
                       THEN 1 ELSE 0 END) AS image_count,
              MAX(m.id) AS last_activity,
              (SELECT CASE
-                       WHEN (m2.image_base64 IS NOT NULL AND m2.image_base64 != '')
-                            OR m2.image_url IS NOT NULL THEN '图片消息'
+                       WHEN (m2.image_hash IS NOT NULL AND m2.image_hash != '')
+                            OR (m2.image_url IS NOT NULL AND m2.image_url != '') THEN '图片消息'
                        ELSE m2.content
                       END
                 FROM messages m2

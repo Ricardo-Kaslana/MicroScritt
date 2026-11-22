@@ -1,5 +1,5 @@
-/// 设置工作台的九个分区:用户、外观、对话与后台、LLM 后端、生图、内容与
-/// 扩展、统计、配置、关于。
+/// 设置工作台的十个分区:用户、外观、对话与后台、LLM 后端、生图、内容与
+/// 扩展、统计、图片与存储、配置、关于。
 ///
 /// 全部写操作走 `settings_actions.dart` 的共享函数;子页面(技能、提示词、
 /// Hooks、正则、统计、生图插件/风格)沿用各自原有的独立页面。
@@ -23,6 +23,7 @@ import '../regex_scripts_screen.dart';
 import '../skills_screen.dart';
 import '../usage_stats_screen.dart';
 import '../user_profile_form.dart';
+import 'image_storage_section.dart';
 import 'settings_actions.dart';
 import 'settings_layout.dart';
 import 'settings_provider_sections.dart';
@@ -44,6 +45,7 @@ class SettingsDesktopWorkspace extends StatelessWidget {
       SettingsDesktopSection.image => _ImageWorkspace(section),
       SettingsDesktopSection.extensions => _ExtensionsWorkspace(section),
       SettingsDesktopSection.stats => _StatsWorkspace(section),
+      SettingsDesktopSection.storage => _StorageWorkspace(section),
       SettingsDesktopSection.config => _ConfigWorkspace(section),
       SettingsDesktopSection.about => _AboutWorkspace(section),
     };
@@ -115,42 +117,46 @@ class _AppearanceSettingsCard extends ConsumerWidget {
             icon: Icons.brightness_6_outlined,
             title: '主题',
             description: '选择应用整体明暗;跟随系统会随操作系统切换。',
-            control: SegmentedButton<AppThemeMode>(
-              key: const ValueKey('settings_theme_selector'),
-              segments: const [
-                ButtonSegment(
-                  value: AppThemeMode.system,
-                  label: Text('跟随系统'),
-                  icon: Icon(Icons.brightness_auto),
+            control: ConstrainedBox(
+              // 大字号下三段会撑宽桌面设置行;封顶后横向滚动.
+              constraints: const BoxConstraints(maxWidth: 360),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SegmentedButton<AppThemeMode>(
+                  key: const ValueKey('settings_theme_selector'),
+                  segments: const [
+                    ButtonSegment(
+                      value: AppThemeMode.system,
+                      label: Text('跟随系统'),
+                      icon: Icon(Icons.brightness_auto),
+                    ),
+                    ButtonSegment(
+                      value: AppThemeMode.light,
+                      label: Text('浅色'),
+                      icon: Icon(Icons.light_mode_outlined),
+                    ),
+                    ButtonSegment(
+                      value: AppThemeMode.dark,
+                      label: Text('深色'),
+                      icon: Icon(Icons.dark_mode_outlined),
+                    ),
+                  ],
+                  selected: {settings.themeMode},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (selection) =>
+                      saveThemeMode(ref, selection.first),
                 ),
-                ButtonSegment(
-                  value: AppThemeMode.light,
-                  label: Text('浅色'),
-                  icon: Icon(Icons.light_mode_outlined),
-                ),
-                ButtonSegment(
-                  value: AppThemeMode.dark,
-                  label: Text('深色'),
-                  icon: Icon(Icons.dark_mode_outlined),
-                ),
-              ],
-              selected: {settings.themeMode},
-              showSelectedIcon: false,
-              onSelectionChanged: (selection) =>
-                  saveThemeMode(ref, selection.first),
+              ),
             ),
           ),
           const SettingsFormDivider(),
-          SettingsFormRow(
+          SettingsSwitchRow(
+            switchKey: const ValueKey('settings_chat_background_switch'),
             icon: Icons.wallpaper_outlined,
             title: '聊天背景',
             description: '开启后聊天页显示角色卡背景图;未设置背景图时使用角色头像。',
-            stackBreakpoint: 0,
-            control: Switch(
-              key: const ValueKey('settings_chat_background_switch'),
-              value: enabled,
-              onChanged: (v) => saveChatBackgroundEnabled(ref, v),
-            ),
+            value: enabled,
+            onChanged: (v) => saveChatBackgroundEnabled(ref, v),
           ),
           const SettingsFormDivider(),
           SettingsFormRow(
@@ -211,7 +217,6 @@ class _ConversationSettingsCardState
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final settings = ref.watch(appSettingsProvider);
     final threshold = AppSettings.clampAutoCompactThreshold(
       _draft ?? settings.autoCompactThreshold,
@@ -223,21 +228,17 @@ class _ConversationSettingsCardState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SettingsFormRow(
+          SettingsSwitchRow(
             key: const ValueKey('settings_auto_compact_row'),
+            switchKey: const ValueKey('settings_auto_compact_switch'),
             icon: Icons.compress_outlined,
             title: '上下文自动压缩',
             description: '按窗口占用率自动压缩 · 触发线 $pct%',
             titleTrailing: InfoButton(
               onTap: () => showAutoCompactHelpDialog(context, ref),
             ),
-            stackBreakpoint: 0,
-            control: Switch(
-              key: const ValueKey('settings_auto_compact_switch'),
-              value: enabled,
-              onChanged: (v) =>
-                  saveTurnSettings(ref, autoCompactEnabled: v),
-            ),
+            value: enabled,
+            onChanged: (v) => saveTurnSettings(ref, autoCompactEnabled: v),
           ),
           const SettingsFormDivider(),
           SettingsFormRow(
@@ -259,8 +260,9 @@ class _ConversationSettingsCardState
                 setState(() => _draft = null);
                 saveTurnSettings(
                   ref,
-                  autoCompactThreshold:
-                      AppSettings.clampAutoCompactThreshold(v),
+                  autoCompactThreshold: AppSettings.clampAutoCompactThreshold(
+                    v,
+                  ),
                 );
               },
             ),
@@ -271,20 +273,12 @@ class _ConversationSettingsCardState
             title: '单轮附件上限',
             description: '每轮最多自动注入的世界书附件条数;@技能与通知不受限。',
             stackBreakpoint: 0,
-            control: DropdownButton<int>(
-              key: const ValueKey('settings_attachment_dropdown'),
-              value: const [0, 2, 5, 10, 20].contains(
-                settings.maxAutoAttachments,
-              )
+            control: SettingsDropdown<int>(
+              dropdownKey: const ValueKey('settings_attachment_dropdown'),
+              value:
+                  const [0, 2, 5, 10, 20].contains(settings.maxAutoAttachments)
                   ? settings.maxAutoAttachments
                   : 5,
-              underline: const SizedBox.shrink(),
-              dropdownColor: scheme.surface,
-              borderRadius: BorderRadius.circular(12),
-              menuMaxHeight: 240,
-              style: TextStyle(fontSize: 14, color: scheme.onSurface),
-              iconSize: 20,
-              iconEnabledColor: scheme.onSurfaceVariant,
               items: const [
                 DropdownMenuItem(value: 0, child: Text('关闭')),
                 DropdownMenuItem(value: 2, child: Text('最多 2 条')),
@@ -527,6 +521,27 @@ class _StatsWorkspace extends StatelessWidget {
   }
 }
 
+class _StorageWorkspace extends StatelessWidget {
+  final SettingsDesktopSection section;
+  const _StorageWorkspace(this.section);
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsWorkspaceFrame(
+      header: SettingsWorkspaceHeader(
+        title: section.label,
+        description: section.description,
+      ),
+      child: ListView(
+        primary: false,
+        key: const ValueKey('settings_scroll_storage'),
+        padding: const EdgeInsets.only(bottom: 24),
+        children: const [ImageStorageSection(wide: true)],
+      ),
+    );
+  }
+}
+
 class _ConfigWorkspace extends ConsumerWidget {
   final SettingsDesktopSection section;
   const _ConfigWorkspace(this.section);
@@ -552,7 +567,9 @@ class _ConfigWorkspace extends ConsumerWidget {
                 key: const ValueKey('settings_config_export'),
                 icon: Icons.file_download_outlined,
                 title: '导出配置',
-                description: '用户名与 LLM 后端(含 API Key,请妥善保管)',
+                description:
+                    '用户名、LLM、生图配置、插件代码与画风'
+                    '(含明文 API Key 与可执行脚本)',
                 actionLabel: '导出',
                 onPressed: () => exportSettingsConfig(context, ref),
               ),
@@ -560,7 +577,7 @@ class _ConfigWorkspace extends ConsumerWidget {
                 key: const ValueKey('settings_config_import'),
                 icon: Icons.file_upload_outlined,
                 title: '导入配置',
-                description: '从 JSON 文件恢复,覆盖当前用户名与 LLM 后端',
+                description: '从 JSON 文件恢复完整配置并覆盖对应配置节',
                 actionLabel: '导入',
                 onPressed: () => importSettingsConfig(context, ref),
               ),
@@ -602,8 +619,8 @@ class _ConfigWorkspace extends ConsumerWidget {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  '启动时以该文件为准应用用户名与 LLM provider;页面修改会回写。'
-                  '文件含明文 API Key,请勿公开分享。',
+                  '启动时以该文件为准应用用户名、LLM 与生图配置;页面修改会回写。'
+                  '文件含明文 API Key 与插件代码,请勿公开分享。',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),
@@ -650,7 +667,7 @@ class _AboutWorkspace extends StatelessWidget {
                   ),
                   child: Icon(
                     Icons.auto_stories_outlined,
-                    size: 26,
+                    size: 24,
                     color: scheme.primary,
                   ),
                 ),

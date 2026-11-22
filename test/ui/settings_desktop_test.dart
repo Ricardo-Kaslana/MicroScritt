@@ -1,5 +1,5 @@
 // 桌面设置工作台 widget 测试:侧栏骨架、分区切换、外观/对话落库、用户内联
-// 保存、服务列表、配置区与断点回退。宽窗断点以上由 SettingsScreen 分发。
+// 保存、服务列表、图片存储、配置区与断点回退。宽窗断点以上由 SettingsScreen 分发。
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +11,7 @@ import 'package:microscritt/models/user.dart';
 import 'package:microscritt/state/providers.dart';
 import 'package:microscritt/ui/settings_screen.dart';
 import 'package:microscritt/ui/user_screen.dart';
+import '../support/image_fixtures.dart';
 import '../support/test_database.dart';
 import '../support/wait_until.dart';
 
@@ -87,7 +88,18 @@ void main() {
     expect(sidebar, findsOneWidget);
     expect(workspace, findsOneWidget);
     expect(tester.getSize(sidebar).width, moreOrLessEquals(280));
-    for (final label in ['用户', '外观', '对话与后台', 'LLM 后端', '生图', '内容与扩展', '统计', '配置', '关于']) {
+    for (final label in [
+      '用户',
+      '外观',
+      '对话与后台',
+      'LLM 后端',
+      '生图',
+      '内容与扩展',
+      '统计',
+      '图片与存储',
+      '配置',
+      '关于',
+    ]) {
       expect(
         find.descendant(of: sidebar, matching: find.text(label)),
         findsOneWidget,
@@ -143,6 +155,13 @@ void main() {
     expect(find.text('Hooks'), findsOneWidget);
     expect(find.text('正则脚本'), findsOneWidget);
 
+    await openSection(tester, 'storage');
+    expect(
+      find.byKey(const ValueKey('settings_scroll_storage')),
+      findsOneWidget,
+    );
+    expect(find.text('整理存储'), findsOneWidget);
+
     await openSection(tester, 'config');
     expect(find.text('导出配置'), findsOneWidget);
     expect(find.text('导入配置'), findsOneWidget);
@@ -150,7 +169,10 @@ void main() {
 
     await openSection(tester, 'user');
     expect(
-      tester.widget<TextField>(find.widgetWithText(TextField, '用户名')).controller?.text,
+      tester
+          .widget<TextField>(find.widgetWithText(TextField, '用户名'))
+          .controller
+          ?.text,
       '草稿名',
     );
 
@@ -214,10 +236,7 @@ void main() {
     expect(find.text('有未保存的修改'), findsOneWidget);
 
     await tester.tap(save);
-    await waitUntil(
-      tester,
-      () => find.text('用户信息已保存').evaluate().isNotEmpty,
-    );
+    await waitUntil(tester, () => find.text('用户信息已保存').evaluate().isNotEmpty);
 
     late String savedName;
     await tester.runAsync(() async {
@@ -239,15 +258,14 @@ void main() {
 
   testWidgets('用户头像带框,点击打开放大预览', (tester) async {
     useDesktopSurface(tester);
-    const avatar =
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk'
-        '+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    late final String avatar;
     await tester.runAsync(() async {
       db = await openTestDb();
+      avatar = await putTestImageHash(db);
     });
     await openDesktop(
       tester,
-      profile: const UserProfile(name: '小明', avatarBase64: avatar),
+      profile: UserProfile(name: '小明', avatarHash: avatar),
     );
 
     final avatarFinder = find.byKey(const ValueKey('settings_user_avatar'));
@@ -258,10 +276,10 @@ void main() {
       find.byKey(const ValueKey('settings_user_avatar_dialog')),
       findsOneWidget,
     );
-    expect(find.text('关闭'), findsOneWidget);
+    expect(find.text('知道了'), findsOneWidget);
     expect(find.text('小明'), findsWidgets);
 
-    await tester.tap(find.text('关闭'));
+    await tester.tap(find.text('知道了'));
     await tester.pumpAndSettle();
     expect(
       find.byKey(const ValueKey('settings_user_avatar_dialog')),
@@ -325,9 +343,7 @@ void main() {
     await openSection(tester, 'appearance');
 
     final themeRow = find.byKey(const ValueKey('settings_theme_row'));
-    final themeControl = find.byKey(
-      const ValueKey('settings_theme_selector'),
-    );
+    final themeControl = find.byKey(const ValueKey('settings_theme_selector'));
 
     // 1280 窗宽:工作区内容 936,主题行横向,控件与标签同一行且在右侧。
     expect(tester.getSize(themeRow).height, lessThan(100));

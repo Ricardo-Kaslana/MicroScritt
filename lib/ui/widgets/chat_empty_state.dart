@@ -8,6 +8,8 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../models/character_card.dart';
+import '../common/app_sheet.dart';
+import '../common/sheet_header.dart';
 
 /// 单屏最多展示的开场白条数:再多会把输入区挤出屏幕。
 const int kChatEmptySuggestionLimit = 3;
@@ -38,6 +40,7 @@ class ChatEmptyState extends StatelessWidget {
     final suggestions = onGreeting == null
         ? const <String>[]
         : _suggestions(character);
+    final visible = suggestions.take(kChatEmptySuggestionLimit).toList();
     return LayoutBuilder(
       builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
@@ -82,15 +85,21 @@ class ChatEmptyState extends StatelessWidget {
                         height: 1.5,
                       ),
                     ),
-                    if (suggestions.isNotEmpty) ...[
+                    if (visible.isNotEmpty) ...[
                       const SizedBox(height: 20),
-                      for (final text in suggestions) ...[
+                      for (final text in visible) ...[
                         _GreetingTile(
                           text: text,
                           onTap: () => onGreeting!(text),
                         ),
                         const SizedBox(height: 8),
                       ],
+                      if (suggestions.length > visible.length)
+                        TextButton.icon(
+                          onPressed: () => _showAll(context, suggestions),
+                          icon: const Icon(Icons.expand_more, size: 18),
+                          label: Text('查看全部开场白(共 ${suggestions.length} 条)'),
+                        ),
                     ],
                   ],
                 ),
@@ -102,8 +111,8 @@ class ChatEmptyState extends StatelessWidget {
     );
   }
 
-  /// 开场白候选:角色主开场白在前,备用开场白按卡内顺序补齐,去重后
-  /// 最多取 [kChatEmptySuggestionLimit] 条。
+  /// 开场白候选:角色主开场白在前,备用开场白按卡内顺序补齐并去重。
+  /// 首屏只铺前 [kChatEmptySuggestionLimit] 条,其余经「查看全部」选择。
   static List<String> _suggestions(CharacterCard character) {
     final seen = <String>{};
     final result = <String>[];
@@ -114,9 +123,43 @@ class ChatEmptyState extends StatelessWidget {
       final text = raw.trim();
       if (text.isEmpty || !seen.add(text)) continue;
       result.add(text);
-      if (result.length >= kChatEmptySuggestionLimit) break;
     }
     return result;
+  }
+
+  /// 全部开场白底单:首屏放不下的候选仍可在每次新会话中选中。
+  void _showAll(BuildContext context, List<String> all) {
+    showAppSheet<void>(
+      context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 8, 8, 0),
+              child: SheetHeader(title: '全部开场白'),
+            ),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                itemCount: all.length,
+                itemBuilder: (_, index) => Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: _GreetingTile(
+                    text: all[index],
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      onGreeting!(all[index]);
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

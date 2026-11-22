@@ -10,8 +10,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../export/resource_exporter.dart';
 import '../import/resource_importer.dart';
 import '../models/image_style_preset.dart';
+import '../state/app_config_sync.dart';
 import '../state/providers.dart';
 import 'common/app_menu.dart';
+import 'common/app_snack_bar.dart';
 import 'common/confirm_dialog.dart';
 import 'common/edit_form_scaffold.dart';
 import 'common/empty_state.dart';
@@ -45,8 +47,10 @@ class ImageStylesScreen extends ConsumerWidget {
       message: s.name,
     );
     if (!confirmed) return;
+    await markAppConfigDirty(ref);
     await ref.read(imageStyleRepositoryProvider).delete(id);
     ref.invalidate(imageStylesProvider);
+    await syncAppConfigFile(ref);
   }
 
   /// 导出全部自定义风格:统一资源信封,不含库内 id。
@@ -63,6 +67,8 @@ class ImageStylesScreen extends ConsumerWidget {
   /// 导入自定义风格:与内置预设或已有自定义同名即跳过 —— 下拉按名称选取,
   /// 重名会让「快捷填充」指向歧义。
   Future<void> _importJson(BuildContext context, WidgetRef ref) async {
+    await markAppConfigDirty(ref);
+    if (!context.mounted) return;
     await importResourceFile(
       context,
       label: '生图风格',
@@ -70,6 +76,8 @@ class ImageStylesScreen extends ConsumerWidget {
           ResourceImporter.importImageStyles(ref.read(databaseProvider), bytes),
       onImported: () => ref.invalidate(imageStylesProvider),
     );
+    // 取消/无有效条目时也清掉 dirty,避免旧配置文件被无谓搁置。
+    await syncAppConfigFile(ref);
   }
 
   /// 列表副标题:采样器/噪声调度/scale/cfg 摘要,画师串太长只显示有无。
@@ -228,9 +236,7 @@ class _ImageStyleEditScreenState extends ConsumerState<ImageStyleEditScreen> {
   }
 
   /// 统一的拒绝提示出口(名称冲突等前置校验失败)。
-  void _reject(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-  }
+  void _reject(String msg) => showAppSnack(context, msg);
 
   /// 保存前依次校验:名称非空、不与内置预设重名、不与其它自定义重名。
   /// 任一失败只提示不写库;编辑时判重排除自身。
@@ -253,6 +259,7 @@ class _ImageStyleEditScreenState extends ConsumerState<ImageStyleEditScreen> {
         if (mounted) _reject('已存在同名自定义风格「$name」');
         return;
       }
+      await markAppConfigDirty(ref);
       final style = ImageStylePreset(
         id: widget.style?.id,
         name: name,
@@ -270,6 +277,7 @@ class _ImageStyleEditScreenState extends ConsumerState<ImageStyleEditScreen> {
         await repo.update(style);
       }
       ref.invalidate(imageStylesProvider);
+      await syncAppConfigFile(ref);
       if (mounted) Navigator.pop(context);
     } finally {
       if (mounted) setState(() => _saving = false);

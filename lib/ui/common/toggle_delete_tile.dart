@@ -62,6 +62,9 @@ class ToggleDeleteTile extends StatelessWidget {
           if (onDelete != null)
             IconButton(
               tooltip: deleteTooltip,
+              // 删除是破坏性动作,与确认框/菜单里的 error 语义保持一致;
+              // 禁用态由主题的 disabledColor 接管。
+              color: Theme.of(context).colorScheme.error,
               icon: Icon(deleteIcon),
               onPressed: deleteEnabled ? onDelete : null,
             ),

@@ -47,7 +47,12 @@ void main() {
   test('roundtrips the chat background switch', () async {
     await repo.save(const AppSettings(chatBackgroundEnabled: true));
     expect((await repo.load()).chatBackgroundEnabled, isTrue);
-    await repo.save(const AppSettings(themeMode: AppThemeMode.dark, chatBackgroundEnabled: false));
+    await repo.save(
+      const AppSettings(
+        themeMode: AppThemeMode.dark,
+        chatBackgroundEnabled: false,
+      ),
+    );
     final s = await repo.load();
     expect(s.chatBackgroundEnabled, isFalse);
     expect(s.themeMode, AppThemeMode.dark);
@@ -56,18 +61,48 @@ void main() {
   test('roundtrips the chat background blur', () async {
     await repo.save(const AppSettings(chatBackgroundBlur: 8));
     expect((await repo.load()).chatBackgroundBlur, 8.0);
-    await repo.save(const AppSettings(themeMode: AppThemeMode.dark, chatBackgroundBlur: 26));
+    await repo.save(
+      const AppSettings(themeMode: AppThemeMode.dark, chatBackgroundBlur: 26),
+    );
     final s = await repo.load();
     expect(s.chatBackgroundBlur, 26.0);
     expect(s.themeMode, AppThemeMode.dark);
   });
 
-  test('roundtrips the variable deletion confirmation mode (default off)', () async {
-    expect((await repo.load()).backgroundDeletionConfirm, isFalse);
-    await repo.save(const AppSettings(backgroundDeletionConfirm: true));
-    expect((await repo.load()).backgroundDeletionConfirm, isTrue);
-    await repo.save(const AppSettings(backgroundDeletionConfirm: false));
-    expect((await repo.load()).backgroundDeletionConfirm, isFalse);
+  test(
+    'roundtrips the variable deletion confirmation mode (default off)',
+    () async {
+      expect((await repo.load()).backgroundDeletionConfirm, isFalse);
+      await repo.save(const AppSettings(backgroundDeletionConfirm: true));
+      expect((await repo.load()).backgroundDeletionConfirm, isTrue);
+      await repo.save(const AppSettings(backgroundDeletionConfirm: false));
+      expect((await repo.load()).backgroundDeletionConfirm, isFalse);
+    },
+  );
+
+  test('roundtrips the agentic enhancements (default off)', () async {
+    final defaults = await repo.load();
+    expect(defaults.backgroundVariableInjection, isFalse);
+    expect(defaults.backgroundNextSuggestions, isFalse);
+
+    await repo.save(
+      const AppSettings(
+        backgroundVariableInjection: true,
+        backgroundNextSuggestions: true,
+      ),
+    );
+    final enabled = await repo.load();
+    expect(enabled.backgroundVariableInjection, isTrue);
+    expect(enabled.backgroundNextSuggestions, isTrue);
+
+    // 脏值读入回落关闭,坏值不允许阻断启动。
+    await db.db.update('app_settings', {
+      'background_variable_injection': 'oops',
+      'background_next_suggestions': 'oops',
+    }, where: 'id = 1');
+    final dirty = await repo.load();
+    expect(dirty.backgroundVariableInjection, isFalse);
+    expect(dirty.backgroundNextSuggestions, isFalse);
   });
 
   test('roundtrips the background feature mask', () async {
@@ -90,23 +125,30 @@ void main() {
     expect(allOff.features.anyEnabled, isFalse);
   });
 
-  test('feature mask keeps the legacy skill/memory bits reserved but ignored', () async {
-    // 先落一行,后续直接改库里的原始掩码。
-    await repo.save(const AppSettings());
+  test(
+    'feature mask keeps the legacy skill/memory bits reserved but ignored',
+    () async {
+      // 先落一行,后续直接改库里的原始掩码。
+      await repo.save(const AppSettings());
 
-    // 旧版本(v37-)持久化的掩码 bit0 是"技能"、bit2 是"记忆";2.2 起 bit3
-    // (面板)同样退役 —— 读入时忽略,其余位的语义保持不变(31 = 旧全开掩码,
-    // 读入后应得全开的 variables/image)。
-    await db.db.update('app_settings', {'background_features': 31}, where: 'id = 1');
-    final withLegacyBits = await repo.load();
-    expect(withLegacyBits.features.variables, isTrue);
-    expect(withLegacyBits.features.image, isTrue);
+      // 旧版本(v37-)持久化的掩码 bit0 是"技能"、bit2 是"记忆";2.2 起 bit3
+      // (面板)同样退役 —— 读入时忽略,其余位的语义保持不变(31 = 旧全开掩码,
+      // 读入后应得全开的 variables/image)。
+      await db.db.update('app_settings', {
+        'background_features': 31,
+      }, where: 'id = 1');
+      final withLegacyBits = await repo.load();
+      expect(withLegacyBits.features.variables, isTrue);
+      expect(withLegacyBits.features.image, isTrue);
 
-    await db.db.update('app_settings', {'background_features': (1 << 1)}, where: 'id = 1');
-    final varsOnly = await repo.load();
-    expect(varsOnly.features.variables, isTrue);
-    expect(varsOnly.features.image, isFalse);
-  });
+      await db.db.update('app_settings', {
+        'background_features': (1 << 1),
+      }, where: 'id = 1');
+      final varsOnly = await repo.load();
+      expect(varsOnly.features.variables, isTrue);
+      expect(varsOnly.features.image, isFalse);
+    },
+  );
 
   test('save then load roundtrips the theme mode', () async {
     await repo.save(const AppSettings(themeMode: AppThemeMode.dark));
@@ -117,7 +159,9 @@ void main() {
   test('roundtrips the background-agent switch', () async {
     await repo.save(const AppSettings(backgroundEnabled: false));
     expect((await repo.load()).backgroundEnabled, isFalse);
-    await repo.save(const AppSettings(themeMode: AppThemeMode.dark, backgroundEnabled: true));
+    await repo.save(
+      const AppSettings(themeMode: AppThemeMode.dark, backgroundEnabled: true),
+    );
     final s = await repo.load();
     expect(s.backgroundEnabled, isTrue);
     expect(s.themeMode, AppThemeMode.dark);
@@ -137,34 +181,68 @@ void main() {
     expect((await repo.load()).backgroundModelId, isNull);
   });
 
-  test('roundtrips the background agent reasoning level (default off)', () async {
-    // 默认 off:后台请求历史上从不带推理参数,升级/新建库行为不变。
-    expect((await repo.load()).backgroundReasoningLevel, ReasoningLevel.off);
+  test(
+    'roundtrips the background agent reasoning level (default off)',
+    () async {
+      // 默认 off:后台请求历史上从不带推理参数,升级/新建库行为不变。
+      expect((await repo.load()).backgroundReasoningLevel, ReasoningLevel.off);
 
-    await repo.save(const AppSettings(backgroundReasoningLevel: ReasoningLevel.medium));
-    expect((await repo.load()).backgroundReasoningLevel, ReasoningLevel.medium);
+      await repo.save(
+        const AppSettings(backgroundReasoningLevel: ReasoningLevel.medium),
+      );
+      expect(
+        (await repo.load()).backgroundReasoningLevel,
+        ReasoningLevel.medium,
+      );
 
-    // 与主对话的推理等级互相独立:改后台值不动主对话值,反之亦然。
-    await repo.save(const AppSettings(backgroundReasoningLevel: ReasoningLevel.low, reasoningLevel: ReasoningLevel.high));
-    final s = await repo.load();
-    expect(s.backgroundReasoningLevel, ReasoningLevel.low);
-    expect(s.reasoningLevel, ReasoningLevel.high);
-  });
+      // 与主对话的推理等级互相独立:改后台值不动主对话值,反之亦然。
+      await repo.save(
+        const AppSettings(
+          backgroundReasoningLevel: ReasoningLevel.low,
+          reasoningLevel: ReasoningLevel.high,
+        ),
+      );
+      final s = await repo.load();
+      expect(s.backgroundReasoningLevel, ReasoningLevel.low);
+      expect(s.reasoningLevel, ReasoningLevel.high);
 
-  test('roundtrips the background mode (default legacy, dirty value falls back)', () async {
-    // 默认 legacy:升级/新建库零行为变化。
-    expect((await repo.load()).backgroundMode, BackgroundMode.legacy);
+      // 新增档位同样按 wire 名往返,不触发 schema 变更。
+      await repo.save(
+        const AppSettings(
+          backgroundReasoningLevel: ReasoningLevel.minimal,
+          reasoningLevel: ReasoningLevel.max,
+        ),
+      );
+      final expanded = await repo.load();
+      expect(expanded.backgroundReasoningLevel, ReasoningLevel.minimal);
+      expect(expanded.reasoningLevel, ReasoningLevel.max);
 
-    await repo.save(const AppSettings(backgroundMode: BackgroundMode.agentic));
-    expect((await repo.load()).backgroundMode, BackgroundMode.agentic);
+      await repo.save(const AppSettings(reasoningLevel: ReasoningLevel.xhigh));
+      expect((await repo.load()).reasoningLevel, ReasoningLevel.xhigh);
+    },
+  );
 
-    await repo.save(const AppSettings(backgroundMode: BackgroundMode.hybrid));
-    expect((await repo.load()).backgroundMode, BackgroundMode.hybrid);
+  test(
+    'roundtrips the background mode (default legacy, dirty value falls back)',
+    () async {
+      // 默认 legacy:升级/新建库零行为变化。
+      expect((await repo.load()).backgroundMode, BackgroundMode.legacy);
 
-    // 旧库脏值读入回退 legacy,坏值不允许阻断启动。
-    await db.db.update('app_settings', {'background_mode': 'bogus'}, where: 'id = 1');
-    expect((await repo.load()).backgroundMode, BackgroundMode.legacy);
-  });
+      await repo.save(
+        const AppSettings(backgroundMode: BackgroundMode.agentic),
+      );
+      expect((await repo.load()).backgroundMode, BackgroundMode.agentic);
+
+      await repo.save(const AppSettings(backgroundMode: BackgroundMode.hybrid));
+      expect((await repo.load()).backgroundMode, BackgroundMode.hybrid);
+
+      // 旧库脏值读入回退 legacy,坏值不允许阻断启动。
+      await db.db.update('app_settings', {
+        'background_mode': 'bogus',
+      }, where: 'id = 1');
+      expect((await repo.load()).backgroundMode, BackgroundMode.legacy);
+    },
+  );
 
   test('save replaces the previous settings row', () async {
     await repo.save(const AppSettings(themeMode: AppThemeMode.dark));
@@ -185,21 +263,26 @@ void main() {
     expect((await repo.load()).dialogueHighlightEnabled, isTrue);
   });
 
-  test('roundtrips the single-turn attachment budget (default 5, 0 = off)', () async {
-    // 未保存过 → 默认 5。
-    expect((await repo.load()).maxAutoAttachments, 5);
+  test(
+    'roundtrips the single-turn attachment budget (default 5, 0 = off)',
+    () async {
+      // 未保存过 → 默认 5。
+      expect((await repo.load()).maxAutoAttachments, 5);
 
-    await repo.save(const AppSettings(maxAutoAttachments: 2));
-    expect((await repo.load()).maxAutoAttachments, 2);
+      await repo.save(const AppSettings(maxAutoAttachments: 2));
+      expect((await repo.load()).maxAutoAttachments, 2);
 
-    // 0 合法(= 关闭世界书自动附件)。
-    await repo.save(const AppSettings(maxAutoAttachments: 0));
-    expect((await repo.load()).maxAutoAttachments, 0);
+      // 0 合法(= 关闭世界书自动附件)。
+      await repo.save(const AppSettings(maxAutoAttachments: 0));
+      expect((await repo.load()).maxAutoAttachments, 0);
 
-    // 旧库脏值(负数)读入回退默认 5。
-    await db.db.update('app_settings', {'max_auto_attachments': -3}, where: 'id = 1');
-    expect((await repo.load()).maxAutoAttachments, 5);
-  });
+      // 旧库脏值(负数)读入回退默认 5。
+      await db.db.update('app_settings', {
+        'max_auto_attachments': -3,
+      }, where: 'id = 1');
+      expect((await repo.load()).maxAutoAttachments, 5);
+    },
+  );
 
   test('roundtrips the auto compact threshold (default 60%)', () async {
     // 未保存过 → 默认 60%,与历史硬编码软挡一致。
@@ -209,19 +292,44 @@ void main() {
     expect((await repo.load()).autoCompactThreshold, 0.85);
 
     // 越界/脏值读入回落默认,坏值不阻断启动。
-    await db.db.update('app_settings', {'auto_compact_threshold': 1.5}, where: 'id = 1');
+    await db.db.update('app_settings', {
+      'auto_compact_threshold': 1.5,
+    }, where: 'id = 1');
     expect((await repo.load()).autoCompactThreshold, 0.60);
-    await db.db.update('app_settings', {'auto_compact_threshold': 0.1}, where: 'id = 1');
+    await db.db.update('app_settings', {
+      'auto_compact_threshold': 0.1,
+    }, where: 'id = 1');
     expect((await repo.load()).autoCompactThreshold, 0.60);
-    await db.db.update('app_settings', {'auto_compact_threshold': 'oops'}, where: 'id = 1');
+    await db.db.update('app_settings', {
+      'auto_compact_threshold': 'oops',
+    }, where: 'id = 1');
     expect((await repo.load()).autoCompactThreshold, 0.60);
 
     // Slider 浮点尾差不按越界处理:归一到两位小数后仍是合法值。
-    await db.db.update(
-      'app_settings',
-      {'auto_compact_threshold': 0.9000000000000001},
-      where: 'id = 1',
-    );
+    await db.db.update('app_settings', {
+      'auto_compact_threshold': 0.9000000000000001,
+    }, where: 'id = 1');
     expect((await repo.load()).autoCompactThreshold, 0.90);
+  });
+
+  test('roundtrips the image compression switch and syncs the store', () async {
+    // 默认关闭:升级/新建库零行为变化。
+    expect((await repo.load()).compressImages, isFalse);
+    expect(db.images.compressMaxEdge, 0);
+
+    await repo.save(const AppSettings(compressImages: true));
+    expect((await repo.load()).compressImages, isTrue);
+    expect(db.images.compressMaxEdge, AppSettings.imageCompressLongEdge);
+
+    await repo.save(const AppSettings(compressImages: false));
+    expect((await repo.load()).compressImages, isFalse);
+    expect(db.images.compressMaxEdge, 0);
+
+    // 脏值读入回落关闭,坏值不允许阻断启动。
+    await db.db.update('app_settings', {
+      'compress_images': 'oops',
+    }, where: 'id = 1');
+    expect((await repo.load()).compressImages, isFalse);
+    expect(db.images.compressMaxEdge, 0);
   });
 }

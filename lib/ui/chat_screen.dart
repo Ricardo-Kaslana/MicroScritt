@@ -2,6 +2,9 @@
 ///
 /// 消息列表以 `reverse` 渲染显示窗口(贴顶分页),与上下文组装窗口刻意
 /// 分离;进入会话先透明收敛到最新消息再显示,滚动路径上零整页 setState。
+///
+/// 页面状态、build 组装与生命周期留在本文件;滚动、会话操作与消息操作按
+/// 职责拆在同库 part 扩展,独立展示件在 `chat/` 下的 part 文件中。
 library;
 
 import 'dart:async';
@@ -14,7 +17,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/character_repository.dart';
-import '../data/image_codec.dart';
+import '../data/message_repository.dart';
 import '../data/session_repository.dart';
 import '../engine/background_status.dart';
 import '../engine/display_regex.dart';
@@ -30,12 +33,18 @@ import '../state/providers.dart';
 import '../state/slash_commands.dart';
 import '../state/ui_prefs_sync.dart';
 import 'common/app_menu.dart';
+import 'common/app_sheet.dart';
+import 'common/app_snack_bar.dart';
 import 'common/chat_layout.dart';
 import 'common/confirm_dialog.dart';
+import 'common/hash_image.dart';
+import 'common/inline_spinner.dart';
 import 'common/motion.dart';
 import 'common/section_header.dart';
+import 'common/sheet_header.dart';
 import 'common/text_edit_sheet.dart';
 import 'common/session_file_helper.dart';
+import 'theme/app_theme.dart';
 import 'chat_search_screen.dart';
 import 'character_edit_screen.dart';
 import 'context_panel.dart';
@@ -49,7 +58,15 @@ import 'widgets/chat_composer.dart';
 import 'widgets/chat_empty_state.dart';
 import 'widgets/chat_session_sidebar.dart';
 import 'widgets/message_list.dart';
+import 'widgets/message_selection_bar.dart';
+import 'widgets/image_viewer.dart';
 import 'widgets/chat_island.dart';
+
+part 'chat/chat_screen_scroll.dart';
+part 'chat/chat_screen_sessions.dart';
+part 'chat/chat_screen_messages.dart';
+part 'chat/chat_screen_chrome.dart';
+part 'chat/chat_screen_overlays.dart';
 
 /// 聊天页:一条会话的消息流、输入发送与全部会话侧入口。
 ///
@@ -85,8 +102,32 @@ class ChatScreen extends ConsumerStatefulWidget {
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _input = ComposerSyntaxController();
   final _inputFocus = FocusNode();
+
+  /// 多选态的页面级焦点:Esc 与返回键在此退出多选,不依赖输入框。
+  final _selectionFocus = FocusNode(debugLabel: 'message-selection');
   final _scroll = ScrollController();
   final _messageListKey = GlobalKey<MessageListState>();
+
+  /// 下一步建议底单是否已打开:防止同一批建议触发重复弹层。
+  bool _suggestionSheetOpen = false;
+
+  /// 桌面消息导航的数据源:会话内**全部** user 消息的轻量索引(id/seq/摘要)。
+  ///
+  /// 刻意与显示窗口分开 —— 窗口只装尾部若干行,导航卡却要覆盖整段历史;
+  /// 索引只带 160 字符摘要,长会话也不会把整份转录搬进内存。
+  List<UserMessageRef> _userIndex = const [];
+
+  /// 产生当前 [_userIndex] 的那份消息列表实例。消息列表每次变更(发送/删除/
+  /// 编辑/压缩)都会整体换实例:据此重查索引,摘要不会停在旧正文上。
+  List<Message>? _userIndexSource;
+
+  /// 本会话是否已发起过全量索引查询(每会话一次;窗口增量走同步合并)。
+  bool _userIndexQueryStarted = false;
+
+  /// 视口当前对应的 user 消息 id:导航刻度高亮、卡片展开定位与卡片选中态
+  /// 都按它判断。用真实可见条目而不是滚动比例 —— 条目高度差异大时比例会
+  /// 指到相邻的其它消息,出现"已跳到目标、卡片却高亮别人"。
+  final _visibleUserMessageId = ValueNotifier<int?>(null);
 
   /// 贴底/贴顶邻域标记走 [ValueNotifier] 而非 setState 字段:滚动期间它们
   /// 频繁翻转(每跨一次 80px 阈值就变一次),若走 setState 会连消息列表一起
@@ -95,6 +136,44 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _nearBottom = ValueNotifier<bool>(true);
   final _nearTop = ValueNotifier<bool>(true);
   int _lastCount = -1;
+
+  /// 用户是否正在拖动消息列表(仅指手指按住的拖动段)。
+  ///
+  /// 流式期间每个块都会触发一次自动跟随(`_scrollToBottom` → `animateTo`),而
+  /// `ScrollPosition.animateTo` 的 `beginActivity` 会 dispose 掉当前 activity ——
+  /// 若用户正拖到一半,进行中的拖动会被直接打断、画面被拽回底部,表现为
+  /// "流式自动滑动无法打断"。拖动期间跳过自动跟随,让用户手势完整生效;用户
+  /// 一旦滚离底部,`_nearBottom` 随之变 false,跟随停止。
+  ///
+  /// 注意覆盖范围只有"手指按下"这一段:抬手瞬间 ScrollEnd 即复位,抬手后的
+  /// **惯性段**与**鼠标滚轮**都不在保护内 —— 那两类由 [_userScrollInProgress]
+  /// 的宽限窗在跳转前兜底。
+  bool _userDragging = false;
+
+  /// 用户主动发送后的首次新消息到达:强制贴底一次(即使此前停在上方读历史)。
+  bool _followAfterSend = false;
+
+  /// 搜索/导航卡定位进行中。定位会 jumpTo 历史位置,`_syncScrollFlags` 随即
+  /// 把 `_nearBottom` 翻回 true;若此时恰好有一批条数变化(扩窗/提前分页)
+  /// 被 build 消费,贴底跟随会把视口从目标拽回底部、与定位循环抢方向,
+  /// 表现为目标与底部两条消息之间来回抖。定位期间一律不跟随,高亮锚点也
+  /// 锁定为目标本身(见 [_syncScrollFlags])。
+  bool _revealRunning = false;
+
+  /// 定位请求编号:用户连点两条导航项时,后一次必须**接管**而不是被丢弃
+  /// (旧实现见 `_revealRunning` 直接 return,第二次点击毫无反应)。旧请求
+  /// 的异步链返回后凭编号自行作废,不写高亮、不改跟随基线,也就不可能与
+  /// 新请求的定位循环互相拉扯。
+  int _revealRequest = 0;
+
+  /// 帧末重算可见锚点的去重标记。程序性跳转在布局更新前就发出滚动通知,
+  /// 那一刻算出的锚点可能是 null 或旧位置;帧末(layout/paint 已完成)补算
+  /// 一次才是落定后的真实可见消息。见 [_scheduleAnchorResync]。
+  bool _anchorResyncScheduled = false;
+
+  /// 最近一次用户主导滚动(拖动/惯性/滚轮,经 [UserScrollNotification] 打点)
+  /// 的时刻。程序性跳转不派发该通知,不会误记。
+  DateTime _lastUserScroll = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// 上一帧侧栏是否可见。≥1000 的宽窗里侧栏始终挂载(收展只是宽度动画),
   /// 隐藏期(<1200)跳过消息驱动的分组失效;重新展开时补一次失效,避免
@@ -145,6 +224,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// 由 MessageList 的 `onActionsVisibleChanged` 回调写入。
   final _messageActionsOpen = ValueNotifier<bool>(false);
 
+  /// 会话内消息多选模式与选中集合。集合走 ValueNotifier:选择变化只重建
+  /// 批量操作栏与各气泡的选中态,不整页重建。
+  bool _selectionMode = false;
+  final _selectedMessageIds = ValueNotifier<Set<int>>(const {});
+
   /// 「回到顶部」逐页取旧进行中([_scrollToTop]):循环 loadOlder 直到历史
   /// 取尽再跳绝对顶部。期间悬浮导航组常驻显示进度(不随贴顶/自动隐藏消失),
   /// [_maybeLoadOlder] 的分页也不再并发触发。走 [ValueNotifier]:进度态
@@ -167,14 +251,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// 灵动岛的瞬态通知中枢:命令反馈(如压缩成功)由此闪示,替代旧 SnackBar。
   final _islandHub = IslandHub();
 
-  /// 用户头像缓存:流式回复期间整页随每个流式块重建,若每次现包新的 MemoryImage,
-  /// 头像在解码完成前的那一帧是空的,反复重建就表现为频闪(与 _ChatBackground
-  /// 同源)。这里按 avatarBase64 的值缓存一个 ImageProvider 实例,值不变就复用同一
-  /// 实例;用户改头像后下一次 build 检测到值变化自动重新解码。
+  /// 用户头像缓存:按 avatarHash 共享一个 FileImage provider,hash 不变时复用,
+  /// 换头像后下一次 build 自然切到新的文件缓存键。
   String? _userAvatarKey;
   ImageProvider? _userAvatarImage;
 
-  /// 角色头像缓存(助手气泡旁):与用户头像同款 —— 按 _avatarBase64 值缓存
+  /// 角色头像缓存(助手气泡旁):与用户头像同款 —— 按 _avatarHash 值缓存
   /// 单个 ImageProvider 实例,全列表共用,流式回复期间反复重建不重新解码。
   String? _assistantAvatarKey;
   ImageProvider? _assistantAvatarImage;
@@ -188,8 +270,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   /// 聊天背景图(base64)。列表投影不携带 BLOB,聊天页按 characterId 惰性读列:
   /// 列里没有(测试直构/历史空列)回退卡内已有值,再没有就没有背景/头像。
-  String? _bgBase64;
-  String? _avatarBase64;
+  String? _bgHash;
+  String? _avatarHash;
 
   /// 当前角色卡的本地快照:初始取路由传入的卡,从聊天页编辑角色后刷新,
   /// 让 AppBar 名称/头像与气泡样式立即跟上,不必退出重进会话。
@@ -201,8 +283,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _scroll.addListener(_onScroll);
     // 先以卡内已有值起步(直构/测试/无列时立即可用),再用列值覆盖。
     _character = widget.character;
-    _bgBase64 = widget.character.backgroundBase64;
-    _avatarBase64 = widget.character.avatarBase64;
+    _bgHash = widget.character.backgroundHash;
+    _avatarHash = widget.character.avatarHash;
     _loadVisuals();
     _load();
   }
@@ -215,24 +297,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     String? bg;
     String? av;
     try {
-      bg = await repo.backgroundBase64For(widget.characterId);
+      bg = await repo.backgroundHashFor(widget.characterId);
     } catch (_) {
       bg = null;
     }
     // 头像与背景相互独立:背景是否设置都不影响 AppBar/气泡头像的取数
     // (背景层在无专属背景图时才回退头像,但头像本身始终要读)。
     try {
-      av = await repo.avatarBase64For(widget.characterId);
+      av = await repo.avatarHashFor(widget.characterId);
     } catch (_) {
       av = null;
     }
     if (!mounted) return;
-    final nextBg = bg ?? _character.backgroundBase64;
-    final nextAv = av ?? _character.avatarBase64;
-    if (nextBg != _bgBase64 || nextAv != _avatarBase64) {
+    final nextBg = bg ?? _character.backgroundHash;
+    final nextAv = av ?? _character.avatarHash;
+    if (nextBg != _bgHash || nextAv != _avatarHash) {
       setState(() {
-        _bgBase64 = nextBg;
-        _avatarBase64 = nextAv;
+        _bgHash = nextBg;
+        _avatarHash = nextAv;
       });
     }
   }
@@ -246,6 +328,65 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           .read(chatControllerProvider.notifier)
           .load(sessionId: widget.sessionId, character: _character),
     );
+  }
+
+  /// 重查桌面消息导航的全量 user 消息索引。查询失败静默保留上一份:导航卡
+  /// 是辅助入口,不能因一次读库失败把已显示的历史索引清空。
+  Future<void> _refreshUserIndex() async {
+    final sessionId = widget.sessionId;
+    final List<UserMessageRef> rows;
+    try {
+      rows = await ref
+          .read(messageRepositoryProvider)
+          .userMessagesForNavigation(sessionId);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || sessionId != widget.sessionId) return;
+    setState(() {
+      _userIndex = rows;
+      // 查询期间可能刚有新消息落库(本次结果不含增量):强制下一帧再用当前
+      // 窗口合并一次,避免最新一条 user 消息在导航里缺席。
+      _userIndexSource = null;
+    });
+  }
+
+  /// 用显示窗口内的消息同步索引尾部,保留窗口之外更早的历史项。
+  ///
+  /// 窗口化时窗口里最小的非 system seq 就是显示窗口下界;`hasOlder=false`
+  /// 表示全量在窗,直接用窗口重建整份索引。窗口内的删除/编辑因此立即反映,
+  /// 不必再走一次全量查询。
+  void _mergeUserIndex(List<Message> messages, {required bool hasOlder}) {
+    final windowUsers = <UserMessageRef>[];
+    int? floor;
+    for (final message in messages) {
+      if (!message.isChat || message.role == 'system') continue;
+      floor = floor == null || message.seq < floor ? message.seq : floor;
+      if (message.role != 'user' || message.id == null) continue;
+      windowUsers.add(
+        UserMessageRef(
+          messageId: message.id!,
+          seq: message.seq,
+          preview: _navPreview(message.content),
+        ),
+      );
+    }
+    if (!hasOlder || floor == null) {
+      _userIndex = windowUsers;
+      return;
+    }
+    _userIndex = [
+      for (final ref in _userIndex)
+        if (ref.seq < floor) ref,
+      ...windowUsers,
+    ];
+  }
+
+  /// 导航摘要:与索引查询同一口径(单行化)并截到 160 字符,卡片本身单行
+  /// 省略,更长的正文对展示无意义。
+  String _navPreview(String content) {
+    final single = singleLinePreview(content);
+    return single.length > 160 ? single.substring(0, 160) : single;
   }
 
   @override
@@ -273,186 +414,52 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _highlightMessageId = null;
       // 搜索词按会话记忆:换会话后重新打开搜索不再带着上一会话的关键词。
       _lastSearchQuery = '';
+      // 导航卡索引随会话切换清空并重查:旧会话的摘要绝不能在新会话的卡片里
+      // 停留一帧。
+      _userIndex = const [];
+      _userIndexSource = null;
+      _userIndexQueryStarted = false;
+      _visibleUserMessageId.value = null;
+      // 多选不跨会话保留:选中 id 只对当前消息窗口有效。
+      _selectionMode = false;
+      _selectedMessageIds.value = const {};
       _load();
     }
     if (oldWidget.characterId != widget.characterId) {
       _character = widget.character;
-      _bgBase64 = widget.character.backgroundBase64;
-      _avatarBase64 = widget.character.avatarBase64;
+      _bgHash = widget.character.backgroundHash;
+      _avatarHash = widget.character.avatarHash;
       _loadVisuals();
     }
   }
+
+  /// 同库 part 扩展不是 State 子类,不能直接调用受保护的 setState;
+  /// 统一经这个包装重建。
+  void _rebuild(VoidCallback fn) => setState(fn);
+
+  bool get _desktopPlatform =>
+      defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.linux;
 
   @override
   void dispose() {
     _input.dispose();
     _inputFocus.dispose();
+    _selectionFocus.dispose();
     _scroll.dispose();
     _navRestoreTimer?.cancel();
     _highlightTimer?.cancel();
     _nearBottom.dispose();
     _nearTop.dispose();
     _navAutoHidden.dispose();
+    _visibleUserMessageId.dispose();
     _autoTopRunning.dispose();
     _messageActionsOpen.dispose();
+    _selectedMessageIds.dispose();
     _scrollNavCollapsed.dispose();
     _islandHub.dispose();
     super.dispose();
-  }
-
-  void _onScroll() {
-    // 直接写 ValueNotifier(同值赋值内部会跳过通知):滚动期间不再触发
-    // 整页 setState,贴底/贴顶标记只驱动悬浮导航组那一小块重建。
-    _syncScrollFlags();
-    // 窗口化加载:贴近顶部且还有更早历史时向上分页。
-    // 除 80px 的贴顶判定外,额外在「距顶部约 1.5 个视口」时预取一页 ——
-    // 快速上滑不必先撞到旧顶部再等数据。
-    if (_nearTop.value || _shouldPrefetchOlder()) _maybeLoadOlder();
-  }
-
-  /// 是否已进入顶部预取区。`maxScrollExtent` 在 reverse 列表里是估算值,
-  /// 只用作提前量;真正是否可加载仍由控制器与 [canLoadOlder] 判定。
-  bool _shouldPrefetchOlder() {
-    if (!_scroll.hasClients) return false;
-    final pos = _scroll.position;
-    if (pos.pixels <= 0) return false;
-    return pos.pixels >= pos.maxScrollExtent - pos.viewportDimension * 1.5;
-  }
-
-  /// 按当前滚动位置同步贴底/贴顶邻域标记。
-  ///
-  /// 消息列表是 `reverse: true` —— offset 0 = **最新消息(底部)**,
-  /// `maxScrollExtent` = 最旧(顶部)。两个邻域判据随之对调,且贴底判据(0 邻域)
-  /// 不再依赖 `maxScrollExtent` 这个估算值。
-  ///
-  /// 除滚动路径外,进入会话的初始定位也必须调一次:reverse 下视口本就停在
-  /// offset 0(最新),**没有任何滚动发生**,`_onScroll` 不会被派发 —— 而两个
-  /// 标记的初值会让「既贴顶又贴底」恒成立,悬浮导航组将永远不出现。
-  void _syncScrollFlags() {
-    if (!_scroll.hasClients) return;
-    final pos = _scroll.position;
-    _nearBottom.value = pos.pixels <= 80;
-    _nearTop.value = pos.pixels >= pos.maxScrollExtent - 80;
-  }
-
-  /// 贴顶时的向上分页入口。窗口化只在超长会话生效(canLoadOlder=false 的
-  /// 会话是空转);流式期间控制器侧同样拒绝。
-  void _maybeLoadOlder() {
-    if (!_screenDataReady) return;
-    // 「回到顶部」逐页取旧进行中:由 _scrollToTop 的循环驱动分页,贴顶回调
-    // 不再并发触发(否则锚定 jumpTo 会与循环互相打断)。
-    if (_autoTopRunning.value) return;
-    if (!ref.read(chatControllerProvider).canLoadOlder) return;
-    _loadOlder();
-  }
-
-  /// 补一页更早的历史。
-  ///
-  /// 列表 `reverse: true` —— 更早的消息追加在列表**远端**(更大下标),而已有
-  /// 条目到内容底部的距离(即 `layoutOffset`)完全不受影响,故**不需要任何锚定**:
-  /// 视口纹丝不动地停在原内容上,用户继续上滑即可看到新页。(旧实现要按
-  /// maxScrollExtent 增量前移视口,那是在非反向坐标下抵消"前拼导致内容整体
-  /// 下移"的做法;反向坐标系里这件事天然不发生,锚定反而会把视口多推一页。)
-  Future<void> _loadOlder() async {
-    final before = ref.read(chatControllerProvider).messages.length;
-    await ref.read(chatControllerProvider.notifier).loadOlder();
-    if (!mounted) return;
-    // 本页加载成功后,若视口仍在预取区(快速上滑/甩动),继续补一页 ——
-    // 不必等用户再次滚动触发。加载被拒(流式/忙碌)时条数不变,不再递归。
-    if (ref.read(chatControllerProvider).messages.length == before) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _autoTopRunning.value) return;
-      if (_shouldPrefetchOlder()) _maybeLoadOlder();
-    });
-  }
-
-  /// 用户是否正在拖动消息列表(仅指手指按住的拖动段)。
-  ///
-  /// 流式期间每个块都会触发一次自动跟随(`_scrollToBottom` → `animateTo`),而
-  /// `ScrollPosition.animateTo` 的 `beginActivity` 会 dispose 掉当前 activity ——
-  /// 若用户正拖到一半,进行中的拖动会被直接打断、画面被拽回底部,表现为
-  /// "流式自动滑动无法打断"。拖动期间跳过自动跟随,让用户手势完整生效;用户
-  /// 一旦滚离底部,`_nearBottom` 随之变 false,跟随停止。
-  ///
-  /// 注意覆盖范围只有"手指按下"这一段:抬手瞬间 ScrollEnd 即复位,抬手后的
-  /// **惯性段**与**鼠标滚轮**都不在保护内 —— 那两类由 [_userScrollInProgress]
-  /// 的宽限窗在跳转前兜底。
-  bool _userDragging = false;
-
-  /// 用户主动发送后的首次新消息到达:强制贴底一次(即使此前停在上方读历史)。
-  bool _followAfterSend = false;
-
-  /// 最近一次用户主导滚动(拖动/惯性/滚轮,经 [UserScrollNotification] 打点)
-  /// 的时刻。程序性跳转不派发该通知,不会误记。
-  DateTime _lastUserScroll = DateTime.fromMillisecondsSinceEpoch(0);
-
-  /// 是否应把当前滚动继续视为"用户在控制":手指按住([_userDragging])或
-  /// 最近 [Duration] 内刚发生过用户滚动(覆盖抬手后的惯性段与鼠标滚轮 ——
-  /// 滚轮每次滚动是瞬时 forcePixels,activity 不驻留,只能靠宽限窗)。
-  ///
-  /// 程序性 `jumpTo`/`animateTo` 的 `beginActivity` 会 dispose 当前 activity ——
-  /// 在用户滚动进行中跳转,会把用户的滚动直接打断、画面被拽回底部,表现为
-  /// "流式时想上滑看一眼历史,气泡却停不下来"。
-  bool _userScrollInProgress() {
-    if (_userDragging) return true;
-    return DateTime.now().difference(_lastUserScroll) <
-        const Duration(milliseconds: 500);
-  }
-
-  /// 消息区滚动通知:驱动悬浮导航组的自动隐藏/延迟恢复与用户滚动打点。
-  /// 返回 false 不吞通知。
-  ///
-  /// 用户滚动期间把悬浮滚动导航组**自动隐藏**,避免按钮压住滚动中的手指/
-  /// 光标和内容;滚动真正停下后延迟 600ms 再恢复。恢复计时必须被一切"滚动
-  /// 仍在进行"的迹象反复撤销,否则在特定滑动节奏下按钮会交替显隐:
-  /// - 连续滚轮 tick 之间、连续甩动的手势间停顿,一旦超过延时,旧逻辑就让
-  ///   按钮弹回 —— 用户还在滚动会话中,下一次滚动又把它隐藏,按钮随滚动
-  ///   节奏闪烁;且旧逻辑的每次显隐都走整页 setState,滑动表现为一卡一卡;
-  /// - 非 idle 的 [UserScrollNotification] 与惯性段每帧的
-  ///   [ScrollUpdateNotification] 都先撤销未到期的恢复计时 —— 即使某些时序
-  ///   下拖动段收尾先报了一次 ScrollEnd(activity 切换序列因版本而异),
-  ///   惯性段随后的帧更新也必须把计时撤销,恢复只能从**最后一个**
-  ///   ScrollEnd 之后起算。
-  ///
-  /// 带 `dragDetails` 的 [ScrollStartNotification] 表示用户手势开始拖动;
-  /// 滚轮/惯性等非拖动用户滚动经 UserScrollNotification(方向非 idle)同样
-  /// 触发隐藏。
-  bool _onScrollNotification(ScrollNotification n) {
-    if (n is UserScrollNotification) {
-      // 记录用户主导滚动的时刻,供宽限窗使用。UserScrollNotification 只由
-      // 用户物理滚动派发(拖动/惯性/滚轮),程序性跳转不产生,不会误记
-      // (idle 方向也打点:滚轮每 tick 收尾与惯性结束都会报一次 idle,
-      // 同样属于"用户刚滚动过")。
-      _lastUserScroll = DateTime.now();
-      if (n.direction != ScrollDirection.idle) {
-        _navRestoreTimer?.cancel();
-        _navAutoHidden.value = true;
-      }
-    } else if (n is ScrollStartNotification && n.dragDetails != null) {
-      if (!_userDragging) {
-        _userDragging = true;
-        _navRestoreTimer?.cancel();
-        _navAutoHidden.value = true;
-      }
-    } else if (n is ScrollUpdateNotification) {
-      // 滚动仍在进行(拖动/惯性的每一帧):撤销任何已武装的恢复计时,
-      // 恢复只能从"最后一个 ScrollEnd"之后起算。程序性自动跟随的跳动也会
-      // 经过这里,随后其自身的 ScrollEnd 会重新武装计时,不会卡在隐藏态。
-      if (_navAutoHidden.value) _navRestoreTimer?.cancel();
-    } else if (n is ScrollEndNotification) {
-      if (_userDragging) _userDragging = false;
-      // 收尾瞬间不立即恢复,延迟 600ms 让用户先看一眼停下的内容,再让按钮
-      // "轻轻回"到原位而不是立刻压住刚露出的正文。惯性段的每次 ScrollEnd
-      // 都顺延计时,惯性真正结束才算停下。
-      if (_navAutoHidden.value) {
-        _navRestoreTimer?.cancel();
-        _navRestoreTimer = Timer(const Duration(milliseconds: 600), () {
-          if (!mounted) return;
-          _navAutoHidden.value = false;
-        });
-      }
-    }
-    return false;
   }
 
   /// 输入变化:只有输入以 `/` 打头且尚未带空格时,实时给出命令建议。
@@ -485,6 +492,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// 替代旧的 SnackBar。/compact 的「压缩中」活动态由 controller 侧
   /// `ChatState.busyCommand` 驱动(controller 置位/清零,UI 无本地镜像)。
   Future<void> _runCommandFromUI(SlashCommand cmd, {String args = ''}) async {
+    // 清空历史不可撤销且会丢掉压缩摘要,执行前先确认;取消时保留
+    // 输入框里的 /clear 与焦点,用户可修改或直接重试。
+    if (cmd == SlashCommand.clearHistory) {
+      final confirmed = await showConfirmDialog(
+        context,
+        title: '清空会话历史?',
+        message: '将删除本会话的全部消息与压缩摘要,仅保留角色开场白。此操作不可撤销。',
+        confirmLabel: '清空',
+      );
+      if (!mounted) return;
+      if (!confirmed) {
+        _inputFocus.requestFocus();
+        return;
+      }
+    }
     _input.clear();
     setState(() => _slashSuggestions = const []);
     final feedback = await ref
@@ -519,217 +541,74 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       setState(() => _slashSuggestions = const []);
       // 轻触觉回执:发送键在点按瞬间的确认感,不打断连续输入。
       HapticFeedback.lightImpact();
+      // 桌面点击发送键可能抢走焦点;送回输入框,保持连续输入。
+      if (_desktopPlatform) _inputFocus.requestFocus();
     }
   }
 
-  void _scrollToBottom({bool animate = true, bool force = false}) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
-      // 用户恰在此刻按下拖动:程序性贴底必须让位,同时解除初始定位的隐藏态
-      // (绝不滞留在"列表不可见"的状态)。
-      if (_userDragging) {
-        _settleEntry();
-        return;
-      }
-      _performScrollToBottom(animate: animate, force: force);
-    });
-  }
-
-  /// 解除「进入会话初始定位」的列表隐藏态并显示(幂等)。挂在贴底收敛链的
-  /// 每一条退出点上:贴底 settled、帧预算用尽、用户抢先滚动 —— 保证任何
-  /// 路径下列表最多隐藏几个收敛帧,不会停在透明态。
-  void _settleEntry() {
-    if (!_entrySettling || !mounted) return;
-    setState(() => _entrySettling = false);
-  }
-
-  /// 贴底。列表 `reverse: true` —— 底部恒为 **offset 0**,与内容总高度无关:
-  /// 懒加载列表的 `maxScrollExtent` 是「已布局窗口平均高度 × 剩余条数」的估算
-  /// (本 App 条目高度差异极大、图片高度还异步变化,实测可偏离真值 2.6 倍),
-  /// 而 offset 0 是精确值。于是这里退化为一次跳转:不再需要多帧收敛链,
-  /// 也**不可能**越过真实末尾落进空白死区再被弹簧拖回 —— 那正是长会话里
-  /// 「发送消息后先快速滚到远处又滚回来」的来源。
-  ///
-  /// 消息落库/草稿块/图片改高/视口尺寸变化都不需要额外处理:只要视口停在 0,
-  /// 内容怎么变它都还在底部(内容在偏移更大一侧生长,不移动 offset 0 处的内容)。
-  void _performScrollToBottom({bool animate = true, bool force = false}) {
-    if (!mounted) return;
-    if (!_scroll.hasClients) {
-      // 首帧布局尚未建立滚动位置:直接解除隐藏即可 —— offset 初值本就是 0
-      // (底部),不存在"落在最旧消息处"的可能。
-      _settleEntry();
+  /// 处理一批新建议:只在当前会话页可见时自动弹底单;切页/换会话/未就绪
+  /// 一律视为忽略并丢弃本批(纯内存态,不排队补弹)。
+  void _onNextSuggestions(List<String> suggestions) {
+    if (_suggestionSheetOpen || suggestions.isEmpty) return;
+    if (!mounted ||
+        !_screenDataReady ||
+        ref.read(chatControllerProvider).sessionId != widget.sessionId) {
+      _discardSuggestions();
       return;
     }
-    // 进入会话的贴底定位是唯一不经过 `_onScroll` 的定位路径(视口本就停在
-    // offset 0、不产生滚动),邻域标记必须在这里补一次同步(见 _syncScrollFlags)。
-    _syncScrollFlags();
-    // force 只用于「用户主动发送」这一显式意图:不受 500ms 用户滚动宽限窗
-    // 影响,但仍让位给正在按住的拖动。
-    if (_userDragging || (!force && _userScrollInProgress())) {
-      _settleEntry(); // 用户抢先接管:立即显示,跟随让位于手势。
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) {
+      _discardSuggestions();
       return;
     }
-    final pos = _scroll.position;
-    if (pos.pixels <= 1.0) {
-      _settleEntry();
-      return;
-    }
-    if (animate && !reduceMotionOf(context)) {
-      // 用户可见的一段(如点「回到底部」)保持动画平滑;到位后解除隐藏态。
-      _scroll
-          .animateTo(
-            0,
-            duration: const Duration(milliseconds: 150),
-            curve: Curves.easeOut,
-          )
-          .whenComplete(() {
-            if (mounted) _settleEntry();
-          });
-      return;
-    }
-    _scroll.jumpTo(0);
-    _settleEntry();
-  }
-
-  /// 「回到顶部」:先把窗口之上未加载的旧历史**逐页取尽**,再落到绝对顶部
-  /// (时间序第一条)。列表 `reverse: true` —— 顶部在偏移更大的一端,即
-  /// `maxScrollExtent`;该值仍是估算(懒加载列表只有尾段条目布局后才精确),
-  /// 故取尽后用 [_convergeToTop] 做「小步逼近 + 逐帧复核」的多帧收敛。
-  ///
-  /// 分页本身**不需要锚定**:更早的消息追加在列表远端,已有条目的位置不变,
-  /// 视口不会因补页而漂移。循环期间 [_maybeLoadOlder] 让位(由本循环驱动)。
-  ///
-  /// 流式回复/耗时命令进行中控制器会拒绝 loadOlder([_loadOlder] 静默无进展):
-  /// 以「消息条数不变」检测该拒绝,提示用户并停到当前窗口顶,不做死循环。
-  Future<void> _scrollToTop() async {
-    if (_autoTopRunning.value) return;
-    _autoTopRunning.value = true;
-    // 页数/时间双预算:历史极长的会话不再一次性把全部消息拉进内存。
-    // 预算用尽时停在"已加载窗口的顶部",再次点击可继续向前加载。
-    const pageBudget = 8; // 8 × 120 行 ≈ 960 条消息
-    const timeBudget = Duration(seconds: 3);
-    final budgetWatch = Stopwatch()..start();
-    var pagesLoaded = 0;
-    var budgetExhausted = false;
-    try {
-      while (mounted &&
-          _screenDataReady &&
-          ref.read(chatControllerProvider).canLoadOlder) {
-        // 用户一旦接管(拖动/惯性/滚轮),立即让位,不再自动加载。
-        if (_userDragging || _userScrollInProgress()) return;
-        if (pagesLoaded >= pageBudget || budgetWatch.elapsed >= timeBudget) {
-          budgetExhausted = true;
-          break;
-        }
-        final before = ref.read(chatControllerProvider).messages.length;
-        await _loadOlder();
-        pagesLoaded++;
-        // 等一帧:让补页的重建先落定,再继续下一页。
-        await WidgetsBinding.instance.endOfFrame;
+    _suggestionSheetOpen = true;
+    final batch = List<String>.of(suggestions);
+    final controller = ref.read(chatControllerProvider.notifier);
+    Future<void>.microtask(() async {
+      // 先清状态再展示:底单关闭/忽略时不残留,也避免 rebuild 重复弹。
+      controller.dismissNextSuggestions();
+      try {
         if (!mounted) return;
-        final st = ref.read(chatControllerProvider);
-        if (st.canLoadOlder && st.messages.length == before) {
-          _islandHub.push(
-            '生成或命令进行中,暂不能加载更早的历史;已回到当前窗口顶部',
-            tone: IslandTone.info,
-          );
-          break;
-        }
-      }
-      if (!mounted) return;
-      await _convergeToTop();
-      if (budgetExhausted &&
-          mounted &&
-          ref.read(chatControllerProvider).canLoadOlder) {
-        _islandHub.push(
-          '已回到已加载历史的顶部;再点一次「回到顶部」可继续加载更早消息',
-          tone: IslandTone.info,
+        final selected = await showAppSheet<String>(
+          context,
+          builder: (_) => _NextSuggestionsSheet(suggestions: batch),
         );
+        if (!mounted || selected == null) return;
+        if (ref.read(chatControllerProvider).sessionId != widget.sessionId) {
+          return;
+        }
+        _sendSuggestion(selected);
+      } finally {
+        _suggestionSheetOpen = false;
       }
-    } finally {
-      _autoTopRunning.value = false;
-    }
-  }
-
-  /// 多帧收敛到列表顶部(reverse 下 = `maxScrollExtent`)。
-  ///
-  /// 顶部方向**仍然**是估算值,且只有视口贴近它时布局才会排布尾段条目、把
-  /// 估算修正到精确 —— 单次跳转可能停在估算的中间点。逐帧按「单帧最多 6 个
-  /// 视口」小步逼近,每次落点触发布局 refine,下一帧复核继续逼近;每步都
-  /// 立即跳变(无缓动残差),落点精确。底部方向不需要这套:那是恒为 0 的精确
-  /// 位置(见 [_performScrollToBottom])。
-  Future<void> _convergeToTop({int attempts = 0}) async {
-    if (!mounted || !_scroll.hasClients) return;
-    if (_userDragging || _userScrollInProgress()) return;
-    if (attempts >= 64) return; // 预算兜底,防止极端情况下的无限收敛。
-    final pos = _scroll.position;
-    final target = pos.maxScrollExtent;
-    if ((pos.pixels - target).abs() < 1.0) return;
-    final stepCap = pos.viewportDimension * 6;
-    final capped = target > pos.pixels
-        ? math.min(target, pos.pixels + stepCap)
-        : math.max(target, pos.pixels - stepCap);
-    _scroll.jumpTo(capped);
-    // 显式催帧:内容不足一屏时本次 jump 不产生滚动活动,若此刻再无其它脏
-    // 对象,复核回调要等某个无关事件碰巧催帧才发生。
-    WidgetsBinding.instance.scheduleForcedFrame();
-    await WidgetsBinding.instance.endOfFrame;
-    await _convergeToTop(attempts: attempts + 1);
-  }
-
-  void _scrollToPreviousMessage() {
-    _messageListKey.currentState?.scrollToPreviousMessage();
-  }
-
-  void _scrollToNextMessage() {
-    _messageListKey.currentState?.scrollToNextMessage();
-  }
-
-  /// 会话内搜索:选中命中消息后先扩展显示窗口(目标可能远在首屏窗口之外),
-  /// 再滚到该条并短暂高亮。组装窗口不受影响(见 ChatController.revealMessage)。
-  /// 扩窗期间先压住贴底跟随;定位失败(消息已删/不可见)时恢复原标记并提示。
-  Future<void> _openChatSearch() async {
-    if (!_screenDataReady) {
-      _islandHub.push('会话正在加载,请稍后再试', tone: IslandTone.info);
-      return;
-    }
-    if (_autoTopRunning.value) {
-      _islandHub.push('正在回到顶部,请稍后再试', tone: IslandTone.info);
-      return;
-    }
-    final messageId = await Navigator.push<int>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ChatSearchScreen(
-          sessionId: widget.sessionId,
-          characterName: _character.name,
-          characterAvatarBase64: _avatarBase64,
-          initialQuery: _lastSearchQuery,
-          onQueryChanged: (query) => _lastSearchQuery = query,
-        ),
-      ),
-    );
-    if (messageId == null || !mounted) return;
-    // 扩窗会增加消息条数并触发「贴底跟随」;目标在历史里,先让出跟随,
-    // 由定位滚动接管。失败时恢复原标记(下一次滚动也会重新同步)。
-    final wasNearBottom = _nearBottom.value;
-    _nearBottom.value = false;
-    final located = await ref
-        .read(chatControllerProvider.notifier)
-        .revealMessage(messageId);
-    if (!mounted) return;
-    if (!located) {
-      _nearBottom.value = wasNearBottom;
-      _islandHub.push('无法定位该消息:它可能已被删除,或正在加载历史', tone: IslandTone.danger);
-      return;
-    }
-    await _messageListKey.currentState?.revealMessage(messageId);
-    if (!mounted) return;
-    _highlightTimer?.cancel();
-    setState(() => _highlightMessageId = messageId);
-    _highlightTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _highlightMessageId = null);
     });
+  }
+
+  void _discardSuggestions() {
+    Future<void>.microtask(() {
+      if (!mounted) return;
+      ref.read(chatControllerProvider.notifier).dismissNextSuggestions();
+    });
+  }
+
+  /// 点击建议:走与输入框发送相同的受理门;忙碌被拒时把文本放回输入框,
+  /// 避免用户的选择凭空消失。
+  void _sendSuggestion(String text) {
+    final accepted = ref.read(chatControllerProvider.notifier).trySend(text);
+    if (accepted) {
+      _followAfterSend = true;
+      _input.clear();
+      setState(() => _slashSuggestions = const []);
+      HapticFeedback.lightImpact();
+      if (_desktopPlatform) _inputFocus.requestFocus();
+      return;
+    }
+    _input.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _inputFocus.requestFocus();
+    _onInputChanged(text);
   }
 
   /// 角色状态卡:点击角色头像(AppBar / 气泡旁)弹出,头像 + 名称 + 编辑入口。
@@ -776,9 +655,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     required IconData actionIcon,
     required VoidCallback onAction,
   }) {
-    showModalBottomSheet<void>(
-      context: context,
-      useSafeArea: true,
+    showAppSheet<void>(
+      context,
+      isScrollControlled: false,
       builder: (sheetCtx) => _AvatarStatusSheet(
         avatar: avatar,
         fallbackIcon: fallbackIcon,
@@ -793,524 +672,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         },
       ),
     );
-  }
-
-  /// 从聊天页进入角色卡编辑;返回后刷新本地快照/头像,并让控制器重算上下文,
-  /// 改名/换头像与设定修改立即生效,不必退出重进会话。
-  Future<void> _openCharacterEdit() async {
-    await Navigator.push<void>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CharacterEditScreen(characterId: widget.characterId),
-      ),
-    );
-    if (!mounted) return;
-    final card = await ref
-        .read(characterRepositoryProvider)
-        .get(widget.characterId);
-    if (!mounted || card == null) return;
-    setState(() => _character = card);
-    await _loadVisuals();
-    if (!mounted) return;
-    if (ref.read(chatControllerProvider).sessionId == widget.sessionId) {
-      await ref.read(chatControllerProvider.notifier).updateCharacter(card);
-    }
-  }
-
-  /// 导出会话为 v4 归档:桌面端直接选路径并流式写出,移动端先写临时文件再
-  /// 交给系统另存为或分享面板;取消与失败由 `saveSessionArchive` 统一提示。
-  /// [title] 为归档文件名前缀:AppBar 菜单用「角色名-会话 id」,侧栏用会话
-  /// 标题(AppBar 导出当前会话,侧栏可导出任意会话)。
-  Future<void> _exportSessionArchive({
-    required int sessionId,
-    required String title,
-    bool share = false,
-  }) async {
-    await saveSessionArchive(
-      context,
-      fileName: '$title.json',
-      delivery: share
-          ? SessionArchiveDelivery.share
-          : SessionArchiveDelivery.save,
-      build: (staging, {onProgress, isCancelled}) =>
-          SessionExporter(ref.read(databaseProvider)).exportToFile(
-            sessionId: sessionId,
-            file: staging,
-            onProgress: onProgress,
-            isCancelled: isCancelled,
-          ),
-    );
-  }
-
-  Future<void> _exportSession({bool share = false}) => _exportSessionArchive(
-    sessionId: widget.sessionId,
-    title: '${_character.name}-${widget.sessionId}',
-    share: share,
-  );
-
-  /// 级联删除一条会话并刷新会话列表与侧栏数据(调用方负责确认与导航)。
-  Future<void> _deleteSessionCascade(int sessionId, int? characterId) async {
-    await ref.read(sessionRepositoryProvider).deleteWithCascade(sessionId);
-    if (characterId != null) ref.invalidate(sessionInfosProvider(characterId));
-    ref.invalidate(sessionGroupsProvider);
-  }
-
-  /// 打开状态面板(AppBar 状态按钮与灵动岛的状态入口共用)。
-  void _openStatus() {
-    final character = ref.read(chatControllerProvider).character;
-    if (character == null) return; // 尚未加载完成
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => StatusScreen(sessionId: widget.sessionId),
-      ),
-    );
-  }
-
-  /// 删除当前会话:确认后级联删除消息与关联行(不可恢复),刷新会话列表
-  /// 并退出聊天页;用户取消则不做任何写入。
-  Future<void> _deleteSession() async {
-    final confirmed = await showConfirmDialog(
-      context,
-      title: '删除会话?',
-      message: '会话内的全部消息都会被删除,不可恢复。',
-    );
-    if (!confirmed || !mounted) return;
-    final characterId = ref.read(chatControllerProvider).characterId;
-    await _deleteSessionCascade(widget.sessionId, characterId);
-    if (!mounted) return;
-    Navigator.pop(context);
-  }
-
-  /// 侧栏会话行菜单:置顶 / 重命名 / 导出 / 删除,作用对象可以是列表里的
-  /// 任意会话(含其它角色);重命名 / 导出 / 删除与 AppBar 的会话菜单同口径。
-  Future<void> _handleSidebarAction(
-    SessionInfo session,
-    SessionSidebarAction action,
-  ) async {
-    switch (action) {
-      case SessionSidebarAction.togglePin:
-        await _toggleSessionPin(session);
-      case SessionSidebarAction.rename:
-        await _renameSession(session);
-      case SessionSidebarAction.export:
-        await _exportSessionArchive(
-          sessionId: session.id,
-          title: session.title.trim().isEmpty
-              ? '会话 #${session.id}'
-              : session.title.trim(),
-        );
-      case SessionSidebarAction.delete:
-        await _deleteSessionFromSidebar(session);
-    }
-  }
-
-  /// 侧栏置顶/取消置顶:只改会话的展示优先级,不动消息与当前路由;
-  /// 落库后失效侧栏数据即时重排。
-  Future<void> _toggleSessionPin(SessionInfo session) async {
-    try {
-      await ref
-          .read(sessionRepositoryProvider)
-          .setPinned(session.id, session.pinnedAt == null);
-      ref.invalidate(sessionInfosProvider(session.characterId));
-      ref.invalidate(sessionGroupsProvider);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          width: chatSnackBarWidth(context),
-          content: Text('置顶状态更新失败:$e'),
-        ),
-      );
-    }
-  }
-
-  /// 侧栏重命名:空标题不落库并明确提示;改名后会话列表与侧栏即时刷新。
-  Future<void> _renameSession(SessionInfo session) => _renameSessionById(
-    sessionId: session.id,
-    characterId: session.characterId,
-    initialTitle: session.title,
-  );
-
-  /// AppBar 会话菜单的重命名:聊天页不持有会话标题,先从库里取当前值
-  /// 作对话框初始文本。
-  Future<void> _renameCurrentSession() async {
-    final session = await ref
-        .read(sessionRepositoryProvider)
-        .get(widget.sessionId);
-    if (session == null || !mounted) return;
-    await _renameSessionById(
-      sessionId: widget.sessionId,
-      characterId: widget.characterId,
-      initialTitle: session.title,
-    );
-  }
-
-  /// 重命名任意会话(AppBar 与侧栏共用):空标题不落库并明确提示;
-  /// 改名后会话列表与侧栏即时刷新。
-  Future<void> _renameSessionById({
-    required int sessionId,
-    required int characterId,
-    required String initialTitle,
-  }) async {
-    final next = await showDialog<String>(
-      context: context,
-      builder: (_) => _RenameSessionDialog(initialTitle: initialTitle),
-    );
-    if (next == null || !mounted) return;
-    final title = next.trim();
-    if (title.isEmpty) {
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            width: chatSnackBarWidth(context),
-            content: const Text('会话标题不能为空'),
-          ),
-        );
-      return;
-    }
-    await ref.read(sessionRepositoryProvider).rename(sessionId, title);
-    ref.invalidate(sessionInfosProvider(characterId));
-    ref.invalidate(sessionGroupsProvider);
-  }
-
-  /// 侧栏删除:删除的是当前会话就退出聊天页(与 AppBar 菜单一致),
-  /// 否则留在当前会话并轻提示;两种路径都由侧栏数据失效即时反映。
-  Future<void> _deleteSessionFromSidebar(SessionInfo session) async {
-    final confirmed = await showConfirmDialog(
-      context,
-      title: '删除会话?',
-      message: '会话内的全部消息都会被删除,不可恢复。',
-    );
-    if (!confirmed || !mounted) return;
-    await _deleteSessionCascade(session.id, session.characterId);
-    if (!mounted) return;
-    if (session.id == widget.sessionId) {
-      Navigator.pop(context);
-    } else {
-      _islandHub.push('已删除会话', tone: IslandTone.info);
-    }
-  }
-
-  /// 收起/展开桌面会话侧栏:内存态立即生效(宽度动画收展),并整体回写
-  /// `ui-prefs.json`(保留布局与牌堆进度);写失败只打日志,不回滚本次切换。
-  Future<void> _toggleSidebar() async {
-    final next = !ref.read(sidebarCollapsedProvider);
-    ref.read(sidebarCollapsedProvider.notifier).state = next;
-    await syncUiPrefsFile(ref);
-  }
-
-  /// 侧栏 home 键:一次弹掉栈内全部会话路由,回到应用首页(角色列表)。
-  /// 会话切换走 pushReplacement,返回栈深度不定,逐层返回不可靠。
-  void _goHome() {
-    Navigator.of(context).popUntil((route) => route.isFirst);
-  }
-
-  /// 侧栏切换到同角色/其它角色的会话:以零时长过渡整页替换当前路由 ——
-  /// 会话切换本就是换一份数据,推入新路由会把返回栈越堆越深,且系统滑动
-  /// 过渡在桌面场景显得拖沓。同一会话是空操作。
-  void _switchSession(CharacterRecord character, SessionInfo session) {
-    if (session.id == widget.sessionId) return;
-    _openSession(character, session.id);
-  }
-
-  void _openSession(CharacterRecord character, int sessionId) {
-    Navigator.of(context).pushReplacement(
-      PageRouteBuilder<void>(
-        transitionDuration: Duration.zero,
-        reverseTransitionDuration: Duration.zero,
-        pageBuilder: (_, __, ___) => ChatScreen(
-          sessionId: sessionId,
-          characterId: character.id,
-          character: character.card,
-        ),
-      ),
-    );
-  }
-
-  /// 侧栏「新建会话」:与角色页新建同口径(角色有开场白时作为助手首条
-  /// 消息落库),刷新侧栏数据后直接进入新会话。
-  Future<void> _createSessionFor(CharacterRecord character) async {
-    try {
-      final id = await ref
-          .read(sessionRepositoryProvider)
-          .createWithDefaultTitle(character.id);
-      if (character.card.firstMessage.isNotEmpty) {
-        await ref
-            .read(messageRepositoryProvider)
-            .append(
-              sessionId: id,
-              role: 'assistant',
-              content: character.card.firstMessage,
-            );
-      }
-      ref.invalidate(sessionInfosProvider(character.id));
-      ref.invalidate(sessionGroupsProvider);
-      if (!mounted) return;
-      final container = ProviderScope.containerOf(context, listen: false);
-      _openSession(character, id);
-      // 路由替换会销毁旧侧栏订阅;若分组刷新恰好横跨这一帧,新侧栏可能
-      // 拿到失效前的快照。待新路由完成首帧后再失效一次,确保新会话行
-      // 即时出现。
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        container.invalidate(sessionGroupsProvider);
-      });
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(width: chatSnackBarWidth(context), content: Text('新建会话失败:$e')),
-      );
-    }
-  }
-
-  /// 消息操作统一分发(气泡下方按钮与长按/右键菜单共用)。
-  Future<void> _messageAction(Message m, MessageAction action) async {
-    final controller = ref.read(chatControllerProvider.notifier);
-    switch (action) {
-      case MessageAction.copy:
-        await Clipboard.setData(ClipboardData(text: m.content));
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              width: chatSnackBarWidth(context),
-              content: const Text('已复制到剪贴板'),
-            ),
-          );
-        }
-      case MessageAction.edit:
-        await _editMessage(m);
-      case MessageAction.delete:
-        final id = m.id;
-        if (id == null) return;
-        final snapshot = await controller.deleteMessage(id);
-        if (snapshot == null || !mounted) return;
-        // 删除即时生效但保留撤销窗口:快照含图片字节,撤销后原位置/内容复原;
-        // 撤销窗口内又有新消息落库时恢复行排到末尾,不留重复 seq。
-        final messenger = ScaffoldMessenger.of(context);
-        messenger.hideCurrentSnackBar();
-        messenger.showSnackBar(
-          SnackBar(
-            width: chatSnackBarWidth(context),
-            content: const Text('已删除消息'),
-            action: SnackBarAction(
-              label: '撤销',
-              onPressed: () => controller.restoreMessage(snapshot),
-            ),
-          ),
-        );
-      case MessageAction.regenerate:
-        final id = m.id;
-        if (id != null) await controller.regenerate(id);
-      case MessageAction.rewrite:
-        await _rewriteMessage(m);
-      case MessageAction.resend:
-        final id = m.id;
-        if (id != null) await controller.resend(id);
-      case MessageAction.regenerateImage:
-        await _regenerateImage(m);
-    }
-  }
-
-  /// 按消息保留的原始图片描述重绘;结果(错误或成功提示)经灵动岛闪示,
-  /// 图片原地替换后由列表修订号触发重新读库。
-  Future<void> _regenerateImage(Message m) async {
-    final id = m.id;
-    if (id == null) return;
-    final error = await ref
-        .read(chatControllerProvider.notifier)
-        .regenerateImage(id);
-    if (!mounted) return;
-    _islandHub.push(
-      error ?? '图片已重新生成',
-      tone: error == null ? IslandTone.success : IslandTone.danger,
-    );
-  }
-
-  /// 长按/右键菜单:按消息角色与内容动态给出操作项 —— 空正文不提供复制/
-  /// 编辑,重新生成图片只在助手消息带图且留有原始描述时出现(没有描述就
-  /// 无法重绘);「按要求重写」只给最新一条有正文的助手回复(其后允许跟
-  /// 图片消息);删除恒定提供。
-  Future<void> _messageActions(Message m) async {
-    final isUser = m.role == 'user';
-    final hasText = m.content.trim().isNotEmpty;
-    final canRewrite =
-        !isUser &&
-        hasText &&
-        latestRewritableAssistantReply(
-              ref.read(chatControllerProvider).messages,
-            )?.id ==
-            m.id;
-    final picked = await showAppActionSheet<MessageAction>(
-      context,
-      actions: [
-        if (hasText)
-          const MenuAction(
-            value: MessageAction.copy,
-            label: '复制内容',
-            icon: Icons.copy_outlined,
-          ),
-        if (hasText)
-          const MenuAction(
-            value: MessageAction.edit,
-            label: '编辑消息',
-            icon: Icons.edit_outlined,
-          ),
-        if (canRewrite)
-          const MenuAction(
-            value: MessageAction.rewrite,
-            label: '按要求重写',
-            icon: Icons.edit_note,
-          ),
-        if (!isUser && hasText)
-          const MenuAction(
-            value: MessageAction.regenerate,
-            label: '重新生成',
-            icon: Icons.refresh,
-          ),
-        if (!isUser &&
-            m.hasVisualImage &&
-            (m.imagePrompt?.trim().isNotEmpty ?? false))
-          const MenuAction(
-            value: MessageAction.regenerateImage,
-            label: '重新生成图片',
-            icon: Icons.autorenew,
-          ),
-        if (isUser && hasText)
-          const MenuAction(
-            value: MessageAction.resend,
-            label: '重新发送',
-            icon: Icons.send_outlined,
-          ),
-        const MenuAction(
-          value: MessageAction.delete,
-          label: '删除消息',
-          icon: Icons.delete_outline,
-          destructive: true,
-        ),
-      ],
-    );
-    if (picked != null) await _messageAction(m, picked);
-  }
-
-  /// 弹出名词释义卡:点击气泡内高亮词条时显示对应世界书条目的标题与全文。
-  /// 释义不进上下文,纯显示;正文可选中复制。
-  void _showTermCard(GlossaryTerm term) {
-    showModalBottomSheet<void>(
-      context: context,
-      useSafeArea: true,
-      isScrollControlled: false,
-      builder: (ctx) {
-        final scheme = Theme.of(ctx).colorScheme;
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    // 词条名长度不定:Expanded+Align 让胶囊左对齐、关闭钮恒在
-                    // 右缘,长词条名在剩余宽度内自然换行 —— 自然宽度的胶囊在
-                    // 窄弹层里会把本行顶出右缘(0.5px 级 overflow)。
-                    Expanded(
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 5,
-                          ),
-                          decoration: BoxDecoration(
-                            color: scheme.secondaryContainer,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            term.title,
-                            style: TextStyle(
-                              color: scheme.onSecondaryContainer,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: '关闭',
-                      icon: const Icon(Icons.close, size: 20),
-                      onPressed: () => Navigator.pop(ctx),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Flexible(
-                  child: SingleChildScrollView(
-                    child: SelectableText(
-                      term.content,
-                      style: TextStyle(
-                        fontSize: 15,
-                        height: 1.5,
-                        color: scheme.onSurface,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  /// 弹一个底部编辑区改写消息内容;保存后落库并刷新。
-  ///
-  /// 相比旧的居中 AlertDialog,底部编辑区在移动端会**随软键盘整体抬升**
-  /// (按 `viewInsets` 垫高),编辑区高度也更充裕(长回复不再挤在 6 行小框里),
-  /// 整体更贴近"就地改写一条消息"的体验。
-  Future<void> _editMessage(Message m) async {
-    if (m.id == null || ref.read(chatControllerProvider).streaming) return;
-    final saved = await showTextEditSheet(
-      context,
-      title: m.role == 'user' ? '编辑消息' : '编辑回复',
-      initialText: m.content,
-    );
-    if (saved == null || !mounted) return;
-    await ref.read(chatControllerProvider.notifier).editMessage(m.id!, saved);
-  }
-
-  /// 「按要求重写」:先收集修改要求,再由控制器剪断旧回复并带要求重走生成
-  /// 管线。要求只随当次请求注入,不落库、不会出现在聊天流里。
-  Future<void> _rewriteMessage(Message m) async {
-    final id = m.id;
-    if (id == null) return;
-    final chat = ref.read(chatControllerProvider);
-    if (chat.streaming || chat.busyCommand != null) {
-      _islandHub.push('正在处理中,请稍候', tone: IslandTone.info);
-      return;
-    }
-    if (chat.regeneratingImageId != null) {
-      _islandHub.push('正在重新生成图片,请稍候', tone: IslandTone.info);
-      return;
-    }
-    final saved = await showTextEditSheet(
-      context,
-      title: '按要求重写',
-      initialText: '',
-      hintText: '描述希望如何修改这条回复…',
-      submitLabel: '重写',
-      editorHeightFactor: 0.32,
-      maxEditorHeight: 240,
-    );
-    if (saved == null || !mounted) return;
-    final error = await ref
-        .read(chatControllerProvider.notifier)
-        .rewrite(id, saved);
-    if (error != null && mounted) {
-      _islandHub.push(error, tone: IslandTone.danger);
-    }
   }
 
   /// 估算当前已组装上下文的 token 用量(供上下文使用率圆环)。
@@ -1344,18 +705,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _input.updateSyntax(syntax, highlightDialogue: dialogueHighlight);
     // 用户档案:头像用于气泡旁展示;用户名仅用于显示层替换正文里的 {{user}}。
     final user = ref.watch(userProfileProvider);
-    // 用户头像:按 base64 值缓存单个 ImageProvider(全列表共用),避免流式回复期间
-    // 整页反复重建时头像被反复解码而频闪。
-    if (user.avatarBase64 != _userAvatarKey) {
-      _userAvatarKey = user.avatarBase64;
-      final bytes = safeBase64Decode(user.avatarBase64);
-      _userAvatarImage = bytes == null ? null : MemoryImage(bytes);
+    ImageProvider? avatarImage(String? hash) => hashImageProvider(
+      ref.read(databaseProvider).images,
+      hash,
+      cacheWidth: kAvatarImageWidth,
+    );
+
+    // hash 不变时共享 provider;换图自然得到新的文件缓存键。
+    if (user.avatarHash != _userAvatarKey) {
+      _userAvatarKey = user.avatarHash;
+      _userAvatarImage = avatarImage(user.avatarHash);
     }
-    // 角色头像:值不变复用同一 provider 实例(避免流式期间反复重建重解码)。
-    if (_avatarBase64 != _assistantAvatarKey) {
-      _assistantAvatarKey = _avatarBase64;
-      final bytes = safeBase64Decode(_avatarBase64);
-      _assistantAvatarImage = bytes == null ? null : MemoryImage(bytes);
+    if (_avatarHash != _assistantAvatarKey) {
+      _assistantAvatarKey = _avatarHash;
+      _assistantAvatarImage = avatarImage(_avatarHash);
     }
     final displayUserName = user.name;
 
@@ -1385,6 +748,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // 会话的转录,sessionId 为旧值或 null。
     final loadedHere = chat.sessionId == widget.sessionId;
     _screenDataReady = loadedHere;
+    // 桌面消息导航的 user 索引:进入会话查一次全量历史(不受显示窗口裁剪),
+    // 之后随消息实例变化用窗口数据同步合并。窗口之外的历史行 UI 不能编辑/
+    // 删除(多选与操作排只覆盖已加载窗口),因此无需每次消息落库都重查 DB;
+    // 反复在 build 里发起窗口化 DB 往返还会把 sqflite 的事务计时器悬在帧外,
+    // 拖住整个测试收尾。移动端用不到这份索引,整段跳过。
+    if (loadedHere && _desktopPlatform) {
+      if (!_userIndexQueryStarted) {
+        _userIndexQueryStarted = true;
+        _refreshUserIndex();
+      }
+      if (!identical(_userIndexSource, chat.messages)) {
+        _userIndexSource = chat.messages;
+        _mergeUserIndex(chat.messages, hasOlder: chat.canLoadOlder);
+      }
+    }
     // 空会话的输入区抬升:桌面端在本屏数据就位、没有任何消息、角色卡也没有
     // 开场白候选时,底部留白按内容高的四分之一把输入区抬离底部(此时空态里
     // 没有可点的起笔入口,输入卡贴在屏幕最底部显得空旷);有开场白时输入区
@@ -1431,9 +809,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // (jumpTo),避免频繁开启和打断 150ms 动画导致动画控制器冲突与掉帧卡顿。
     // 用户正在拖动时跳过(详见 _userDragging)。
     if (count != _lastCount) {
-      // 首次数据到达不算「新消息」:此时侧栏刚拿到首查结果,再失效一次
-      // 只会多打一轮无意义聚合查询。
-      final hadBaseline = _lastCount >= 0;
       _lastCount = count;
       // 用户主动发送带来的首个新条目:无条件跟随一次(force 绕过滚动宽限窗)。
       final fromSend = _followAfterSend;
@@ -1445,17 +820,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           _positioned &&
           (_nearBottom.value || fromSend) &&
           !_userDragging &&
-          !_autoTopRunning.value) {
+          !_autoTopRunning.value &&
+          !_revealRunning) {
         _scrollToBottom(animate: !chat.streaming, force: fromSend);
       }
-      // 侧栏的组内排序与末条预览随消息更新:帧末失效(不能在 build 期改
-      // provider);侧栏不在可视区时跳过(失效只记脏,重新展开时由
-      // [_sidebarWasShown] 的补失效统一兜底)。
-      if (showSidebar && hadBaseline) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) ref.invalidate(sessionGroupsProvider);
-        });
-      }
+      // 侧栏的组内排序与末条预览由控制器在真正发生消息增删时失效
+      // (见 ChatControllerSession._invalidateSessionList);向上分页只是
+      // 扩充显示窗口,不改变会话条数/预览,不能再触发全库聚合重建。
     }
     // 流式草稿在独立 provider(不驱动整页重建),经 listen 跟随:
     // 每个草稿块只触发这条回调(贴底时滚动一下),页面 build 不再陪跑。
@@ -1463,7 +834,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       if (_screenDataReady &&
           _positioned &&
           _nearBottom.value &&
-          !_userDragging) {
+          !_userDragging &&
+          !_revealRunning) {
         _scrollToBottom(animate: !ref.read(chatControllerProvider).streaming);
       }
     });
@@ -1479,6 +851,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       });
     });
 
+    // 后台 Agentic 下一步建议:仅当前聊天页可见时自动弹底单;切页/换会话/
+    // 未就绪一律视为忽略并丢弃本批(纯内存态,不排队补弹)。
+    ref.listen(chatControllerProvider, (previous, next) {
+      if (next.nextSuggestions.isEmpty) return;
+      if (identical(previous?.nextSuggestions, next.nextSuggestions)) return;
+      _onNextSuggestions(next.nextSuggestions);
+    });
+
     // 会话记忆:驱动「初始化记忆」提示条(后台成功写入后经 invalidate 自动刷新,
     // 记忆非空即提示条消失)。手动关闭按会话记忆,重复进入同一会话不再弹出。
     final memoriesAsync = ref.watch(memoriesProvider(widget.sessionId));
@@ -1486,11 +866,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         .watch(memoryInitDismissedProvider)
         .contains(widget.sessionId);
 
-    final appBarAvatar = InkWell(
-      key: const ValueKey('appbar-character-avatar'),
-      customBorder: const CircleBorder(),
-      onTap: _showCharacterStatusCard,
-      child: _ChatAvatar(name: _character.name, avatarBase64: _avatarBase64),
+    final appBarAvatar = Semantics(
+      button: true,
+      label: '查看角色资料',
+      child: InkWell(
+        key: const ValueKey('appbar-character-avatar'),
+        customBorder: const CircleBorder(),
+        onTap: _showCharacterStatusCard,
+        child: _ChatAvatar(name: _character.name, avatarHash: _avatarHash),
+      ),
     );
     final appBarActions = <Widget>[
       IconButton(
@@ -1501,10 +885,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       IconButton(
         tooltip: '上下文',
         icon: const Icon(Icons.query_stats_outlined),
-        onPressed: () => showModalBottomSheet<void>(
-          context: context,
-          isScrollControlled: true,
-          useSafeArea: true,
+        onPressed: () => showAppSheet<void>(
+          context,
           showDragHandle: true,
           // 可拖拽缩放:默认接近全高,向下拖可让出聊天内容对照着看。
           builder: (_) => DraggableScrollableSheet(
@@ -1527,6 +909,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         tooltip: '会话操作',
         onSelected: (action) {
           switch (action) {
+            case 'select':
+              _enterSelectionMode();
             case 'rename':
               _renameCurrentSession();
             case 'skills':
@@ -1560,6 +944,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ),
           // 会话级三项(重命名/导出/删除)连排,与上方管理入口分开。
           const MenuAction(
+            value: 'select',
+            label: '多选消息',
+            icon: Icons.checklist_outlined,
+          ),
+          const MenuAction(
             value: 'rename',
             label: '重命名会话',
             icon: Icons.edit_outlined,
@@ -1592,29 +981,70 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // 主从布局下 AppBar 直接嵌进右窗 Column(嵌套 Scaffold 会让 SnackBar
     // 在两座脚手架各渲染一份);AppBar 自持 toolbarHeight 与顶部安全区。
     final appBar = AppBar(
-      titleSpacing: 0,
+      titleSpacing: _selectionMode ? 4 : 0,
       automaticallyImplyLeading: false,
-      title: Row(
-        children: [
-          // 侧栏到达断点后常驻提供收起/展开入口(折叠偏好跨会话记忆);
-          // 窗口更窄(<1200)时侧栏不可用,不出现。
-          if (sidebarAvailable)
-            IconButton(
-              tooltip: showSidebar ? '收起会话侧栏' : '展开会话侧栏',
-              onPressed: _toggleSidebar,
-              iconSize: 20,
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.vertical_split),
+      leading: _selectionMode
+          ? IconButton(
+              key: const ValueKey('message_selection_close'),
+              tooltip: '退出多选',
+              icon: const Icon(Icons.close),
+              onPressed: _exitSelectionMode,
+            )
+          : null,
+      title: _selectionMode
+          ? ValueListenableBuilder<Set<int>>(
+              valueListenable: _selectedMessageIds,
+              builder: (_, selected, __) => Text('已选 ${selected.length} 条'),
+            )
+          : Row(
+              children: [
+                // 侧栏到达断点后常驻提供收起/展开入口(折叠偏好跨会话记忆);
+                // 窗口更窄(<1200)时侧栏不可用,不出现。
+                if (sidebarAvailable)
+                  IconButton(
+                    tooltip: showSidebar ? '收起会话侧栏' : '展开会话侧栏',
+                    onPressed: _toggleSidebar,
+                    iconSize: 20,
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.vertical_split),
+                  ),
+                if (ModalRoute.of(context)?.canPop ?? false) const BackButton(),
+                appBarAvatar,
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(_character.name, overflow: TextOverflow.ellipsis),
+                ),
+              ],
             ),
-          if (ModalRoute.of(context)?.canPop ?? false) const BackButton(),
-          appBarAvatar,
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(_character.name, overflow: TextOverflow.ellipsis),
-          ),
-        ],
-      ),
-      actions: appBarActions,
+      actions: _selectionMode
+          ? [
+              // 多选的删除/导出固定在右上角,底部只保留快捷选择。
+              ValueListenableBuilder<Set<int>>(
+                valueListenable: _selectedMessageIds,
+                builder: (context, selected, _) {
+                  final empty = selected.isEmpty;
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        key: const ValueKey('message_selection_delete'),
+                        tooltip: '删除选中消息',
+                        color: Theme.of(context).colorScheme.error,
+                        onPressed: empty ? null : _deleteSelectedMessages,
+                        icon: const Icon(Icons.delete_outline),
+                      ),
+                      IconButton(
+                        key: const ValueKey('message_selection_export'),
+                        tooltip: '导出选中消息',
+                        onPressed: empty ? null : _exportSelectedMessages,
+                        icon: const Icon(Icons.file_download_outlined),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ]
+          : appBarActions,
     );
 
     // 灵动岛:错误警报 / 用量分账(主写·后台·压缩)/ 主写流式与后台维护
@@ -1642,26 +1072,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               orElse: () => false,
             ),
         compacting: chat.busyCommand == 'compact',
-        hidden: _entrySettling,
+        hidden: _entrySettling || _selectionMode,
         // 用量粒让位:仅当列表真的可滚动且用户翻到了顶部(贴顶但
         // 不贴底)。内容不足一屏的会话贴顶也贴底,不存在"胶囊压住
         // 正在翻看的历史",照常常驻。
         idleHushed: _nearTop.value && !_nearBottom.value,
         hub: _islandHub,
         onOpenStatus: _openStatus,
-        onInterrupt: () => ref
-            .read(chatControllerProvider.notifier)
-            .interrupt(),
-        onInitMemory: () => ref
-            .read(chatControllerProvider.notifier)
-            .initializeMemory(),
+        onInterrupt: () =>
+            ref.read(chatControllerProvider.notifier).interrupt(),
+        onInitMemory: () =>
+            ref.read(chatControllerProvider.notifier).initializeMemory(),
         onDismissMemoryInit: () {
           final notifier = ref.read(memoryInitDismissedProvider.notifier);
           notifier.state = {...notifier.state, widget.sessionId};
         },
-        onDismissError: () => ref
+        onDismissError: () =>
+            ref.read(chatControllerProvider.notifier).clearError(),
+        onSwitchFallbackModel: () => ref
             .read(chatControllerProvider.notifier)
-            .clearError(),
+            .switchToFallbackModel(),
       ),
     );
 
@@ -1674,8 +1104,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         if (backgroundEnabled)
           _ChatBackground(
             key: const ValueKey('chat-background'),
-            backgroundBase64: _bgBase64,
-            avatarBase64: _avatarBase64,
+            backgroundHash: _bgHash,
+            avatarHash: _avatarHash,
             blur: backgroundBlur,
           ),
         // 宽窗只收敛内容(消息行/输入卡同列;AppBar 贴窗格两缘),不铺列底色:助手气泡
@@ -1765,18 +1195,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             // 入口在正则脚本管理页。
                             highlightDialogue: dialogueHighlight,
                             assistantBubbleStyle: _character.bubbleStyle,
-                            imageLoader: (id) => listRef
-                                .read(messageRepositoryProvider)
-                                .imageBase64For(id),
                             // 全屏查看器的"删除图片":只清空该消息图片字段,正文保留。
                             onImageDelete: (id) => listRef
                                 .read(chatControllerProvider.notifier)
                                 .deleteMessageImage(id),
                             regeneratingImageId: chat.regeneratingImageId,
-                            imageRevisions: chat.imageRevisions,
                             highlightedMessageId: _highlightMessageId,
                             onMessageLongPress: _messageActions,
                             onMessageAction: (m, a) => _messageAction(m, a),
+                            selectionMode: _selectionMode,
+                            selection: _selectedMessageIds,
+                            onSelectionToggle: _toggleMessageSelection,
                             // 操作按钮排显隐上报:导航组据此让位(见 _messageActionsOpen)。
                             onActionsVisibleChanged: (open) =>
                                 _messageActionsOpen.value = open,
@@ -1801,56 +1230,84 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     // 透明收敛,浮在空白背景上的「回到底部」等按钮只会造成困惑;
                     // 收敛结束的同一帧随之显示。该钮是 Stack 末位子项,条件增删
                     // 不影响前面子项的匹配位置。
-                    if (!_entrySettling)
-                      _ScrollNavRail(
-                        nearTop: _nearTop,
-                        nearBottom: _nearBottom,
-                        autoHidden: _navAutoHidden,
-                        // 选中消息的操作按钮排可见时整组让位,不压住重新发送/重新生成。
-                        actionsOpen: _messageActionsOpen,
-                        collapsed: _scrollNavCollapsed,
-                        autoTopRunning: _autoTopRunning,
-                        onToggleCollapsed: () => _scrollNavCollapsed.value =
-                            !_scrollNavCollapsed.value,
-                        onScrollToTop: _scrollToTop,
-                        onScrollToPreviousMessage: _scrollToPreviousMessage,
-                        onScrollToNextMessage: _scrollToNextMessage,
-                        onScrollToBottom: () => _scrollToBottom(),
-                      ),
+                    // 桌面端换成右缘消息导航(刻度条 + 悬停卡片),移动端仍用
+                    // 悬浮按键组。
+                    if (!_entrySettling && !_selectionMode)
+                      desktopPlatform
+                          ? _MessageNavigator(
+                              messages: _userIndex,
+                              currentMessageId: _visibleUserMessageId,
+                              nearTop: _nearTop,
+                              nearBottom: _nearBottom,
+                              autoTopRunning: _autoTopRunning,
+                              canLoadOlder: chat.canLoadOlder,
+                              onScrollToTop: _scrollToTop,
+                              onScrollToBottom: () => _scrollToBottom(force: true),
+                              onJumpTo: _jumpToUserMessage,
+                            )
+                          : _ScrollNavRail(
+                              nearTop: _nearTop,
+                              nearBottom: _nearBottom,
+                              autoHidden: _navAutoHidden,
+                              // 选中消息的操作按钮排可见时整组让位,不压住重新发送/重新生成。
+                              actionsOpen: _messageActionsOpen,
+                              collapsed: _scrollNavCollapsed,
+                              autoTopRunning: _autoTopRunning,
+                              canLoadOlder: chat.canLoadOlder,
+                              onToggleCollapsed: () =>
+                                  _scrollNavCollapsed.value =
+                                      !_scrollNavCollapsed.value,
+                              onScrollToTop: _scrollToTop,
+                              onScrollToPreviousMessage:
+                                  _scrollToPreviousMessage,
+                              onScrollToNextMessage: _scrollToNextMessage,
+                              onScrollToBottom: () => _scrollToBottom(force: true),
+                            ),
                   ],
                 ),
               ),
               // /compact 的「压缩中」活动态由灵动岛呈现。
-              // 底部输入区(命令行 + 输入卡 + 工具底栏)整体见 ChatComposer。
-              ChatComposer(
-                interruptible: chat.streaming || chat.busyCommand != null,
-                suggestions: _slashSuggestions,
-                inputController: _input,
-                inputFocusNode: _inputFocus,
-                commandsExpanded: _commandsExpanded,
-                usage: ContextLink(
-                  estimateTokens: _estimateContextTokens(chat.lastContext),
-                  actualInputTokens: chat.lastSentInputTokens,
-                  cachedInputTokens: chat.cachedInputTokens,
+              // 多选时底部换成批量操作栏,输入区整体收起,避免误发送。
+              if (_selectionMode)
+                MessageSelectionBar(
+                  onSelectAll: _selectAllMessages,
+                  onClearSelection: _clearMessageSelection,
+                  onSelectImages: _selectImageMessages,
+                  onSelectText: _selectTextMessages,
+                )
+              else ...[
+                // 底部输入区(命令行 + 输入卡 + 工具底栏)整体见 ChatComposer。
+                ChatComposer(
+                  interruptible: chat.streaming || chat.busyCommand != null,
+                  suggestions: _slashSuggestions,
+                  inputController: _input,
+                  inputFocusNode: _inputFocus,
+                  commandsExpanded: _commandsExpanded,
+                  usage: ContextLink(
+                    estimateTokens: _estimateContextTokens(chat.lastContext),
+                    actualInputTokens: chat.lastSentInputTokens,
+                    cachedInputTokens: chat.cachedInputTokens,
+                  ),
+                  onToggleCommands: () =>
+                      setState(() => _commandsExpanded = !_commandsExpanded),
+                  onChanged: _onInputChanged,
+                  onInsertCommand: _insertCommand,
+                  onSend: _send,
+                  submitOnEnter: desktopPlatform,
+                  onInterrupt: () =>
+                      ref.read(chatControllerProvider.notifier).interrupt(),
                 ),
-                onToggleCommands: () =>
-                    setState(() => _commandsExpanded = !_commandsExpanded),
-                onChanged: _onInputChanged,
-                onInsertCommand: _insertCommand,
-                onSend: _send,
-                onInterrupt: () =>
-                    ref.read(chatControllerProvider.notifier).interrupt(),
-              ),
-              // 桌面端空会话且角色没有开场白:底部留白(内容高 25%)把输入区
-              // 抬离底部;一旦有消息(发送/开场白/重发)留白收回,输入区回到
-              // 底部。移动端 liftComposer 恒为 false,始终贴底。
-              _ComposerLift(
-                lifted: liftComposer,
-                height: constraints.maxHeight * 0.25,
-                duration: reduceMotionOf(context)
-                    ? Duration.zero
-                    : const Duration(milliseconds: 240),
-              ),
+                // 桌面端空会话且角色没有开场白:底部留白(内容高 25%)把输入区
+                // 抬离底部;一旦有消息(发送/开场白/重发)留白收回,输入区回到
+                // 底部。移动端 liftComposer 恒为 false,始终贴底。
+                _ComposerLift(
+                  lifted: liftComposer,
+                  height: constraints.maxHeight * 0.25,
+                  duration: reduceMotionOf(context)
+                      ? Duration.zero
+                      : const Duration(milliseconds: 240),
+                ),
+              ],
             ],
           ),
         ),
@@ -1865,587 +1322,129 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     // 随之平滑重排),内容始终按侧栏满宽布局、锚定槽右缘滑入滑出 —— 内部
     // 不随动画重排(标题/检索框不抖),右缘分隔线始终贴着聊天区;完全收起
     // 后卸载子树,不把隐藏的检索框留在焦点遍历里。
-    return Scaffold(
-      body: Row(
-        children: [
-          _SidebarReveal(
-            visible: showSidebar,
-            duration: reduceMotionOf(context)
-                ? Duration.zero
-                : const Duration(milliseconds: 220),
-            child: ChatSessionSidebar(
-              currentSessionId: widget.sessionId,
-              onSelect: _switchSession,
-              onCreate: _createSessionFor,
-              onSessionAction: _handleSidebarAction,
-              onGoHome: _goHome,
-            ),
-          ),
-          Expanded(
-            // 桌面端灵岛要浮到 AppBar 带内(见 build 中的 island):用覆盖
-            // 整块右窗的 Stack 承载,Positioned 坐标从窗格顶边起算;移动端
-            // 岛在消息区自己的 Stack 里,这里只有基座一层。
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Column(
+    return PopScope(
+      // 多选时返回键/侧滑先退出多选,不直接离开会话。
+      canPop: !_selectionMode,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _selectionMode) _exitSelectionMode();
+      },
+      child: Focus(
+        focusNode: _selectionFocus,
+        onKeyEvent: (node, event) {
+          if (event is KeyDownEvent &&
+              event.logicalKey == LogicalKeyboardKey.escape &&
+              _selectionMode) {
+            _exitSelectionMode();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: Scaffold(
+          body: Row(
+            children: [
+              _SidebarReveal(
+                visible: showSidebar,
+                duration: reduceMotionOf(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 220),
+                child: ChatSessionSidebar(
+                  currentSessionId: widget.sessionId,
+                  onSelect: _switchSession,
+                  onCreate: _createSessionFor,
+                  onSessionAction: _handleSidebarAction,
+                  onGoHome: _goHome,
+                ),
+              ),
+              Expanded(
+                // 桌面端灵岛要浮到 AppBar 带内(见 build 中的 island):用覆盖
+                // 整块右窗的 Stack 承载,Positioned 坐标从窗格顶边起算;移动端
+                // 岛在消息区自己的 Stack 里,这里只有基座一层。
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    appBar,
-                    Expanded(child: content),
+                    Column(
+                      children: [
+                        appBar,
+                        Expanded(child: content),
+                      ],
+                    ),
+                    if (desktopPlatform) island,
                   ],
                 ),
-                if (desktopPlatform) island,
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 空会话输入区抬升的底部留白:在 0 与 [height] 之间做 easeOutCubic 过渡。
-/// 窗口缩放导致 [height] 变化时按当前进度即时随动 —— 隐式动画在持续缩放
-/// 中会一直追新目标,输入区会橡皮一样滞后;只有「有/无内容」切换才播动画。
-/// 留白取内容区高度的四分之一,不必测量输入区的实际高度。
-class _ComposerLift extends StatefulWidget {
-  final bool lifted;
-  final double height;
-  final Duration duration;
-
-  const _ComposerLift({
-    required this.lifted,
-    required this.height,
-    required this.duration,
-  });
-
-  @override
-  State<_ComposerLift> createState() => _ComposerLiftState();
-}
-
-class _ComposerLiftState extends State<_ComposerLift>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: widget.duration,
-    value: widget.lifted ? 1 : 0,
-  );
-
-  @override
-  void didUpdateWidget(covariant _ComposerLift oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _controller.duration = widget.duration;
-    if (widget.lifted != oldWidget.lifted) {
-      if (widget.lifted) {
-        _controller.forward();
-      } else {
-        _controller.reverse();
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) => SizedBox(
-        height:
-            widget.height * Curves.easeOutCubic.transform(_controller.value),
-      ),
-    );
-  }
-}
-
-/// 宽窗侧栏的收展容器:槽宽按 [visible] 在 0..[kChatSidebarWidth] 间做
-/// easeOutCubic 动画,聊天区随行重排;子树始终按侧栏满宽布局并锚定槽右缘,
-/// 被 [ClipRect] 按槽宽裁切 —— 滑入滑出而不是整体缩放,标题/检索框/行宽
-/// 在动画中不重排。完全收起后卸载子树:隐藏的检索框不应留在焦点遍历与
-/// widget 树里(也避免测试把侧栏输入框误当聊天输入框)。
-class _SidebarReveal extends StatefulWidget {
-  final bool visible;
-  final Duration duration;
-  final Widget child;
-
-  const _SidebarReveal({
-    required this.visible,
-    required this.duration,
-    required this.child,
-  });
-
-  @override
-  State<_SidebarReveal> createState() => _SidebarRevealState();
-}
-
-class _SidebarRevealState extends State<_SidebarReveal>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: widget.duration,
-    // 首帧即按目标状态成形:从宽窗打开聊天页不该先播一次展开动画。
-    value: widget.visible ? 1 : 0,
-  );
-
-  @override
-  void didUpdateWidget(covariant _SidebarReveal oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _controller.duration = widget.duration;
-    if (widget.visible != oldWidget.visible) {
-      if (widget.visible) {
-        _controller.forward();
-      } else {
-        _controller.reverse();
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRect(
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, _) {
-          final width =
-              kChatSidebarWidth *
-              Curves.easeOutCubic.transform(_controller.value);
-          if (width <= 0) return const SizedBox.shrink();
-          return SizedBox(
-            width: width,
-            child: OverflowBox(
-              alignment: Alignment.centerRight,
-              minWidth: kChatSidebarWidth,
-              maxWidth: kChatSidebarWidth,
-              child: SizedBox(width: kChatSidebarWidth, child: widget.child),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-/// 悬浮滚动导航按键组:顶部方向(回到顶部/上一条消息)与底部方向(下一条
-/// 消息/回到底部),「收起/展开滚动导航」夹在两组之间(列表中部时是第 3 颗,
-/// 即正中间;贴顶/贴底只剩单侧方向组时,收起钮放在该组另一端,不与方向钮
-/// 挤在一起)。整组可折叠:点收起折成一颗半透明小钮,再点即展开。用户滚动
-/// 列表(拖动/滚轮/惯性)期间整组自动隐藏,滚动真正停止后延迟恢复(由
-/// ChatScreen 的滚动通知驱动 `_navAutoHidden`)。
-///
-/// 六个显隐/折叠开关全部是 [ValueListenable] 且由本组通过 [AnimatedBuilder]
-/// 自行监听:滚动期间这些开关频繁翻转(贴底/贴顶阈值跨越、自动隐藏/恢复),
-/// 若在 ChatScreen 里走 setState 会连消息列表一起整页重建,滑动掉帧、表现为
-/// 一卡一卡;这里只重建这一小块,滚动路径上零 setState。页面内悬浮的滚动
-/// 工具钮统一禁用 hero 动画(`heroTag: null`),避免与其它页面的 FAB 撞默认
-/// hero 标签(多个同 tag hero 触发断言)。
-class _ScrollNavRail extends StatelessWidget {
-  final ValueListenable<bool> nearTop;
-  final ValueListenable<bool> nearBottom;
-  final ValueListenable<bool> autoHidden;
-
-  /// 选中消息的操作按钮排(复制/编辑/删除/重新发送)是否可见:可见期间整组
-  /// 隐藏 —— 操作排贴在列表内容底端,选中最后一条消息时正好落在导航组的
-  /// 位置上,叠着会挡住最右的重新发送/重新生成。
-  final ValueListenable<bool> actionsOpen;
-  final ValueListenable<bool> collapsed;
-
-  /// 「回到顶部」逐页取旧是否进行中:进行中整组导航钮换成一颗进度指示钮并
-  /// **常驻**(不随贴顶邻域/滚动自动隐藏消失 —— 旧实现正是按钮在贴顶 80px 内
-  /// 消失导致用户卡在半截历史无从继续)。
-  final ValueListenable<bool> autoTopRunning;
-  final VoidCallback onToggleCollapsed;
-  final VoidCallback onScrollToTop;
-  final VoidCallback onScrollToPreviousMessage;
-  final VoidCallback onScrollToNextMessage;
-  final VoidCallback onScrollToBottom;
-
-  const _ScrollNavRail({
-    required this.nearTop,
-    required this.nearBottom,
-    required this.autoHidden,
-    required this.actionsOpen,
-    required this.collapsed,
-    required this.autoTopRunning,
-    required this.onToggleCollapsed,
-    required this.onScrollToTop,
-    required this.onScrollToPreviousMessage,
-    required this.onScrollToNextMessage,
-    required this.onScrollToBottom,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned(
-      right: 12,
-      bottom: 12,
-      child: AnimatedBuilder(
-        animation: Listenable.merge([
-          nearTop,
-          nearBottom,
-          autoHidden,
-          actionsOpen,
-          collapsed,
-          autoTopRunning,
-        ]),
-        builder: (context, _) {
-          // 逐页取旧进行中:整组换成进度钮,常驻显示直到落定(优先级高于
-          // 下面的隐藏/折叠判定)。
-          if (autoTopRunning.value) {
-            return FloatingActionButton.small(
-              tooltip: '正在加载更早的历史…',
-              heroTag: null,
-              onPressed: null,
-              child: const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
               ),
-            );
-          }
-          // 内容不足一屏(既贴顶又贴底)没有导航意义;滚动中与消息操作排
-          // 可见期间自动隐藏让位。
-          if ((nearTop.value && nearBottom.value) ||
-              autoHidden.value ||
-              actionsOpen.value) {
-            return const SizedBox.shrink();
-          }
-          if (collapsed.value) {
-            return Opacity(
-              opacity: 0.55,
-              child: FloatingActionButton.small(
-                tooltip: '展开滚动导航',
-                heroTag: null,
-                onPressed: onToggleCollapsed,
-                child: const Icon(Icons.unfold_more),
-              ),
-            );
-          }
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (!nearTop.value) ...[
-                FloatingActionButton.small(
-                  tooltip: '回到顶部',
-                  heroTag: null,
-                  onPressed: onScrollToTop,
-                  child: const Icon(Icons.keyboard_double_arrow_up),
-                ),
-                const SizedBox(height: 6),
-                FloatingActionButton.small(
-                  tooltip: '上一条消息',
-                  heroTag: null,
-                  onPressed: onScrollToPreviousMessage,
-                  child: const Icon(Icons.keyboard_arrow_up),
-                ),
-              ],
-              // 间距按"相邻组可见即加":贴顶/贴底只剩单侧方向组时,收起钮与
-              // 最近的方向钮之间也要有 6px,不能贴住。
-              if (!nearTop.value) const SizedBox(height: 6),
-              FloatingActionButton.small(
-                tooltip: '收起滚动导航',
-                heroTag: null,
-                onPressed: onToggleCollapsed,
-                child: const Icon(Icons.unfold_less),
-              ),
-              if (!nearBottom.value) const SizedBox(height: 6),
-              if (!nearBottom.value) ...[
-                FloatingActionButton.small(
-                  tooltip: '下一条消息',
-                  heroTag: null,
-                  onPressed: onScrollToNextMessage,
-                  child: const Icon(Icons.keyboard_arrow_down),
-                ),
-                const SizedBox(height: 6),
-                FloatingActionButton.small(
-                  tooltip: '回到底部',
-                  heroTag: null,
-                  onPressed: onScrollToBottom,
-                  child: const Icon(Icons.keyboard_double_arrow_down),
-                ),
-              ],
             ],
-          );
-        },
+          ),
+        ),
       ),
     );
   }
 }
 
-/// AppBar 里的小头像:base64 图或名字首字。
-/// 必须是 StatefulWidget:流式回复期间 AppBar 随每个流式块重建,若每次 build 都
-/// 现解 base64 并 new 一个 MemoryImage,头像会被反复重新解码而频闪(与
-/// _ChatBackground 同源)。这里缓存解码结果与图片 provider,仅当 avatarBase64
-/// 真正变化时才重建。
-class _ChatAvatar extends StatefulWidget {
-  final String name;
-  final String? avatarBase64;
-  const _ChatAvatar({required this.name, required this.avatarBase64});
-
-  @override
-  State<_ChatAvatar> createState() => _ChatAvatarState();
-}
-
-class _ChatAvatarState extends State<_ChatAvatar> {
-  Uint8List? _bytes;
-  MemoryImage? _provider;
-
-  @override
-  void didUpdateWidget(covariant _ChatAvatar oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.avatarBase64 != widget.avatarBase64) {
-      _bytes = null;
-      _provider = null;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bytes = _bytes ??= safeBase64Decode(widget.avatarBase64);
-    final initial = widget.name.isEmpty ? '?' : widget.name.characters.first;
-    // foregroundImage 画在 child 之上:解码失败时自动露出首字,不会留下
-    // 一个没有内容的空白圆。
-    return CircleAvatar(
-      radius: 16,
-      foregroundImage: bytes == null
-          ? null
-          : (_provider ??= MemoryImage(bytes)),
-      onForegroundImageError: bytes == null ? null : (_, __) {},
-      child: Text(initial, style: const TextStyle(fontSize: 14)),
-    );
-  }
-}
-
-/// 角色 / 用户的头像状态卡(底部弹层):大头像 + 名称 + 简介,下接入口行
-/// (角色卡编辑 / 个人设置)。头像缺失时退回图标占位。
-class _AvatarStatusSheet extends StatelessWidget {
-  final ImageProvider? avatar;
-  final IconData fallbackIcon;
-  final String title;
-  final String subtitle;
-  final String? body;
-  final String actionLabel;
-  final IconData actionIcon;
-  final VoidCallback onAction;
-
-  const _AvatarStatusSheet({
-    required this.avatar,
-    required this.fallbackIcon,
-    required this.title,
-    required this.subtitle,
-    required this.actionLabel,
-    required this.actionIcon,
-    required this.onAction,
-    this.body,
-  });
+/// Agentic 后台的下一步建议底单:每行一条用户口吻的完整发言,点击即发送;
+/// 关闭/下滑/点「忽略」都返回 null,由调用方丢弃整批。
+class _NextSuggestionsSheet extends StatelessWidget {
+  final List<String> suggestions;
+  const _NextSuggestionsSheet({required this.suggestions});
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
-    final icon = Icon(
-      fallbackIcon,
-      size: 36,
-      color: scheme.onSecondaryContainer,
-    );
-    final avatarWidget = avatar == null
-        ? CircleAvatar(
-            radius: 40,
-            backgroundColor: scheme.secondaryContainer,
-            child: icon,
-          )
-        : CircleAvatar(
-            radius: 40,
-            backgroundColor: scheme.secondaryContainer,
-            foregroundImage: avatar,
-            onForegroundImageError: (_, __) {},
-            child: icon,
-          );
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Center(child: avatarWidget),
-            const SizedBox(height: 12),
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: text.titleMedium,
-            ),
-            const SizedBox(height: 2),
-            Text(
-              subtitle,
-              textAlign: TextAlign.center,
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SheetHeader(title: '下一步建议', closeLabel: '忽略'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
+            child: Text(
+              '点击一条即可作为你的消息发送。',
               style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
-            if (body != null && body!.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text(
-                body!,
-                textAlign: TextAlign.center,
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-              ),
-            ],
-            const SizedBox(height: 16),
-            GroupCard(
-              margin: EdgeInsets.zero,
-              children: [
-                ListTile(
-                  leading: Icon(actionIcon, size: 20),
-                  title: Text(actionLabel),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: onAction,
-                ),
-              ],
+          ),
+          Flexible(
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: suggestions.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              itemBuilder: (context, i) {
+                final suggestion = suggestions[i];
+                return Material(
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(12),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () => Navigator.pop(context, suggestion),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(suggestion, style: text.bodyMedium),
+                          ),
+                          const SizedBox(width: 8),
+                          Icon(
+                            Icons.north_east,
+                            size: 18,
+                            color: scheme.primary,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('忽略本批建议'),
+          ),
+        ],
       ),
-    );
-  }
-}
-
-/// 聊天页背景层:全局开关开启后显示。优先角色卡专属背景图(backgroundBase64),
-/// 未设置时回退角色头像(avatarBase64)——即"卡面"。背景图铺满并轻微模糊,
-/// 其上再叠一层不透明白/深色淡罩,保证气泡与文字清晰可读。纯显示层,不进上下文。
-///
-/// 必须是 StatefulWidget:流式生成期间每次 `setState` 都会重建本层,若每次都用
-/// 新的 MemoryImage,整幅背景会被反复重新解码 —— 解码期间画面闪白,表现为
-/// "按钮出现/消失时闪一次、AI 生成回复时频闪"。这里缓存解码结果与图片 provider,
-/// 仅在 base64 真正变化时才重建,彻底消除重建引起的闪屏。
-class _ChatBackground extends StatefulWidget {
-  final String? backgroundBase64;
-  final String? avatarBase64;
-  final double blur;
-  const _ChatBackground({
-    super.key,
-    required this.backgroundBase64,
-    required this.avatarBase64,
-    required this.blur,
-  });
-
-  @override
-  State<_ChatBackground> createState() => _ChatBackgroundState();
-}
-
-class _ChatBackgroundState extends State<_ChatBackground> {
-  Uint8List? _bytes;
-  MemoryImage? _provider;
-
-  @override
-  void didUpdateWidget(covariant _ChatBackground oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.backgroundBase64 != widget.backgroundBase64 ||
-        oldWidget.avatarBase64 != widget.avatarBase64) {
-      _bytes = null;
-      _provider = null;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bytes = _bytes ??=
-        safeBase64Decode(widget.backgroundBase64) ??
-        safeBase64Decode(widget.avatarBase64);
-    if (bytes == null) return const SizedBox.shrink();
-    // 取主题背景色的一个不透明近似色做遮罩:亮色用白、暗色用黑,让背景若隐若现。
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final veilColor =
-        (isDark ? const Color(0xFF121212) : const Color(0xFFFAFAFA)).withValues(
-          alpha: 0.60,
-        );
-    final image = Image(
-      image: _provider ??= MemoryImage(bytes),
-      fit: BoxFit.cover,
-      alignment: Alignment.topCenter,
-      // 即便 provider 因某种原因被替换,也保留旧帧直到新图就绪,避免闪白。
-      gaplessPlayback: true,
-      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-    );
-    // blur <= 0 时不包 ImageFiltered(零模糊本就是无操作),便于测试区分。
-    final rendered = widget.blur <= 0
-        ? image
-        : ImageFiltered(
-            imageFilter: ui.ImageFilter.blur(
-              sigmaX: widget.blur,
-              sigmaY: widget.blur,
-            ),
-            child: image,
-          );
-    // ImageFiltered 的模糊输出不受布局边界约束,会画到自身 rect 之外;宽窗
-    // 主从布局下背景左缘的晕染会越过窗格边界、渗到侧栏上。裁到自身边界,
-    // 背景只落在聊天窗格内。
-    return ClipRect(
-      child: IgnorePointer(
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            rendered,
-            ColoredBox(color: veilColor),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 会话重命名弹窗:控制器归弹窗 State 所有 —— 在 showDialog 调用方释放会
-/// 撞上退场动画期间 TextField 重建(controller used after dispose)。
-class _RenameSessionDialog extends StatefulWidget {
-  final String initialTitle;
-  const _RenameSessionDialog({required this.initialTitle});
-
-  @override
-  State<_RenameSessionDialog> createState() => _RenameSessionDialogState();
-}
-
-class _RenameSessionDialogState extends State<_RenameSessionDialog> {
-  late final TextEditingController _controller = TextEditingController(
-    text: widget.initialTitle,
-  );
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('重命名会话'),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        decoration: const InputDecoration(labelText: '会话标题'),
-        onSubmitted: (value) => Navigator.pop(context, value),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, _controller.text),
-          child: const Text('确定'),
-        ),
-      ],
     );
   }
 }

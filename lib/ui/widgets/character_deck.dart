@@ -274,17 +274,18 @@ class _CharacterDeckViewState extends State<CharacterDeckView> {
             ),
           ),
           const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+          Wrap(
+            alignment: WrapAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 12,
+            runSpacing: 8,
             children: [
-              if (n > 1) ...[
+              if (n > 1)
                 IconButton.filledTonal(
                   tooltip: '上一张',
                   onPressed: () => _step(-1),
                   icon: const Icon(Icons.chevron_left_rounded),
                 ),
-                const SizedBox(width: 12),
-              ],
               FilledButton.tonal(
                 onPressed: () => widget.onOpen(records[_front]),
                 style: FilledButton.styleFrom(
@@ -304,14 +305,12 @@ class _CharacterDeckViewState extends State<CharacterDeckView> {
                   ],
                 ),
               ),
-              if (n > 1) ...[
-                const SizedBox(width: 12),
+              if (n > 1)
                 IconButton.filledTonal(
                   tooltip: '下一张',
                   onPressed: () => _step(1),
                   icon: const Icon(Icons.chevron_right_rounded),
                 ),
-              ],
             ],
           ),
         ],

@@ -18,7 +18,8 @@ enum MessageKind {
   attachment;
 
   static MessageKind fromWire(String s) =>
-      MessageKind.values.where((k) => k.name == s).firstOrNull ?? MessageKind.chat;
+      MessageKind.values.where((k) => k.name == s).firstOrNull ??
+      MessageKind.chat;
 
   String get wire => name;
 }
@@ -35,13 +36,20 @@ extension type const AttachmentRef(String value) {
   /// 压缩通知(落库,替代原「发出即消失」的合成行):
   /// `notice:compact:<发生时刻毫秒>`。每次压缩事件唯一,不参与窗口去重
   /// (一次性事件,置位标志是唯一权威)。
-  static AttachmentRef noticeCompact(int stampMs) => AttachmentRef('notice:compact:$stampMs');
+  static AttachmentRef noticeCompact(int stampMs) =>
+      AttachmentRef('notice:compact:$stampMs');
 
   /// 记忆修改差异通知:`notice:memdiff:<新版本内容哈希>`。
-  static AttachmentRef noticeMemoryDiff(int hash) => AttachmentRef('notice:memdiff:$hash');
+  static AttachmentRef noticeMemoryDiff(int hash) =>
+      AttachmentRef('notice:memdiff:$hash');
 
-  /// 是否通知类附件(压缩/记忆差异):组装期需做位置校正(可能落在所属
-  /// 用户消息之后),面板标签也单列。
+  /// Agentic 变量注入附件:`notice:varinj:<发生时刻毫秒>`。后台 agent 选中的
+  /// 变量在提交后作为下一条用户消息前的 system-reminder 注入一次。
+  static AttachmentRef noticeVariableInjection(int stampMs) =>
+      AttachmentRef('notice:varinj:$stampMs');
+
+  /// 是否通知类附件(压缩/记忆差异/变量注入):组装期需做位置校正(可能落在
+  /// 所属用户消息之后),面板标签也单列。
   static bool isNotice(String? ref) => ref != null && ref.startsWith('notice:');
 }
 
@@ -68,17 +76,14 @@ class Message {
   /// 压缩摘要指向的原始消息 id(仅摘要行使用)。
   final int? compactOf;
 
-  /// 内嵌图片(base64);大图不在列表查询中加载,由 [hasImage] 标记。
-  final String? imageBase64;
+  /// 内容寻址图片资产哈希;图片字节由文件资产库管理,不进入消息模型。
+  final String? imageHash;
 
-  /// 远程图片 URL;仅用于短暂渲染,最终仍会本地化落库。
+  /// 远程图片 URL;本地资产缺失或下载失败时可作为渲染回退。
   final String? imageUrl;
 
   /// 生成该图时使用的原始描述(用户触发的重新生成按它重绘;导入/手工图片为 null)。
   final String? imagePrompt;
-
-  /// 库里有图但字节未随列表加载(轻量查询)——渲染层按 id 惰性读取。
-  final bool hasImage;
 
   /// 行种类:真实对话([MessageKind.chat])或附件合成行([MessageKind.attachment])。
   final MessageKind kind;
@@ -95,10 +100,9 @@ class Message {
     required this.seq,
     this.isCompacted = false,
     this.compactOf,
-    this.imageBase64,
+    this.imageHash,
     this.imageUrl,
     this.imagePrompt,
-    this.hasImage = false,
     this.kind = MessageKind.chat,
     this.refId,
   });
@@ -107,10 +111,12 @@ class Message {
   /// 摘要转录、后台 agent 转录统一用这个口径过滤。
   bool get isChat => kind == MessageKind.chat;
 
-  /// 是否有关联图片可展示/可重生成:本地字节、惰性标记或远程 URL 任一即可。
+  /// 是否引用本地图片资产。
+  bool get hasImage => imageHash != null && imageHash!.isNotEmpty;
+
+  /// 是否有关联图片可展示/可重生成:本地资产或远程 URL 任一即可。
   bool get hasVisualImage =>
-      hasImage || (imageBase64 != null && imageBase64!.isNotEmpty) ||
-      (imageUrl != null && imageUrl!.isNotEmpty);
+      hasImage || (imageUrl != null && imageUrl!.isNotEmpty);
 
   Message copyWith({
     int? id,
@@ -120,7 +126,7 @@ class Message {
     int? seq,
     bool? isCompacted,
     int? compactOf,
-    String? imageBase64,
+    String? imageHash,
     String? imageUrl,
     String? imagePrompt,
   }) => Message(
@@ -131,10 +137,9 @@ class Message {
     seq: seq ?? this.seq,
     isCompacted: isCompacted ?? this.isCompacted,
     compactOf: compactOf ?? this.compactOf,
-    imageBase64: imageBase64 ?? this.imageBase64,
+    imageHash: imageHash ?? this.imageHash,
     imageUrl: imageUrl ?? this.imageUrl,
     imagePrompt: imagePrompt ?? this.imagePrompt,
-    hasImage: hasImage || imageBase64 != null,
     kind: kind,
     refId: refId,
   );
@@ -147,7 +152,7 @@ class Message {
     'seq': seq,
     'is_compacted': isCompacted ? 1 : 0,
     'compact_of': compactOf,
-    if (imageBase64 != null) 'image_base64': imageBase64,
+    if (imageHash != null) 'image_hash': imageHash,
     if (imageUrl != null) 'image_url': imageUrl,
     if (imagePrompt != null) 'image_prompt': imagePrompt,
     'kind': kind.wire,
@@ -162,13 +167,9 @@ class Message {
     seq: m['seq'] as int,
     isCompacted: (m['is_compacted'] as int? ?? 0) != 0,
     compactOf: m['compact_of'] as int?,
-    imageBase64: m['image_base64'] as String?,
+    imageHash: m['image_hash'] as String?,
     imageUrl: m['image_url'] as String?,
     imagePrompt: m['image_prompt'] as String?,
-    // 与 SQL 口径一致:image_base64 非空**串**才算有图(空串可能是历史
-    // 写入/导入残留),否则空串行走一次取图(取回空)的空调用。
-    hasImage: (m['image_base64'] != null && (m['image_base64'] as String).isNotEmpty) ||
-        (m['has_image'] as int? ?? 0) != 0,
     kind: MessageKind.fromWire(m['kind'] as String? ?? 'chat'),
     refId: m['ref_id'] as String?,
   );

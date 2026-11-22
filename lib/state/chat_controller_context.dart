@@ -33,7 +33,8 @@ abstract class ChatControllerContext extends ChatControllerBase {
   /// 软挡自动压缩)共用同一把组装尺子,保证估算与真实请求一致。
   /// 会话未加载(sessionId/character 缺失)时返回 null。
   ///
-  /// 变量不参与主写组装(只进后台 agent 上下文);技能不进组装,只有 @技能名
+  /// 变量默认不参与主写组装(只进后台 agent 上下文);Agentic 注入的选中键
+  /// 以附件行形式随历史进入。技能不进组装,只有 @技能名
   /// 主动触发的附件行(已落库在 history 里);记忆经 [_frozenMemory] 冻结副本
   /// 以"第 0 条消息"进数组。通知(压缩/记忆差异)同样落库为附件行随历史进数组。
   /// 历史对话行里的 @技能名 记号在此剥离:转录保留原话,只在 LLM 边界出口剥,
@@ -47,7 +48,9 @@ abstract class ChatControllerContext extends ChatControllerBase {
     final sessionId = state.sessionId;
     final characterId = state.characterId;
     final character = state.character;
-    if (sessionId == null || characterId == null || character == null) return null;
+    if (sessionId == null || characterId == null || character == null) {
+      return null;
+    }
     return ContextAssembler().assemble(
       character: character,
       items: await _assemblyPromptItems(),
@@ -98,12 +101,13 @@ abstract class ChatControllerContext extends ChatControllerBase {
   /// 压缩/折叠后刷新记忆冻结副本(压缩点本就是缓存断点,顺带把"第 0 条"记忆
   /// 换成库中最新版;diff 通知基准同步重置)。
   Future<void> _refreshFrozenMemory(int sessionId) async {
+    final epoch = _sessionEpoch;
     final rows = await ref.read(memoryRepositoryProvider).bySession(sessionId);
+    // 切会话后晚到的记忆读取绝不能改写当前会话的第 0 条(会跨会话泄漏)。
+    if (!_ownsMain(sessionId, epoch)) return;
     _frozenMemory = rows.isEmpty ? null : rows.first.content;
     _memoryDiffNotifiedHash = null;
-    if (ref.mounted) {
-      state = state.copyWith(frozenMemory: _frozenMemory);
-    }
+    state = state.copyWith(frozenMemory: _frozenMemory);
   }
 
   /// 记忆修改差异通知(冻结语义的另一半):库中记忆与 [_frozenMemory] 不同、
@@ -115,7 +119,9 @@ abstract class ChatControllerContext extends ChatControllerBase {
   /// ([_persistPendingNotices])在**落库成功后**置位,DB 写入失败时不吞通知;
   /// 库内容再次变化则下次输入再通知。
   Future<({int hash, String content})?> _memoryDiffNotice(int sessionId) async {
+    final epoch = _sessionEpoch;
     final rows = await ref.read(memoryRepositoryProvider).bySession(sessionId);
+    if (!_ownsMain(sessionId, epoch)) return null;
     final latest = rows.isEmpty ? '' : rows.first.content;
     final frozen = _frozenMemory ?? '';
     if (latest == frozen) return null;
@@ -200,6 +206,27 @@ abstract class ChatControllerContext extends ChatControllerBase {
     }
   }
 
+  /// 消费后台 Agentic 选中的变量快照,落库为附件行(位于用户消息之前)。
+  ///
+  /// 快照在后台提交时已按最终变量板解析(权限/删除/严格提案都已生效),
+  /// 这里只负责渲染与落库;写入成功后才清空,DB 失败时留待下次输入重试。
+  Future<void> _persistPendingVariableInjection(int sessionId) async {
+    final injected = _pendingVariableInjection;
+    if (injected == null || injected.isEmpty) return;
+    await ref
+        .read(messageRepositoryProvider)
+        .append(
+          sessionId: sessionId,
+          role: 'user',
+          content: ContextAssembler.variableInjectionNotice(injected),
+          kind: MessageKind.attachment,
+          refId: AttachmentRef.noticeVariableInjection(
+            DateTime.now().millisecondsSinceEpoch,
+          ).value,
+        );
+    _pendingVariableInjection = null;
+  }
+
   /// 用户主动把库中最新记忆应用到上下文(状态面板「应用到上下文」按钮):
   /// 刷新冻结副本并重算上下文快照。下一次请求的第 0 条消息即换为新记忆 ——
   /// 与压缩后刷新同语义,是会话中途更换冻结副本的两个合法时机之一。
@@ -221,9 +248,13 @@ abstract class ChatControllerContext extends ChatControllerBase {
   Future<void> _reassembleContext() async {
     final sessionId = state.sessionId;
     if (sessionId == null) return;
-    final history = await ref.read(messageRepositoryProvider).activeWindow(sessionId);
+    final epoch = _sessionEpoch;
+    final history = await ref
+        .read(messageRepositoryProvider)
+        .activeWindow(sessionId);
+    if (!_ownsMain(sessionId, epoch)) return;
     final snapshot = await _assembleSnapshot(history);
-    if (snapshot == null || !ref.mounted) return;
+    if (snapshot == null || !_ownsMain(sessionId, epoch)) return;
     state = state.copyWith(
       lastContext: snapshot,
       prevStableSystemHash: state.lastContext?.stableSystemHash,
@@ -252,10 +283,16 @@ abstract class ChatControllerContext extends ChatControllerBase {
   ///
   /// 发送前与 `refreshContext` 各调一次,成本是一次几十行的库读。
   Future<void> _syncWorldbook() async {
+    final sessionId = state.sessionId;
     final characterId = state.characterId;
-    if (characterId == null) return;
-    final entries = await ref.read(worldbookRepositoryProvider).byCharacter(characterId);
-    if (!ref.mounted) return;
+    if (sessionId == null || characterId == null) return;
+    final epoch = _sessionEpoch;
+    final entries = await ref
+        .read(worldbookRepositoryProvider)
+        .byCharacter(characterId);
+    if (!_ownsMain(sessionId, epoch) || state.characterId != characterId) {
+      return;
+    }
     state = state.copyWith(worldbook: entries);
   }
 }

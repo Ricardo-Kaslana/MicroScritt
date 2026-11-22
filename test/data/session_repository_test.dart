@@ -8,20 +8,27 @@ import 'package:microscritt/data/session_repository.dart';
 import 'package:microscritt/data/variable_repository.dart';
 import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/models/message.dart';
+import '../support/image_fixture.dart';
 import '../support/test_database.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   late AppDatabase db;
   late SessionRepository sessions;
   late CharacterRepository characters;
   late MessageRepository messages;
+  late String imageHash;
 
   setUp(() async {
     db = await openTestDb();
     sessions = SessionRepository(db);
     characters = CharacterRepository(db);
     messages = MessageRepository(db);
+    imageHash = await putTestImage(db);
   });
+
+  tearDown(() => db.db.close());
 
   test('create/get/byCharacter roundtrip exposes createdAt', () async {
     final charId = await characters.insert(const CharacterCard(name: 'A'));
@@ -73,10 +80,7 @@ void main() {
     expect(pinned.pinnedAt, isNotNull);
 
     await sessions.setPinned(id, false);
-    expect(
-      (await sessions.infosByCharacter(charId)).single.pinnedAt,
-      isNull,
-    );
+    expect((await sessions.infosByCharacter(charId)).single.pinnedAt, isNull);
   });
 
   test(
@@ -85,8 +89,19 @@ void main() {
       final charId = await characters.insert(const CharacterCard(name: 'A'));
       final keepId = await sessions.create(charId, 'keep');
       final dropId = await sessions.create(charId, 'drop');
-      await messages.append(sessionId: dropId, role: 'user', content: 'hi');
-      await messages.append(sessionId: keepId, role: 'user', content: 'stay');
+      await messages.append(
+        sessionId: dropId,
+        role: 'user',
+        content: 'hi',
+        imageHash: imageHash,
+      );
+      await messages.append(
+        sessionId: keepId,
+        role: 'user',
+        content: 'stay',
+        imageHash: imageHash,
+      );
+      expect(await imageRefCount(db, imageHash), 2);
       await VariableRepository(db).upsert(dropId, 'hp', '10');
       await VariableRepository(db).upsert(keepId, 'hp', '5');
       await MemoryRepository(db).set(dropId, 'drop memory');
@@ -98,6 +113,7 @@ void main() {
       expect(await sessions.get(keepId), isNotNull);
       expect(await messages.bySession(dropId), isEmpty);
       expect(await messages.bySession(keepId), hasLength(1));
+      expect(await imageRefCount(db, imageHash), 1);
       expect(await VariableRepository(db).bySession(dropId), isEmpty);
       expect(await VariableRepository(db).bySession(keepId), {'hp': '5'});
       expect(await MemoryRepository(db).bySession(dropId), isEmpty);
@@ -175,13 +191,32 @@ void main() {
         sessionId: s1,
         role: 'assistant',
         content: '',
-        imageBase64: 'aGk=',
+        imageHash: imageHash,
       );
 
       final i1 = (await sessions.infosByCharacter(charId)).single;
       expect(i1.messageCount, 2);
       expect(i1.imageCount, 1);
       expect(i1.lastMessage, '图片消息');
+    },
+  );
+
+  test(
+    'infosByCharacter counts URL-only images without a local asset',
+    () async {
+      final charId = await characters.insert(const CharacterCard(name: 'A'));
+      final s1 = await sessions.create(charId, 's1');
+      await messages.append(
+        sessionId: s1,
+        role: 'assistant',
+        content: '',
+        imageUrl: 'https://img.example/remote.png',
+      );
+
+      final info = (await sessions.infosByCharacter(charId)).single;
+      expect(info.imageCount, 1);
+      expect(info.lastMessage, '图片消息');
+      expect(await imageRefCount(db, imageHash), 0);
     },
   );
 
@@ -195,22 +230,22 @@ void main() {
         sessionId: s1,
         role: 'assistant',
         content: '',
-        imageBase64: 'aGk=',
+        imageHash: imageHash,
       );
       // 图文混排(正文与图同条):按「带图」计入图片侧,与总数构成干净划分。
       await messages.append(
         sessionId: s1,
         role: 'user',
         content: '看这张',
-        imageBase64: 'aGk=',
+        imageHash: imageHash,
       );
       await messages.append(sessionId: s1, role: 'assistant', content: '纯文本回复');
-      // 空串 image_base64 不算带图,与气泡渲染的判空口径一致。
+      // 空串哈希按无本地资产处理,不算带图。
       await messages.append(
         sessionId: s1,
         role: 'assistant',
         content: '伪图消息',
-        imageBase64: '',
+        imageHash: '',
       );
       // 附件行不参与任何计数。
       await messages.append(

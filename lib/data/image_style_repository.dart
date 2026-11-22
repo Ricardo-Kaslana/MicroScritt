@@ -1,6 +1,8 @@
 /// 用户自定义生图风格(`image_styles` 表)的持久化。
 library;
 
+import 'package:sqflite/sqflite.dart';
+
 import '../models/image_style_preset.dart';
 import 'database.dart';
 
@@ -23,5 +25,20 @@ class ImageStyleRepository {
 
   Future<void> delete(int id) async {
     await db.db.delete('image_styles', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 在调用方事务内整体替换自定义风格;空列表即清空。
+  ///
+  /// 风格没有排序位,按传入顺序插入(id 由库自增)。
+  Future<void> replaceAllInTransaction(
+    DatabaseExecutor executor,
+    List<ImageStylePreset> styles,
+  ) async {
+    await executor.delete('image_styles');
+    for (final style in styles) {
+      final data = style.toMap();
+      data.remove('id');
+      await executor.insert('image_styles', data);
+    }
   }
 }

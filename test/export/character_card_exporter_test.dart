@@ -13,21 +13,27 @@ void main() {
     expect(json.contains('"name":"Alice"'), isTrue);
   });
 
-  test('re-injects the column avatar when the stored json has none (V1 flat)', () {
-    // data_json 落库已剥掉内嵌头像(toStorageJson);导出必须把列里的头像补回,
-    // 否则换端/重导入就丢图。
+  test('re-injects an explicitly supplied avatar for a flat stored card', () {
     const avatar = 'aGVsbG8=';
-    final card = CharacterCard.fromJson({'name': 'Alice', 'description': 'knight'}).withAvatar(avatar);
-    final json = jsonDecode(CharacterCardExporter.export(card)) as Map<String, dynamic>;
+    final hash = 'a' * 64;
+    final card = CharacterCard.fromJson({'name': 'Alice', 'description': 'knight'}).withAvatar(hash);
+    final json = jsonDecode(
+      CharacterCardExporter.export(card, avatarBase64: avatar),
+    ) as Map<String, dynamic>;
+    expect(card.avatarHash, hash);
     expect(json['avatar'], avatar);
     expect(json['name'], 'Alice');
+    // 未经导出边界显式给字节时,hash 不会伪装成 base64 写回。
+    expect(jsonDecode(CharacterCardExporter.export(card))['avatar'], isNull);
   });
 
   test('re-injects the avatar into the data envelope for V2 cards', () {
     const avatar = 'aGVsbG8=';
     final card = CharacterCard.fromJson({'spec': 'chara_card_v2', 'spec_version': '2.0', 'data': {'name': 'Alice'}})
-        .withAvatar(avatar);
-    final json = jsonDecode(CharacterCardExporter.export(card)) as Map<String, dynamic>;
+        .withAvatar('b' * 64);
+    final json = jsonDecode(
+      CharacterCardExporter.export(card, avatarBase64: avatar),
+    ) as Map<String, dynamic>;
     expect((json['data'] as Map<String, dynamic>)['avatar'], avatar);
   });
 

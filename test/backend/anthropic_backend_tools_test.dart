@@ -9,6 +9,7 @@ import 'package:microscritt/models/chat_message.dart';
 import 'package:microscritt/models/llm_tool.dart';
 import 'package:microscritt/backend/backend_factory.dart';
 import 'package:microscritt/backend/llm_backend.dart';
+import 'package:microscritt/backend/upstream_error.dart';
 
 void main() {
   const config = BackendConfig(
@@ -164,5 +165,63 @@ void main() {
     expect(sent.containsKey('tools'), isFalse);
     final msgs = sent['messages'] as List;
     expect(msgs.single, {'role': 'user', 'content': 'hi'});
+  });
+
+  test('start-block input is used when no input_json_delta arrives', () async {
+    // 部分网关把完整参数直接放在 content_block_start.input 里,不再发增量:
+    // 不读 start 块会得到空参数。
+    final body = [
+      line({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'tool_use', 'id': 't1', 'name': 'finish', 'input': {'result': 'ok'}}}),
+      line({'type': 'content_block_stop', 'index': 0}),
+      line({'type': 'message_stop'}),
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    final call = events.whereType<ToolCallsEvent>().single.calls.single;
+    expect(call.arguments, '{"result":"ok"}');
+  });
+
+  test('thinking/redacted_thinking replay blocks keep content-block order', () async {
+    // 块按 index 排序回放,不按 start/stop 到达顺序:交错发送时旧实现会把
+    // redacted 块插到 thinking 前面,下一轮回放 400。
+    final body = [
+      line({'type': 'content_block_start', 'index': 2, 'content_block': {'type': 'thinking', 'thinking': '', 'signature': ''}}),
+      line({'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'thinking_delta', 'thinking': 'later'}}),
+      line({'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'signature_delta', 'signature': 's2'}}),
+      line({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'redacted_thinking', 'data': 'opaque'}}),
+      line({'type': 'content_block_start', 'index': 1, 'content_block': {'type': 'tool_use', 'id': 't1', 'name': 'finish', 'input': {}}}),
+      line({'type': 'content_block_stop', 'index': 0}),
+      line({'type': 'content_block_stop', 'index': 2}),
+      line({'type': 'message_stop'}),
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    final blocks = events.whereType<ToolCallsEvent>().single.replayBlocks;
+    expect(blocks.map((b) => b['type']).toList(), ['redacted_thinking', 'thinking']);
+    expect(blocks.last['thinking'], 'later');
+  });
+
+  test('missing id is synthesized and empty-name tool_use never reaches replay', () async {
+    final body = [
+      line({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'tool_use', 'name': 'finish', 'input': {}}}),
+      line({'type': 'content_block_start', 'index': 1, 'content_block': {'type': 'tool_use', 'id': 't2', 'input': {}}}),
+      line({'type': 'message_stop'}),
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+
+    final calls = events.whereType<ToolCallsEvent>().single.calls;
+    expect(calls.single.id, 'call_0');
+    expect(calls.single.name, 'finish');
+    // 空 name 的调用被丢弃:既不执行也不进入回放。
+    expect(calls, hasLength(1));
+  });
+
+  test('all-empty-name tool calls surface a contractViolation error', () async {
+    final body = [
+      line({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'tool_use', 'id': 't1', 'input': {}}}),
+      line({'type': 'message_stop'}),
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    expect(events.whereType<ToolCallsEvent>(), isEmpty);
+    final errors = events.whereType<ErrorEvent>().toList();
+    expect(errors.single.kind, UpstreamErrorKind.contractViolation);
   });
 }

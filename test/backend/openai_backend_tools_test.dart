@@ -155,4 +155,72 @@ void main() {
     expect(sent.containsKey('tools'), isFalse);
     expect(sent.containsKey('tool_choice'), isFalse);
   });
+
+  test('missing index is keyed by id instead of merging into slot 0', () async {
+    // 网关省略 index 时,旧实现把每个调用都并进 index 0:多个调用被合并,
+    // assistant 回放与 tool_result 数量对不上。
+    final body = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"readVariables","arguments":"{}"}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"id":"c2","function":{"name":"finish","arguments":"{}"}}]}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+      'data: [DONE]',
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    final calls = events.whereType<ToolCallsEvent>().single.calls;
+    expect(calls.map((c) => c.id).toList(), ['c1', 'c2']);
+    expect(calls.map((c) => c.name).toList(), ['readVariables', 'finish']);
+  });
+
+  test('a new non-empty id creates a new slot even when index repeats', () async {
+    final body = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"a","arguments":"{}"}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"b","arguments":"{}"}}]}}]}',
+      'data: [DONE]',
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    final calls = events.whereType<ToolCallsEvent>().single.calls;
+    expect(calls.map((c) => c.id).toList(), ['c1', 'c2']);
+  });
+
+  test('a repeated full tool_call block overwrites instead of appending', () async {
+    // 重连/重放时网关会整块重发同一调用:追加会把 JSON 拼坏。
+    final body = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"finish","arguments":"{\\"a\\":1}"}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"finish","arguments":"{\\"a\\":1}"}}]}}]}',
+      'data: [DONE]',
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    expect(events.whereType<ToolCallsEvent>().single.calls.single.arguments, '{"a":1}');
+  });
+
+  test('a complete-looking continuation fragment is still appended', () async {
+    // 半截累计后的 `{}` 是合法续块,不能因为"单看是完整 JSON"就覆盖掉前缀。
+    final body = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"finish","arguments":"{\\"a\\":"}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"finish","arguments":"{}"}}]}}]}',
+      'data: [DONE]',
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    expect(events.whereType<ToolCallsEvent>().single.calls.single.arguments, '{"a":{}');
+  });
+
+  test('missing id is synthesized as call_<index> for replay consistency', () async {
+    final body = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"finish","arguments":"{}"}}]}}]}',
+      'data: [DONE]',
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    expect(events.whereType<ToolCallsEvent>().single.calls.single.id, 'call_0');
+  });
+
+  test('tool calls with empty name never reach ToolCallsEvent', () async {
+    final body = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"arguments":"{}"}}]}}]}',
+      'data: [DONE]',
+    ].join('\n\n');
+    final events = await createBackend(config, client: sse(body)).generate(req()).toList();
+    expect(events.whereType<ToolCallsEvent>(), isEmpty);
+    final errors = events.whereType<ErrorEvent>().toList();
+    expect(errors.single.kind, UpstreamErrorKind.contractViolation);
+  });
 }

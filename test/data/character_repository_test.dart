@@ -1,12 +1,10 @@
-// 角色卡仓储:CursorWindow 上限下的大卡读写、列表投影与级联删除。
+// 角色卡仓储:hash 图片引用、CursorWindow 大卡读写、列表投影与级联删除。
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/character_repository.dart';
 import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/memory_repository.dart';
-import 'package:microscritt/data/message_repository.dart';
-import 'package:microscritt/data/session_repository.dart';
 import 'package:microscritt/data/skill_repository.dart';
 import 'package:microscritt/data/variable_repository.dart';
 import 'package:microscritt/data/worldbook_repository.dart';
@@ -14,16 +12,17 @@ import 'package:microscritt/models/character_card.dart';
 import 'package:microscritt/export/character_card_exporter.dart';
 import 'package:microscritt/models/skill.dart';
 import 'package:microscritt/models/worldbook_entry.dart';
+import '../support/image_fixtures.dart';
 import '../support/test_database.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late AppDatabase db;
 
   setUp(() async {
     db = await openTestDb();
   });
 
-  // inMemoryDatabasePath 是共享缓存内存库:不关连接,行会跨测试泄漏。
   tearDown(() => db.db.close());
 
   test('roundtrips character card through JSON blob', () async {
@@ -32,83 +31,98 @@ void main() {
     final loaded = await repo.get(id);
     expect(loaded?.name, 'Alice');
     expect(loaded?.description, 'knight');
+    expect(loaded?.avatarHash, isNull);
+    expect(loaded?.importedAvatarBase64, isNull);
     expect((await repo.all()).length, 1);
   });
 
-  test('updateWithWorldbook replaces card and worldbook with stable entry ids', () async {
-    final repo = CharacterRepository(db);
-    final worldbook = WorldbookRepository(db);
-    final id = await repo.insertWithWorldbook(
-      const CharacterCard(name: 'Old', description: 'old'),
-      const [
-        WorldbookEntry(
-          characterId: 0,
-          name: 'Keep',
-          keys: ['k'],
-          content: 'old',
-          position: 0,
-          extra: {'probability': 100},
-        ),
-        WorldbookEntry(
-          characterId: 0,
-          name: 'Drop',
-          keys: ['d'],
-          content: 'gone',
-          position: 1,
-        ),
-      ],
-    );
-    final before = await worldbook.byCharacter(id);
-    final keep = before[0];
-    final drop = before[1];
+  testWidgets('updateWithWorldbook keeps entry ids and swaps avatar references', (tester) async {
+    await tester.runAsync(() async {
+      final oldAvatar = await putTestImageHash(db, width: 8, height: 9);
+      final newAvatar = await putTestImageHash(db, width: 9, height: 8);
+      final repo = CharacterRepository(db);
+      final worldbook = WorldbookRepository(db);
+      final id = await repo.insertWithWorldbook(
+        CharacterCard(name: 'Old', description: 'old', avatarHash: oldAvatar),
+        const [
+          WorldbookEntry(
+            characterId: 0,
+            name: 'Keep',
+            keys: ['k'],
+            content: 'old',
+            position: 0,
+            extra: {'probability': 100},
+          ),
+          WorldbookEntry(
+            characterId: 0,
+            name: 'Drop',
+            keys: ['d'],
+            content: 'gone',
+            position: 1,
+          ),
+        ],
+      );
+      expect(await testImageRefCount(db, oldAvatar), 1);
+      final before = await worldbook.byCharacter(id);
+      final keep = before[0];
+      final drop = before[1];
 
-    await repo.updateWithWorldbook(
-      id,
-      const CharacterCard(name: 'New', description: 'new', avatarBase64: 'AV'),
-      [
-        keep.copyWith(content: 'updated'),
-        WorldbookEntry(
-          characterId: id,
-          name: 'Added',
-          keys: ['a'],
-          content: 'new entry',
-          position: 2,
-        ),
-      ],
-    );
+      await repo.updateWithWorldbook(
+        id,
+        CharacterCard(name: 'New', description: 'new', avatarHash: newAvatar),
+        [
+          keep.copyWith(content: 'updated'),
+          WorldbookEntry(
+            characterId: id,
+            name: 'Added',
+            keys: ['a'],
+            content: 'new entry',
+            position: 2,
+          ),
+        ],
+      );
 
-    final card = await repo.get(id);
-    expect(card?.name, 'New');
-    expect(card?.description, 'new');
-    expect(card?.avatarBase64, 'AV');
+      final card = await repo.get(id);
+      expect(card?.name, 'New');
+      expect(card?.description, 'new');
+      expect(card?.avatarHash, newAvatar);
+      expect(await testImageRefCount(db, oldAvatar), 0);
+      expect(await testImageRefCount(db, newAvatar), 1);
 
-    final after = await worldbook.byCharacter(id);
-    expect(after.map((e) => e.name), ['Keep', 'Added']);
-    expect(after.first.id, keep.id, reason: '既有条目 id 必须保持稳定');
-    expect(after.first.content, 'updated');
-    expect(after.first.extra, {'probability': 100});
-    expect(after.any((e) => e.id == drop.id), isFalse);
+      // 同 hash 更新先 acquire 后 release,净计数不变。
+      await repo.update(id, card!);
+      expect(await testImageRefCount(db, newAvatar), 1);
+      final after = await worldbook.byCharacter(id);
+      expect(after.map((e) => e.name), ['Keep', 'Added']);
+      expect(after.first.id, keep.id);
+      expect(after.first.content, 'updated');
+      expect(after.first.extra, {'probability': 100});
+      expect(after.any((e) => e.id == drop.id), isFalse);
+    });
   });
 
-  test('roundtrips character background through the column', () async {
-    final repo = CharacterRepository(db);
-    final id = await repo.insert(const CharacterCard(name: 'Alice', backgroundBase64: 'aGVsbG8=bg'));
-    // 背景存在 data_json 之外的独立列,get 读回。
-    expect((await repo.get(id))?.backgroundBase64, 'aGVsbG8=bg');
-    // update 覆盖写背景。
-    await repo.update(id, const CharacterCard(name: 'Alice', backgroundBase64: 'Ym9i'));
-    expect((await repo.get(id))?.backgroundBase64, 'Ym9i');
-    // 未设置背景时为 null。
-    final noBg = await repo.insert(const CharacterCard(name: 'Bob'));
-    expect((await repo.get(noBg))?.backgroundBase64, isNull);
+  testWidgets('background roundtrip uses hashes and releases replaced image', (tester) async {
+    await tester.runAsync(() async {
+      final first = await putTestImageHash(db, width: 10, height: 6);
+      final second = await putTestImageHash(db, width: 11, height: 6);
+      final repo = CharacterRepository(db);
+      final id = await repo.insert(CharacterCard(name: 'Alice', backgroundHash: first));
+      expect((await repo.get(id))?.backgroundHash, first);
+      expect(await repo.backgroundHashFor(id), first);
+      expect((await repo.all()).single.card.backgroundHash, first);
+
+      await repo.update(id, CharacterCard(name: 'Alice', backgroundHash: second));
+      expect((await repo.get(id))?.backgroundHash, second);
+      expect(await testImageRefCount(db, first), 0);
+      expect(await testImageRefCount(db, second), 1);
+      final noBg = await repo.insert(const CharacterCard(name: 'Bob'));
+      expect((await repo.get(noBg))?.backgroundHash, isNull);
+    });
   });
 
-  test('huge embedded avatar is stripped from data_json at rest (CursorWindow)', () async {
+  test('huge imported avatar is stripped from data_json and not hydrated', () async {
     final repo = CharacterRepository(db);
-    // 20MB 卡 ≈ 14MB 内嵌头像:远超 Android SQLite 2MB CursorWindow。data_json
-    // 若整存这串 base64,任何投影它的查询都 "Row too big",列表永远转圈 ——
-    // 这正是"小卡正常、大卡无法加载"的根因。头像必须只落列、不进 data_json。
-    final bigAvatar = 'A' * 2500000; // ≈2.5MB 的 base64 串
+    final bigAvatar = 'A' * 2500000;
     final card = CharacterCard.fromJson({
       'spec': 'chara_card_v2',
       'spec_version': '2.0',
@@ -116,33 +130,33 @@ void main() {
     });
     final id = await repo.insert(card);
 
-    // data_json 整行必须保持小:迁移/列表/详情在任何平台上都读得动。
-    final stored = (await db.db.rawQuery('SELECT length(data_json) AS l FROM characters WHERE id = ?', [id])).first;
-    expect(stored['l'] as int, lessThan(2000000));
-
-    // 头像从列读回,名字/描述不丢。
+    final row = (await db.db.rawQuery(
+      'SELECT length(data_json) AS l, avatar_hash FROM characters WHERE id = ?',
+      [id],
+    )).first;
+    expect(row['l'] as int, lessThan(2000000));
+    expect(row['avatar_hash'], isNull);
     final loaded = await repo.get(id);
     expect(loaded?.name, 'Big');
     expect(loaded?.description, 'huge');
-    expect(loaded?.avatarBase64, bigAvatar);
+    expect(loaded?.avatarHash, isNull);
+    expect(loaded?.importedAvatarBase64, isNull);
+    expect(jsonEncode(loaded?.raw), isNot(contains(bigAvatar)));
 
-    // 列表不崩(回归 all() 的 SQL 兜底路径)。
     final list = await repo.all();
     expect(list.single.card.name, 'Big');
-    expect(list.single.hasAvatar, isTrue);
-
-    // update 同样不把内嵌头像写回 data_json。
+    expect(list.single.hasAvatar, isFalse);
     await repo.update(id, card);
-    final afterUpdate = (await db.db.rawQuery('SELECT length(data_json) AS l FROM characters WHERE id = ?', [id])).first;
+    final afterUpdate = (await db.db.rawQuery(
+      'SELECT length(data_json) AS l FROM characters WHERE id = ?',
+      [id],
+    )).first;
     expect(afterUpdate['l'] as int, lessThan(2000000));
   });
 
   test('get chunks an oversized data_json instead of giving up', () async {
-    // 20MB 级内容卡的 data_json 单行远超 Android CursorWindow(~2MB)。旧实现
-    // 整列 SELECT 直接抛 Row too big → get 返回 null → 导出按钮点了没反应。
-    // 现在先查长度再 substr 分块拼接,大卡也能完整读回(含 CJK 多字节内容)。
     final repo = CharacterRepository(db);
-    final longDescription = '大' * 400000; // ≈1.2MB UTF-8,字符阈值之上
+    final longDescription = '大' * 400000;
     final id = await repo.insert(
       CharacterCard(name: 'Monster', description: longDescription),
     );
@@ -152,28 +166,24 @@ void main() {
     expect(loaded.description, longDescription);
   });
 
-  test('get chunks oversized avatar/background columns', () async {
-    final repo = CharacterRepository(db);
-    final bigAvatar = 'A' * 1500000;
-    final bigBackground = 'B' * 1200000;
-    final id = await repo.insert(
-      CharacterCard(
-        name: 'Huge',
-        avatarBase64: bigAvatar,
-        backgroundBase64: bigBackground,
-      ),
-    );
-
-    expect(await repo.avatarBase64For(id), bigAvatar);
-    expect(await repo.backgroundBase64For(id), bigBackground);
-    final loaded = await repo.get(id);
-    expect(loaded?.avatarBase64, bigAvatar);
-    expect(loaded?.backgroundBase64, bigBackground);
+  testWidgets('avatar hash getters read only references, never image bytes', (tester) async {
+    await tester.runAsync(() async {
+      final avatar = await putTestImageHash(db);
+      final background = await putTestImageHash(db, width: 12, height: 7);
+      final repo = CharacterRepository(db);
+      final id = await repo.insert(
+        CharacterCard(name: 'Huge', avatarHash: avatar, backgroundHash: background),
+      );
+      expect(await repo.avatarHashFor(id), avatar);
+      expect(await repo.backgroundHashFor(id), background);
+      final loaded = await repo.get(id);
+      expect(loaded?.avatarHash, avatar);
+      expect(loaded?.backgroundHash, background);
+      expect(loaded?.importedAvatarBase64, isNull);
+    });
   });
 
   test('export path reads an oversized card + worldbook back in full', () async {
-    // 移动端 20MB 卡的典型导出链路:get + byCharacter 都走分块读取,
-    // 拼出的 JSON 必须保留完整描述与世界书内容(旧实现两步都会 Row too big)。
     final repo = CharacterRepository(db);
     final longDescription = '描' * 400000;
     final longLore = '设' * 300000;
@@ -185,11 +195,9 @@ void main() {
     final card = await repo.get(id);
     final worldbook = await WorldbookRepository(db).byCharacter(id);
     expect(card, isNotNull);
-    final exported =
-        jsonDecode(
-              CharacterCardExporter.export(card!, worldbook: worldbook),
-            )
-            as Map<String, dynamic>;
+    final exported = jsonDecode(
+      CharacterCardExporter.export(card!, worldbook: worldbook),
+    ) as Map<String, dynamic>;
     expect(exported['description'], longDescription);
     final book = exported['character_book'] as Map<String, dynamic>;
     final entries = book['entries'] as List<dynamic>;
@@ -197,7 +205,6 @@ void main() {
   });
 
   test('get returns null for an unparseable oversized data_json', () async {
-    // 损坏内容不把格式化异常甩给 UI:分块读得回来,但 JSON 解析失败 → null。
     final id = await db.db.insert('characters', {
       'name': 'Monster',
       'data_json': 'X' * 2500000,
@@ -207,8 +214,6 @@ void main() {
 
   test('all hydrates oversized rows so the list keeps the description', () async {
     final repo = CharacterRepository(db);
-    // 巨型世界书/设定把 data_json 推过列表投影阈值(1MB 字节),但行本身
-    // 可读 —— 列表应像编辑页一样拿到描述,而不是只剩名字。
     final id = await repo.insert(
       CharacterCard(
         name: 'Gal',
@@ -216,20 +221,15 @@ void main() {
         personality: 'p' * 1600000,
       ),
     );
-    final size =
-        (await db.db.rawQuery(
-                  'SELECT length(data_json) AS l FROM characters WHERE id = ?',
-                  [id],
-                )).first['l']
-            as int;
+    final size = (await db.db.rawQuery(
+      'SELECT length(data_json) AS l FROM characters WHERE id = ?',
+      [id],
+    )).first['l'] as int;
     expect(size, greaterThan(1500000));
 
-    // 默认(false):导入查重等只关心名字的调用方不为大卡白读整列。
     final plain = (await repo.all()).single;
     expect(plain.card.name, 'Gal');
     expect(plain.card.description, isEmpty);
-
-    // 展示路径:补读整列,与编辑页读到的一致。
     final hydrated = (await repo.all(hydrateOversized: true)).single;
     expect(hydrated.card.name, 'Gal');
     expect(hydrated.card.description, '可见描述');
@@ -238,17 +238,12 @@ void main() {
 
   test('all judges oversized rows by UTF-8 bytes, not character count', () async {
     final repo = CharacterRepository(db);
-    // 40 万汉字 ≈1.2MB 字节(超过 1MB 阈值),但字符数远小于旧阈值 150 万;
-    // 按字符判断会把这一行整列塞进 CursorWindow —— 必须按字节判超。
     final longDescription = '大' * 400000;
-    await repo.insert(
-      CharacterCard(name: 'CJK', description: longDescription),
-    );
+    await repo.insert(CharacterCard(name: 'CJK', description: longDescription));
 
     final plain = (await repo.all()).single;
     expect(plain.card.name, 'CJK');
     expect(plain.card.description, isEmpty);
-
     final hydrated = (await repo.all(hydrateOversized: true)).single;
     expect(hydrated.card.description, longDescription);
   });
@@ -258,9 +253,7 @@ void main() {
       'name': 'Broken',
       'data_json': 'X' * 1600000,
     });
-    final rec = (await CharacterRepository(
-      db,
-    ).all(hydrateOversized: true)).single;
+    final rec = (await CharacterRepository(db).all(hydrateOversized: true)).single;
     expect(rec.card.name, 'Broken');
     expect(rec.card.description, isEmpty);
   });
@@ -280,9 +273,7 @@ void main() {
   test('update replaces the stored card', () async {
     final repo = CharacterRepository(db);
     final id = await repo.insert(const CharacterCard(name: 'Alice', description: 'knight'));
-
     await repo.update(id, const CharacterCard(name: 'Alicia', description: 'queen', firstMessage: 'hello'));
-
     final loaded = await repo.get(id);
     expect(loaded?.name, 'Alicia');
     expect(loaded?.description, 'queen');
@@ -290,35 +281,73 @@ void main() {
     expect((await repo.all()).single.id, id);
   });
 
-  test('deleteWithCascade removes character and all dependent rows', () async {
+  test('unknown new asset aborts update without changing card or old ref', () async {
     final repo = CharacterRepository(db);
-    final keepId = await repo.insert(const CharacterCard(name: 'Keep'));
-    final dropId = await repo.insertWithWorldbook(const CharacterCard(name: 'Drop'), const [
-      WorldbookEntry(characterId: 0, keys: ['k'], content: 'lore'),
-    ]);
+    final id = await repo.insert(const CharacterCard(name: 'Alice'));
+    final missing = 'f' * 64;
+    await expectLater(
+      repo.update(id, CharacterCard(name: 'Changed', avatarHash: missing)),
+      throwsStateError,
+    );
+    expect((await repo.get(id))?.name, 'Alice');
+    expect(
+      await db.db.query('image_assets', where: 'hash = ?', whereArgs: [missing]),
+      isEmpty,
+    );
+  });
 
-    final sessions = SessionRepository(db);
-    final messages = MessageRepository(db);
-    final dropSession = await sessions.create(dropId, 's');
-    final keepSession = await sessions.create(keepId, 's');
-    await messages.append(sessionId: dropSession, role: 'user', content: 'hi');
-    await messages.append(sessionId: keepSession, role: 'user', content: 'stay');
-    await VariableRepository(db).upsert(dropSession, 'hp', '10');
-    await MemoryRepository(db).set(dropSession, 'remembered');
-    // 技能自 v37 起是全局目录:角色/会话级联删除不再触碰技能表。
-    await SkillRepository(db).insert(const Skill(name: 'combat', content: 'c'));
+  testWidgets('deleteWithCascade removes dependencies and releases every image reference', (tester) async {
+    await tester.runAsync(() async {
+      final avatar = await putTestImageHash(db, width: 8, height: 8);
+      final background = await putTestImageHash(db, width: 9, height: 8);
+      final messageImage = await putTestImageHash(db, width: 10, height: 8);
+      final repo = CharacterRepository(db);
+      final keepId = await repo.insert(const CharacterCard(name: 'Keep'));
+      final dropId = await repo.insertWithWorldbook(
+        CharacterCard(name: 'Drop', avatarHash: avatar, backgroundHash: background),
+        const [WorldbookEntry(characterId: 0, keys: ['k'], content: 'lore')],
+      );
 
-    await repo.deleteWithCascade(dropId);
+      Future<int> addSession(int characterId) => db.db.insert('sessions', {
+            'character_id': characterId,
+            'title': 's',
+            'created_at': 1,
+          });
+      final dropSession = await addSession(dropId);
+      final keepSession = await addSession(keepId);
+      await db.transaction((txn) => db.images.acquire(txn, messageImage));
+      await db.db.insert('messages', {
+        'session_id': dropSession,
+        'role': 'assistant',
+        'content': 'image',
+        'seq': 1,
+        'image_hash': messageImage,
+      });
+      await db.db.insert('messages', {
+        'session_id': keepSession,
+        'role': 'user',
+        'content': 'stay',
+        'seq': 1,
+      });
+      await VariableRepository(db).upsert(dropSession, 'hp', '10');
+      await MemoryRepository(db).set(dropSession, 'remembered');
+      await SkillRepository(db).insert(const Skill(name: 'combat', content: 'c'));
 
-    expect(await repo.get(dropId), isNull);
-    expect(await repo.get(keepId), isNotNull);
-    expect(await sessions.byCharacter(dropId), isEmpty);
-    expect(await messages.bySession(dropSession), isEmpty);
-    expect(await messages.bySession(keepSession), hasLength(1));
-    expect(await VariableRepository(db).bySession(dropSession), isEmpty);
-    expect(await WorldbookRepository(db).byCharacter(dropId), isEmpty);
-    expect(await MemoryRepository(db).bySession(dropSession), isEmpty);
-    // 全局技能在级联删除后仍然保留。
-    expect((await SkillRepository(db).all()).single.name, 'combat');
+      await repo.deleteWithCascade(dropId);
+
+      expect(await repo.get(dropId), isNull);
+      expect(await repo.get(keepId), isNotNull);
+      expect(await db.db.query('sessions', where: 'character_id = ?', whereArgs: [dropId]), isEmpty);
+      expect(await db.db.query('messages', where: 'session_id = ?', whereArgs: [dropSession]), isEmpty);
+      expect(await db.db.query('messages', where: 'session_id = ?', whereArgs: [keepSession]), hasLength(1));
+      expect(await VariableRepository(db).bySession(dropSession), isEmpty);
+      expect(await WorldbookRepository(db).byCharacter(dropId), isEmpty);
+      expect(await MemoryRepository(db).bySession(dropSession), isEmpty);
+      expect((await SkillRepository(db).all()).single.name, 'combat');
+      for (final hash in [avatar, background, messageImage]) {
+        expect(await testImageRefCount(db, hash), 0);
+        expect(await db.images.exists(hash), isTrue, reason: '事务只释放,不物理删除');
+      }
+    });
   });
 }

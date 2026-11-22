@@ -1,50 +1,63 @@
-// 用户档案仓储:单行语义、超大头像分块读与未保存时的空档案。
+// 用户档案仓储:单行语义、hash 图片引用事务与未保存时的空档案。
 import 'package:flutter_test/flutter_test.dart';
+import 'package:microscritt/data/database.dart';
 import 'package:microscritt/data/user_repository.dart';
 import 'package:microscritt/models/user.dart';
+import '../support/image_fixtures.dart';
 import '../support/test_database.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late AppDatabase db;
+  late UserRepository repo;
+
+  setUp(() async {
+    db = await openTestDb();
+    repo = UserRepository(db);
+  });
+
+  tearDown(() => db.db.close());
+
   test('load returns empty profile when never saved', () async {
-    final db = await openTestDb();
-    final repo = UserRepository(db);
     final user = await repo.load();
     expect(user.name, '');
-    expect(user.avatarBase64, isNull);
-    await db.db.close();
+    expect(user.avatarHash, isNull);
   });
 
-  test('save round-trips name and avatar', () async {
-    final db = await openTestDb();
-    final repo = UserRepository(db);
-    await repo.save(const UserProfile(name: '小明', avatarBase64: 'aGVsbG8='));
+  testWidgets('save round-trips name/avatar and maintains references', (tester) async {
+    await tester.runAsync(() async {
+      final avatar = await putTestImageHash(db);
+      await repo.save(UserProfile(name: '小明', avatarHash: avatar));
 
-    final loaded = await repo.load();
-    expect(loaded.id, 1);
-    expect(loaded.name, '小明');
-    expect(loaded.avatarBase64, 'aGVsbG8=');
+      final loaded = await repo.load();
+      expect(loaded.id, 1);
+      expect(loaded.name, '小明');
+      expect(loaded.avatarHash, avatar);
+      expect(await repo.avatarHashFor(1), avatar);
+      expect(await testImageRefCount(db, avatar), 1);
 
-    // 单行语义:第二次 save 是整体替换,不是追加。
-    await repo.save(const UserProfile(name: '小红', avatarBase64: null));
-    final reloaded = await repo.load();
-    expect(reloaded.name, '小红');
-    expect(reloaded.avatarBase64, isNull);
-    await db.db.close();
+      await repo.save(UserProfile(name: '小明', avatarHash: avatar));
+      expect(await testImageRefCount(db, avatar), 1);
+      await repo.updateName('小红');
+      expect((await repo.load()).avatarHash, avatar);
+      expect(await testImageRefCount(db, avatar), 1);
+
+      await repo.save(const UserProfile(name: '小红', avatarHash: null));
+      final reloaded = await repo.load();
+      expect(reloaded.name, '小红');
+      expect(reloaded.avatarHash, isNull);
+      expect(await testImageRefCount(db, avatar), 0);
+    });
   });
 
-  test('load reads oversized avatar in chunks (Android CursorWindow limit)', () async {
-    final db = await openTestDb();
-    final repo = UserRepository(db);
-    // 2MB + 4321:超过 Android CursorWindow 单行 2MB 上限的量级,且跨过 512K
-    // 分块的多个边界。桌面 ffi 无此限制,这里验证 length+substr 分块拼接的
-    // 完整性与边界;移动端整列 SELECT 超限行会抛 Row too big。
-    final big = 'A' * (2 * 1024 * 1024 + 4321);
-    await repo.save(UserProfile(name: '大头像', avatarBase64: big));
-
-    expect(await repo.avatarBase64For(1), big);
-    final loaded = await repo.load();
-    expect(loaded.name, '大头像');
-    expect(loaded.avatarBase64, big);
-    await db.db.close();
+  testWidgets('replacing avatar acquires new reference before releasing old', (tester) async {
+    await tester.runAsync(() async {
+      final first = await putTestImageHash(db, width: 8, height: 8);
+      final second = await putTestImageHash(db, width: 9, height: 8);
+      await repo.save(UserProfile(name: '小明', avatarHash: first));
+      await repo.save(UserProfile(name: '小明', avatarHash: second));
+      expect(await testImageRefCount(db, first), 0);
+      expect(await testImageRefCount(db, second), 1);
+    });
   });
 }

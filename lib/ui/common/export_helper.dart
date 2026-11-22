@@ -17,6 +17,8 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'app_snack_bar.dart';
+
 /// 把导出 JSON 存到用户选择的位置。用户取消返回 false;成功/失败均有 SnackBar 反馈。
 /// 平台差异与移动端临时文件通道见 [saveBytesFile]。
 ///
@@ -29,6 +31,20 @@ Future<bool> saveJsonFile(BuildContext context, {required String fileName, requi
     bytes: utf8.encode(content),
     allowedExtensions: const ['json'],
   );
+}
+
+/// 清洗导出文件名:去掉 Windows/macOS 都不接受的路径分隔符与保留字符、
+/// 控制字符,并把结尾的空白/点收掉(Windows 静默截断或拒绝)。
+///
+/// 角色名/会话标题可直接成为文件名,桌面与移动端的所有保存/分享路径必须
+/// 复用同一函数;只清洗移动端会让桌面另存为在保留字符上直接失败。
+String sanitizeExportFileName(String name) {
+  var cleaned = name.replaceAll(
+    RegExp(r'[\\/:*?"<>|\x00-\x1F\x7F]'),
+    '_',
+  );
+  cleaned = cleaned.trim().replaceAll(RegExp(r'[. ]+$'), '');
+  return cleaned.isEmpty ? 'export' : cleaned;
 }
 
 /// 把二进制字节存到用户选择的位置(JSON 之外的原始字节:图片下载等)。
@@ -53,21 +69,22 @@ Future<bool> saveBytesFile(
     );
   }
   try {
+    final safeName = sanitizeExportFileName(fileName);
     final path = await FilePicker.saveFile(
       dialogTitle: '导出到文件',
-      fileName: fileName,
+      fileName: safeName,
       type: FileType.custom,
       allowedExtensions: allowedExtensions,
       bytes: bytes,
     );
     if (path == null) return false; // 用户取消
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已导出:$path')));
+      showAppSnack(context, '已导出:$path');
     }
     return true;
   } catch (e) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败:$e')));
+      showAppSnack(context, '导出失败:$e');
     }
     return false;
   }
@@ -100,7 +117,7 @@ Future<bool> shareBytesFile(
       p.join(root.path, DateTime.now().microsecondsSinceEpoch.toString()),
     );
     await tempDir.create(recursive: true);
-    final safeName = _safeFileName(fileName);
+    final safeName = sanitizeExportFileName(fileName);
     final file = File(p.join(tempDir.path, safeName));
     await file.writeAsBytes(bytes, flush: true);
     if (!context.mounted) return false;
@@ -115,10 +132,10 @@ Future<bool> shareBytesFile(
         sharePositionOrigin: origin,
       ),
     );
-    if (context.mounted) _toast(context, '已打开分享面板');
+    if (context.mounted) showAppSnack(context, '已打开分享面板');
     return true;
   } catch (e) {
-    if (context.mounted) _toast(context, '分享失败:$e');
+    if (context.mounted) showAppSnack(context, '分享失败:$e');
     return false;
   }
 }
@@ -141,7 +158,7 @@ Future<bool> _saveOnMobile(
       p.join(root.path, DateTime.now().microsecondsSinceEpoch.toString()),
     );
     await tempDir.create(recursive: true);
-    final safeName = _safeFileName(fileName);
+    final safeName = sanitizeExportFileName(fileName);
     final file = File(p.join(tempDir.path, safeName));
     await file.writeAsBytes(bytes, flush: true);
     final savedPath = await FlutterFileDialog.saveFile(
@@ -152,13 +169,13 @@ Future<bool> _saveOnMobile(
       ),
     );
     if (savedPath == null) {
-      if (context.mounted) _toast(context, '已取消保存');
+      if (context.mounted) showAppSnack(context, '已取消保存');
       return false;
     }
-    if (context.mounted) _toast(context, '已保存到本地');
+    if (context.mounted) showAppSnack(context, '已保存到本地');
     return true;
   } catch (e) {
-    if (context.mounted) _toast(context, '导出失败:$e');
+    if (context.mounted) showAppSnack(context, '导出失败:$e');
     return false;
   } finally {
     try {
@@ -192,13 +209,11 @@ Future<void> _purgeOldExports(Directory root) async {
   }
 }
 
-// 文件名可能来自角色名/会话标题,含系统保留字符时另存为会失败,统一替换掉。
-String _safeFileName(String name) => name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-
 // 扩展名 -> MIME 只覆盖导出会用到的格式;映射不到时不传过滤器,
 // 让原生对话框自行判断,而不是拒绝对话框打开。
 const Map<String, String> _mimeByExtension = {
   'json': 'application/json',
+  'msarc': 'application/zip',
   'png': 'image/png',
   'jpg': 'image/jpeg',
   'jpeg': 'image/jpeg',
@@ -213,10 +228,4 @@ List<String>? _mimeTypesFor(List<String> extensions) {
         _mimeByExtension[ext.toLowerCase()]!,
   };
   return mimes.isEmpty ? null : mimes.toList();
-}
-
-void _toast(BuildContext context, String message) {
-  ScaffoldMessenger.of(context)
-    ..removeCurrentSnackBar()
-    ..showSnackBar(SnackBar(content: Text(message)));
 }

@@ -1,5 +1,7 @@
 // 生图插件管理页:导入(权限确认)、启停与删除;导入校验的 JS 求值用
 // 替身 runtime,不与本机 QuickJS/Node 桥接耦合。
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -92,6 +94,34 @@ void main() {
       await tester.runAsync(() => db.db.close());
     },
   );
+
+  testWidgets('a package cannot overwrite a built-in plugin', (tester) async {
+    late Directory tmp;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      tmp = await Directory.systemTemp.createTemp('builtin-plugin');
+      File('${tmp.path}/builtin.json').writeAsStringSync(
+        kDefaultImagePluginSeeds.first.toPackageJson(),
+      );
+    });
+    FakeFilePicker.install(pickedPath: '${tmp.path}/builtin.json');
+    await tester.pumpWidget(harness());
+    await tester.tap(find.widgetWithText(FloatingActionButton, '导入 JSON'));
+    await waitUntil(
+      tester,
+      () => find.textContaining('内置插件的包体').evaluate().isNotEmpty,
+    );
+    expect(find.textContaining('不可覆盖'), findsOneWidget);
+    final plugins = await tester.runAsync(
+      () => ImagePluginRepository(db).all(),
+    );
+    expect(plugins, isEmpty);
+
+    await tester.runAsync(() async {
+      await db.db.close();
+      tmp.deleteSync(recursive: true);
+    });
+  });
 
   testWidgets('built-in plugins have no delete action', (tester) async {
     await tester.runAsync(() async {

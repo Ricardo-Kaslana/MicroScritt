@@ -15,15 +15,13 @@ const List<(String, List<SettingsDesktopSection>)> _sidebarGroups = [
     '通用',
     [SettingsDesktopSection.appearance, SettingsDesktopSection.conversation],
   ),
-  (
-    '模型服务',
-    [SettingsDesktopSection.llm, SettingsDesktopSection.image],
-  ),
+  ('模型服务', [SettingsDesktopSection.llm, SettingsDesktopSection.image]),
   (
     '内容与数据',
     [
       SettingsDesktopSection.extensions,
       SettingsDesktopSection.stats,
+      SettingsDesktopSection.storage,
       SettingsDesktopSection.config,
     ],
   ),
@@ -58,10 +56,7 @@ class _SettingsDesktopScreenState extends State<SettingsDesktopScreen> {
           SizedBox(
             key: const ValueKey('settings_desktop_sidebar'),
             width: kSettingsDesktopSidebarWidth,
-            child: _SettingsSidebar(
-              section: _section,
-              onSelect: _openSection,
-            ),
+            child: _SettingsSidebar(section: _section, onSelect: _openSection),
           ),
           Expanded(
             key: const ValueKey('settings_desktop_workspace'),
@@ -192,7 +187,7 @@ class _SettingsNavTile extends StatelessWidget {
                 children: [
                   Icon(
                     icon,
-                    size: 19,
+                    size: 20,
                     color: selected ? scheme.primary : scheme.onSurfaceVariant,
                   ),
                   const SizedBox(width: 10),

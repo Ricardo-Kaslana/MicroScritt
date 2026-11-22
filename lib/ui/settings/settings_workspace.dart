@@ -128,89 +128,11 @@ class SettingsCardTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Row(
-      children: [
-        Icon(icon, size: 15, color: scheme.primary),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(
-            title,
-            style: Theme.of(context).textTheme.labelLarge?.copyWith(
-              color: scheme.onSurfaceVariant,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.3,
-            ),
-          ),
-        ),
-        if (trailing != null) trailing!,
-      ],
-    );
-  }
-}
-
-/// 设置行右侧的滑块控件:固定宽度,值标签在左,关闭时整段置灰。
-class SettingsSliderControl extends StatelessWidget {
-  final String valueLabel;
-  final double value;
-  final double min;
-  final double max;
-  final int? divisions;
-  final bool enabled;
-  final ValueChanged<double>? onChanged;
-  final ValueChanged<double>? onChangeEnd;
-  final Key? sliderKey;
-  final double width;
-
-  const SettingsSliderControl({
-    super.key,
-    required this.valueLabel,
-    required this.value,
-    required this.min,
-    required this.max,
-    this.divisions,
-    this.enabled = true,
-    this.onChanged,
-    this.onChangeEnd,
-    this.sliderKey,
-    this.width = 280,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return SizedBox(
-      width: width,
-      child: Row(
-        children: [
-          SizedBox(
-            width: 40,
-            child: Text(
-              valueLabel,
-              textAlign: TextAlign.right,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: enabled
-                    ? scheme.onSurfaceVariant
-                    : scheme.onSurfaceVariant.withValues(alpha: 0.5),
-              ),
-            ),
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Slider(
-              key: sliderKey,
-              value: value,
-              min: min,
-              max: max,
-              divisions: divisions,
-              label: valueLabel,
-              onChanged: enabled ? onChanged : null,
-              onChangeEnd: enabled ? onChangeEnd : null,
-            ),
-          ),
-        ],
-      ),
+    return SectionHeader(
+      title,
+      icon: icon,
+      padding: EdgeInsets.zero,
+      trailing: trailing,
     );
   }
 }
@@ -291,52 +213,45 @@ class SettingsLinkCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Card(
-      margin: EdgeInsets.zero,
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              Container(
-                width: 38,
-                height: 38,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: scheme.primary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(icon, size: 20, color: scheme.primary),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      title,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      description,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Icon(Icons.chevron_right, size: 20, color: scheme.outline),
-            ],
+    return SurfaceCard(
+      onTap: onTap,
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: scheme.primary.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, size: 20, color: scheme.primary),
           ),
-        ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  description,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Icon(Icons.chevron_right, size: 20, color: scheme.outline),
+        ],
       ),
     );
   }

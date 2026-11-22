@@ -42,6 +42,27 @@ void main() {
         UpstreamErrorKind.rateLimit,
       ),
       ('流中途未知错误负载默认瞬态', null, 'server_error', 'upstream exploded', UpstreamErrorKind.transient),
+      (
+        '流中途 invalid_request_error 归非瞬态(避免 agent 盲目重试)',
+        null,
+        'invalid_request_error',
+        'invalid request: missing field',
+        UpstreamErrorKind.contractViolation,
+      ),
+      (
+        '400 上下文超长(OpenAI)',
+        400,
+        'invalid_request_error',
+        '{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"This model\'s maximum context length is 8192 tokens"}}',
+        UpstreamErrorKind.contextLength,
+      ),
+      (
+        'Anthropic prompt is too long',
+        400,
+        'invalid_request_error',
+        '{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}',
+        UpstreamErrorKind.contextLength,
+      ),
       ('密钥签名覆盖状态码(403 也报鉴权)', 403, null, 'API key not valid, please check', UpstreamErrorKind.auth),
       (
         '地区封锁 → 网关策略',
@@ -94,6 +115,35 @@ void main() {
       expect(extractUpstreamErrorShape('plain gateway text'), (type: null, message: null));
       expect(extractUpstreamErrorShape('{not json'), (type: null, message: null));
       expect(extractUpstreamErrorShape(''), (type: null, message: null));
+    });
+  });
+
+  group('redactSecrets', () {
+    test('遮蔽本次请求的 apiKey 精确值', () {
+      const key = 'sk-live-abcdefghijklmnop';
+      final out = redactSecrets('bad key $key for request', apiKey: key);
+      expect(out, isNot(contains(key)));
+      expect(out, contains('***'));
+    });
+
+    test('遮蔽 Bearer 令牌、sk- 前缀与 api_key 字段值', () {
+      final out = redactSecrets(
+        'Authorization: Bearer abcdefgh12345678\n'
+        'api_key: sk-test-1234567890\n'
+        'X-Api-Key: "verysecretvalue123"',
+      );
+      expect(out, isNot(contains('abcdefgh12345678')));
+      expect(out, isNot(contains('sk-test-1234567890')));
+      expect(out, isNot(contains('verysecretvalue123')));
+    });
+
+    test('遮蔽超长 token 串(即使没有已知前缀)', () {
+      const token = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCD';
+      expect(redactSecrets('token=$token'), isNot(contains(token)));
+    });
+
+    test('不影响普通短文本', () {
+      expect(redactSecrets('rate limited upstream'), 'rate limited upstream');
     });
   });
 }

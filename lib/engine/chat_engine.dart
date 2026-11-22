@@ -23,6 +23,9 @@ class ChatEngine {
       model: request.model,
       systemPrompt: request.systemPrompt,
       messages: snapshot.messages,
+      // 工具面属于 [request](调用方/主写未来可能带 tools):漏传会让重建后的
+      // 请求与调用方语义不一致(原生工具轮退化成普通请求)。
+      tools: request.tools,
       temperature: request.temperature,
       maxTokens: request.maxTokens,
       reasoningLevel: request.reasoningLevel,

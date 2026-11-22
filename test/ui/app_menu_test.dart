@@ -17,7 +17,10 @@ void main() {
         expect(popup.surfaceTintColor, Colors.transparent);
         final shape = popup.shape as RoundedRectangleBorder;
         expect(shape.borderRadius, BorderRadius.circular(14));
-        expect(shape.side.color, scheme.outlineVariant.withValues(alpha: 0.45));
+        expect(
+          shape.side.color,
+          scheme.outlineVariant.withValues(alpha: AppStroke.cardAlpha),
+        );
 
         final sheet = theme.bottomSheetTheme;
         expect(sheet.backgroundColor, scheme.surface);

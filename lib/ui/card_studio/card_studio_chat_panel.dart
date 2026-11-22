@@ -11,7 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/card_studio_controller.dart';
 import '../../state/card_studio_state.dart';
 import '../common/app_menu.dart';
-import '../common/chat_layout.dart';
+import '../common/app_snack_bar.dart';
 import '../common/text_edit_sheet.dart';
 import '../model_selector_bar.dart';
 import '../text_syntax.dart';
@@ -82,12 +82,7 @@ class _CardStudioChatPanelState extends ConsumerState<CardStudioChatPanel> {
   Future<void> _copyEntry(CardStudioEntry entry) async {
     await Clipboard.setData(ClipboardData(text: entry.text));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        width: chatSnackBarWidth(context),
-        content: const Text('已复制到剪贴板'),
-      ),
-    );
+    showAppSnack(context, '已复制到剪贴板');
   }
 
   Future<void> _editEntry(int index, CardStudioEntry entry) async {
@@ -114,12 +109,7 @@ class _CardStudioChatPanelState extends ConsumerState<CardStudioChatPanel> {
       // 撤回会截断该轮条目,选中排随之收起。
       setState(() => _selectedEntry = null);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          width: chatSnackBarWidth(context),
-          content: Text(error),
-        ),
-      );
+      showAppSnack(context, error);
     }
   }
 

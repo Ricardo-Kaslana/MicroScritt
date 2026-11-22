@@ -46,8 +46,9 @@ Future<void> _waitForMessages(WidgetTester tester, int expected) async {
   await tester.runAsync(() async {
     for (var i = 0; i < 400; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      final container =
-          ProviderScope.containerOf(tester.element(find.byType(ChatScreen)));
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ChatScreen)),
+      );
       if (container.read(chatControllerProvider).messages.length == expected) {
         return;
       }
@@ -75,18 +76,22 @@ void main() {
     late final int sid;
     await tester.runAsync(() async {
       db = await openTestDb();
-      final charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      final charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       sid = await SessionRepository(db).create(charId, 's');
       // 250 条:每 2 条一张竖图(2:3 → 真实高约为宽的 1.5 倍,远高于占位),
       // 制造与真机同源的"图片陆续解码改高"。
-      final portrait = await _pngBase64(40, 60);
+      final portrait = (await db.images.putBytes(
+        base64Decode(await _pngBase64(40, 60)),
+      )).hash;
       final repo = MessageRepository(db);
       for (var i = 0; i < 250; i++) {
         await repo.append(
           sessionId: sid,
           role: i.isEven ? 'user' : 'assistant',
           content: '消息 $i:${'一段用来撑高的正文内容。' * 6}',
-          imageBase64: i.isEven ? portrait : null,
+          imageHash: i.isEven ? portrait : null,
         );
       }
     });
@@ -115,8 +120,9 @@ void main() {
     );
     expect(scrollable, findsOneWidget);
     final position = tester.state<ScrollableState>(scrollable).position;
-    final container =
-        ProviderScope.containerOf(tester.element(find.byType(ChatScreen)));
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ChatScreen)),
+    );
 
     // 进入即贴底(reverse:offset 0),首屏就是最新消息。
     expect(position.pixels, 0, reason: '进入会话应直接落在底部');
@@ -140,7 +146,9 @@ void main() {
     expect(maxAbsDelta, 0, reason: '图片改高不应移动视口一像素');
 
     // 发送一轮:消息落库 + 流式草稿 + 落库替换,全程逐帧断言视口不动。
-    final accepted = container.read(chatControllerProvider.notifier).trySend('再来一轮');
+    final accepted = container
+        .read(chatControllerProvider.notifier)
+        .trySend('再来一轮');
     expect(accepted, isTrue, reason: '测试前提:发送应被接受');
     for (var i = 0; i < 120; i++) {
       await tester.runAsync(
@@ -174,7 +182,9 @@ void main() {
     late final int sid;
     await tester.runAsync(() async {
       db = await openTestDb();
-      final charId = await CharacterRepository(db).insert(const CharacterCard(name: 'Alice'));
+      final charId = await CharacterRepository(
+        db,
+      ).insert(const CharacterCard(name: 'Alice'));
       sid = await SessionRepository(db).create(charId, 's');
       final repo = MessageRepository(db);
       for (var i = 0; i < 400; i++) {
@@ -206,10 +216,15 @@ void main() {
       matching: find.byType(Scrollable),
     );
     final position = tester.state<ScrollableState>(scrollable).position;
-    final container =
-        ProviderScope.containerOf(tester.element(find.byType(ChatScreen)));
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ChatScreen)),
+    );
     expect(position.pixels, 0, reason: '进入应贴底');
-    expect(container.read(chatControllerProvider).canLoadOlder, isTrue, reason: '测试前提:还有更早的页');
+    expect(
+      container.read(chatControllerProvider).canLoadOlder,
+      isTrue,
+      reason: '测试前提:还有更早的页',
+    );
 
     // 视口放到列表中部:远离贴顶/贴底邻域,滚动回调不会自发触发分页。
     position.jumpTo(position.maxScrollExtent * 0.5);
@@ -223,7 +238,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(container.read(chatControllerProvider).messages.length, 400, reason: '旧页应已补入');
+    expect(
+      container.read(chatControllerProvider).messages.length,
+      400,
+      reason: '旧页应已补入',
+    );
     expect(container.read(chatControllerProvider).canLoadOlder, isFalse);
     expect(
       position.pixels,

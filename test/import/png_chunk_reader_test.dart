@@ -8,7 +8,32 @@ import 'package:microscritt/import/png_chunk_reader.dart';
 
 Uint8List _chunk(String type, List<int> data) {
   final len = [(data.length >> 24) & 0xff, (data.length >> 16) & 0xff, (data.length >> 8) & 0xff, data.length & 0xff];
-  return Uint8List.fromList([...len, ...type.codeUnits, ...data, 0, 0, 0, 0]); // 假 CRC:读取器不校验
+  final typeAndData = [...type.codeUnits, ...data];
+  final crc = _crc32(typeAndData);
+  return Uint8List.fromList([
+    ...len,
+    ...typeAndData,
+    (crc >> 24) & 0xff,
+    (crc >> 16) & 0xff,
+    (crc >> 8) & 0xff,
+    crc & 0xff,
+  ]);
+}
+
+final List<int> _crcTable = List<int>.generate(256, (n) {
+  var c = n;
+  for (var k = 0; k < 8; k++) {
+    c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+  }
+  return c;
+});
+
+int _crc32(List<int> bytes) {
+  var crc = 0xFFFFFFFF;
+  for (final byte in bytes) {
+    crc = _crcTable[(crc ^ byte) & 0xFF] ^ (crc >> 8);
+  }
+  return crc ^ 0xFFFFFFFF;
 }
 
 Uint8List buildPngWithText(String keyword, String text) {
@@ -107,5 +132,42 @@ void main() {
     final chunks = readPngTextChunks(png);
     expect(chunks.length, 2);
     expect(chunks[0].text + chunks[1].text, full);
+  });
+
+  test('a text chunk with a bad CRC is skipped without failing the card', () {
+    final bad = _chunk('tEXt', [...utf8.encode('Description'), 0, ...utf8.encode('broken')]);
+    bad[bad.length - 1] ^= 0xFF; // 破坏 CRC,载荷本身仍是合法文本
+    final good = _chunk('tEXt', [...utf8.encode('chara'), 0, ...utf8.encode('ok')]);
+    final png = _buildPng([bad, good, _chunk('IEND', [])]);
+    final chunks = readPngTextChunks(png);
+    expect(chunks.single.keyword, 'chara');
+    expect(chunks.single.text, 'ok');
+  });
+
+  test('too many text chunks fail the whole card', () {
+    final png = _buildPng([
+      for (var i = 0; i < 257; i++)
+        _chunk('tEXt', [...utf8.encode('k$i'), 0, ...utf8.encode('v')]),
+      _chunk('IEND', []),
+    ]);
+    expect(() => readPngTextChunks(png), throwsFormatException);
+  });
+
+  test('total text volume over the global budget fails the whole card', () {
+    // 单个块都远低于限额,累加超过 8MiB 才触发全局预算。
+    final part = 'x' * (3 * 1024 * 1024);
+    final png = _buildPng([
+      for (var i = 0; i < 3; i++)
+        _chunk('tEXt', [...utf8.encode('k$i'), 0, ...utf8.encode(part)]),
+      _chunk('IEND', []),
+    ]);
+    expect(() => readPngTextChunks(png), throwsFormatException);
+  });
+
+  test('a zlib bomb over the global inflate budget fails the whole card', () {
+    final bomb = ZLibEncoder().convert(List.filled(9 * 1024 * 1024, 0));
+    final data = [...utf8.encode('chara'), 0, 0, ...bomb];
+    final png = _buildPng([_chunk('zTXt', data), _chunk('IEND', [])]);
+    expect(() => readPngTextChunks(png), throwsFormatException);
   });
 }

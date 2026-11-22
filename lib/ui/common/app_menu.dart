@@ -5,6 +5,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
+import 'app_sheet.dart';
 
 /// 统一的菜单动作项模型:三点菜单([AppPopupMenuButton])与底部操作弹层
 /// ([showAppActionSheet])共用同一份数据,页面层只声明动作、不关心排版。
@@ -69,13 +70,19 @@ class AppPopupMenuButton<T> extends StatelessWidget {
             enabled: a.enabled,
             child: Row(
               children: [
-                Icon(a.icon, size: 20, color: a.destructive ? scheme.error : null),
+                Icon(
+                  a.icon,
+                  size: 20,
+                  color: a.destructive ? scheme.error : null,
+                ),
                 const SizedBox(width: AppSpacing.md),
                 Flexible(
                   child: Text(
                     a.label,
                     overflow: TextOverflow.ellipsis,
-                    style: a.destructive ? TextStyle(color: scheme.error) : null,
+                    style: a.destructive
+                        ? TextStyle(color: scheme.error)
+                        : null,
                   ),
                 ),
               ],
@@ -96,34 +103,36 @@ Future<T?> showAppActionSheet<T>(
   required List<MenuAction<T>> actions,
 }) {
   final scheme = Theme.of(context).colorScheme;
-  return showModalBottomSheet<T>(
-    context: context,
+  return showAppSheet<T>(
+    context,
+    isScrollControlled: false,
     showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final (i, a) in actions.indexed) ...[
-              if (i > 0)
-                Divider(
-                  height: 0.5,
-                  thickness: 0.5,
-                  indent: 16,
-                  endIndent: 16,
-                  color: scheme.outlineVariant.withValues(alpha: 0.6),
-                ),
-              ListTile(
-                enabled: a.enabled,
-                leading: Icon(a.icon, color: a.destructive ? scheme.error : null),
-                title: Text(a.label, style: a.destructive ? TextStyle(color: scheme.error) : null),
-                subtitle: a.subtitle == null ? null : Text(a.subtitle!),
-                onTap: () => Navigator.pop(sheetContext, a.value),
+    builder: (sheetContext) => SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final (i, a) in actions.indexed) ...[
+            if (i > 0)
+              Divider(
+                height: 0.5,
+                thickness: 0.5,
+                indent: 16,
+                endIndent: 16,
+                color: scheme.outlineVariant.withValues(alpha: 0.6),
               ),
-            ],
-            const SizedBox(height: AppSpacing.sm),
+            ListTile(
+              enabled: a.enabled,
+              leading: Icon(a.icon, color: a.destructive ? scheme.error : null),
+              title: Text(
+                a.label,
+                style: a.destructive ? TextStyle(color: scheme.error) : null,
+              ),
+              subtitle: a.subtitle == null ? null : Text(a.subtitle!),
+              onTap: () => Navigator.pop(sheetContext, a.value),
+            ),
           ],
-        ),
+          const SizedBox(height: AppSpacing.sm),
+        ],
       ),
     ),
   );

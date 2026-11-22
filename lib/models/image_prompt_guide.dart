@@ -19,6 +19,6 @@ Image descriptions are comma-separated English tags in NovelAI style, ordered by
 5. camera and composition: shot size (full body/upper body), angle, gaze direction (looking at viewer);
 6. location: bedroom, street, forest, indoors;
 7. time and lighting: morning/night, warm or cold light, ambient mood.
-Emphasize core features with {Tag} (each layer ≈1.1x, up to 6 layers); de-emphasize minor details with [Tag] (each layer ≈0.9x, up to 2 layers); always weight defining character features such as hair and eye color.
-Describe only what is visible in the frame: people, objects, background, and physical actions in progress. Never include inner thoughts, memories, metaphors, dialogue, or abstract concepts; expressions must be visually concrete.
-Keep characters consistent: restate each character's established appearance (hair color, eye color, build, clothing) in every tag string and never alter it between images.''';
+Weighting: emphasize core features with {Tag} (each layer ≈1.1x, up to 6 layers); de-emphasize minor details with [Tag] (each layer ≈0.9x, up to 2 layers). Always weight defining character features such as hair and eye color.
+Framing: describe only what is visible in the frame — people, objects, background, physical actions in progress. Never include inner thoughts, memories, metaphors, dialogue, or abstract concepts; expressions must be visually concrete.
+Consistency: restate each character's established appearance (hair color, eye color, build, clothing) in every tag string and never alter it between images.''';

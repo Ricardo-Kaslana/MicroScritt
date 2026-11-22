@@ -109,6 +109,19 @@ void main() {
       () => find.text('与 Alice 开始对话').evaluate().isEmpty,
       reason: '选择开场白后空态未退出',
     );
+    // 空态在消息刷新后即退出,但 startWithGreeting 还要重算一次上下文;
+    // 不等它落定就关库,后台查询会撞上 database_closed。
+    await waitUntilOrFail(tester, () {
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ChatScreen)),
+      );
+      return container
+              .read(chatControllerProvider)
+              .lastContext
+              ?.messages
+              .any((m) => m.content == '备用开场白一') ??
+          false;
+    }, reason: '开场白未完成上下文重算');
     expect(find.textContaining('备用开场白一'), findsOneWidget);
     final rows = await tester.runAsync(
       () => db.db.query(
@@ -120,6 +133,71 @@ void main() {
     expect(rows, hasLength(1));
     expect(rows!.single['role'], 'assistant');
     expect(rows.single['content'], '备用开场白一');
+    await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('超出首屏的开场白仍可经「查看全部」选择', (tester) async {
+    late final AppDatabase db;
+    late final int charId;
+    late final int sessionId;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      charId = await CharacterRepository(db).insert(_card);
+      sessionId = await SessionRepository(db).create(charId, 'new');
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseProvider.overrideWithValue(db)],
+        child: MaterialApp(
+          home: ChatScreen(
+            sessionId: sessionId,
+            characterId: charId,
+            character: _card,
+          ),
+        ),
+      ),
+    );
+
+    await waitUntilOrFail(
+      tester,
+      () => find.text('与 Alice 开始对话').evaluate().isNotEmpty,
+      reason: '空会话未渲染角色引导',
+    );
+    // 首屏只铺前三条,其余收在「查看全部」底单里。
+    expect(find.text('备用开场白三'), findsNothing);
+    expect(find.text('查看全部开场白(共 5 条)'), findsOneWidget);
+    await tester.tap(find.text('查看全部开场白(共 5 条)'));
+    await tester.pumpAndSettle();
+    expect(find.text('全部开场白'), findsOneWidget);
+    expect(find.text('备用开场白三'), findsOneWidget);
+    expect(find.text('备用开场白四'), findsOneWidget);
+
+    await tester.tap(find.text('备用开场白四'));
+    await waitUntilOrFail(
+      tester,
+      () => find.text('与 Alice 开始对话').evaluate().isEmpty,
+      reason: '选择第四条开场白后空态未退出',
+    );
+    await waitUntilOrFail(tester, () {
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ChatScreen)),
+      );
+      return container
+              .read(chatControllerProvider)
+              .lastContext
+              ?.messages
+              .any((m) => m.content == '备用开场白四') ??
+          false;
+    }, reason: '第四条开场白未完成上下文重算');
+    final rows = await tester.runAsync(
+      () => db.db.query(
+        'messages',
+        where: 'session_id = ?',
+        whereArgs: [sessionId],
+      ),
+    );
+    expect(rows, hasLength(1));
+    expect(rows!.single['content'], '备用开场白四');
     await tester.runAsync(() => db.db.close());
   });
 

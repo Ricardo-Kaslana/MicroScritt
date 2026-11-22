@@ -5,7 +5,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:microscritt/ui/common/export_helper.dart';
 import 'package:microscritt/ui/common/session_file_helper.dart';
+import 'package:path/path.dart' as p;
+
+import '../support/fake_file_picker.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -205,4 +209,76 @@ void main() {
       });
     },
   );
+
+  testWidgets('desktop export keeps the old target when building fails', (
+    tester,
+  ) async {
+    final target = File(p.join(temp.path, '会话:一?.msarc'))
+      ..writeAsStringSync('old');
+    FakeFilePicker.install(savePath: target.path);
+
+    bool? result;
+    await pumpExportButton(
+      tester,
+      export: (context) async {
+        result = await saveSessionArchive(
+          context,
+          fileName: '会话:一?.msarc',
+          build: (staging, {onProgress, isCancelled}) async {
+            staging.writeAsStringSync('new');
+            throw const FormatException('boom');
+          },
+        );
+      },
+    );
+
+    await tester.tap(find.text('导出'));
+    await pumpUntil(tester, () => result != null);
+    await tester.pumpAndSettle();
+
+    expect(result, isFalse);
+    // 旧目标未被删除,暂存与备份都不残留 —— 不能再出现「新旧同时丢失」。
+    expect(target.readAsStringSync(), 'old');
+    expect(File('${target.path}.part').existsSync(), isFalse);
+    expect(File('${target.path}.bak').existsSync(), isFalse);
+  });
+
+  testWidgets('desktop export replaces the target and leaves no backup', (
+    tester,
+  ) async {
+    final target = File(p.join(temp.path, 'archive.msarc'))
+      ..writeAsStringSync('old');
+    FakeFilePicker.install(savePath: target.path);
+
+    bool? result;
+    await pumpExportButton(
+      tester,
+      export: (context) async {
+        result = await saveSessionArchive(
+          context,
+          fileName: 'archive.msarc',
+          build: (staging, {onProgress, isCancelled}) async {
+            staging.writeAsStringSync('new');
+            return staging;
+          },
+        );
+      },
+    );
+
+    await tester.tap(find.text('导出'));
+    await pumpUntil(tester, () => result != null);
+    await tester.pumpAndSettle();
+
+    expect(result, isTrue);
+    expect(target.readAsStringSync(), 'new');
+    expect(File('${target.path}.part').existsSync(), isFalse);
+    expect(File('${target.path}.bak').existsSync(), isFalse);
+  });
+
+  test('export file names sanitize reserved and control characters', () {
+    expect(sanitizeExportFileName('a/b\\c:d*e?f"g<h>i|j'), 'a_b_c_d_e_f_g_h_i_j');
+    expect(sanitizeExportFileName('name\u0001\u001F\u007F.json'), 'name___.json');
+    expect(sanitizeExportFileName('trailing. '), 'trailing');
+    expect(sanitizeExportFileName('   '), 'export');
+  });
 }

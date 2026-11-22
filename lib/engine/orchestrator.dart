@@ -10,9 +10,12 @@ library;
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart';
+
 import '../backend/image_backend.dart';
 import '../backend/image_downloader.dart';
 import '../context/context_assembler.dart';
+import '../data/image_codec.dart';
 import '../data/image_guide_repository.dart';
 import '../data/memory_repository.dart';
 import '../data/message_repository.dart';
@@ -75,8 +78,12 @@ class BackgroundTurnResult {
   /// 由控制器把生图机会留给之后的轮次。
   final bool imageHandled;
 
-  /// 版本条件写回失败(期间变量被人工修改),本轮结果整体丢弃。
+  /// 变量条件写回失败(期间变量被人工修改),本轮结果整体丢弃。
   final bool variableConflict;
+
+  /// 本轮已发生的 token 用量(含失败/取消前的请求)。失败轮同样可能已计费,
+  /// 控制器据此写 `reported` 用量行而不是记零。
+  final TokenUsage usage;
 
   /// 本轮拆出去的后台生图任务(与状态写回解耦)。调用方可选地 await 它
   /// 以收敛图片落库(测试用);控制器无需等待 —— 图片落库后经 [onImagePlaced]
@@ -96,6 +103,7 @@ class BackgroundTurnResult {
     this.imageHandled = false,
     this.variableConflict = false,
     this.imageTask,
+    this.usage = const TokenUsage(),
   });
 
   /// 成功轮:带出状态更新与可选游标/生图任务。
@@ -122,17 +130,25 @@ class BackgroundTurnResult {
       BackgroundTurnResult._(skipped: true, skippedReason: reason);
 
   /// 版本条件写回失败:变量期间被人工修改,整轮结果丢弃。
-  factory BackgroundTurnResult.conflict() => BackgroundTurnResult._(
+  factory BackgroundTurnResult.conflict({
+    TokenUsage usage = const TokenUsage(),
+  }) => BackgroundTurnResult._(
     skipped: true,
     variableConflict: true,
     skippedReason: '变量已被修改,已丢弃旧后台结果',
+    usage: usage,
   );
 
   /// 失败轮:带细分原因与可选诊断摘要,调用方不得推进游标。
   factory BackgroundTurnResult.failed([
     BackgroundFailureReason reason = BackgroundFailureReason.backendError,
     String? detail,
-  ]) => BackgroundTurnResult._(failureReason: reason, failureDetail: detail);
+    TokenUsage usage = const TokenUsage(),
+  ]) => BackgroundTurnResult._(
+    failureReason: reason,
+    failureDetail: detail,
+    usage: usage,
+  );
 }
 
 /// 后台一张图片落库的位置:新追加的行或原地替换的既有行(后者带原行 messageId)。
@@ -153,7 +169,12 @@ typedef _PreparedWindow = ({
   List<Message> batch,
   bool hasMore,
   BackgroundFeatures runFeatures,
-  ({Map<String, String> values, Map<String, VariableAccess> access, int revision}) snapshot,
+  ({
+    Map<String, String> values,
+    Map<String, VariableAccess> access,
+    int revision,
+  })
+  snapshot,
   List<ImageGuide> guideList,
   List<Memory> memoryRows,
   List<Message> reference,
@@ -167,8 +188,8 @@ typedef _PreparedWindow = ({
 ///
 /// 读取候选(当前变量 / 最近对话增量 + 会话生图指导)→ 后台引擎 → 落库。
 /// 记忆与生图指导不逐轮改写,只经用户主动的 [initializeMemory] /
-/// [regenerateMemory] / [initializeImageGuide] 路径;快状态轮里它们只作为
-/// 生图的只读锚定输入。
+/// [regenerateMemory] / [initializeImageGuide] / [regenerateImageGuide]
+/// 路径;快状态轮里它们只作为生图的只读锚定输入。
 class Orchestrator {
   /// 后台 LLM 引擎(一轮 JSON 状态维护)。
   final BackgroundEngine engine;
@@ -263,6 +284,11 @@ class Orchestrator {
     /// 上一轮图片描述。普通维护不传。
     RerunContext? rerunContext,
 
+    /// Agentic 增强开关(legacy 忽略):变量注入主写附件 / 下一步建议。
+    /// 生效还要求变量维护开启(注入)与 Agentic 模式(由调用方保证)。
+    bool variableInjection = false,
+    bool nextSuggestions = false,
+
     /// 运行模式:legacy 单发(默认,零行为变化)/ agentic 多步工具循环。
     /// hybrid 的每轮维护仍按 legacy 跑;周期审计是控制器另行发起的独立
     /// [runAudit] 入口(不经此 mode 分流)。设置项与控制器接线 P3,审计 P4。
@@ -274,7 +300,10 @@ class Orchestrator {
     if (shouldCancel?.call() ?? false) {
       return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
     }
-    if (!features.variables && !(features.image && imageBackend != null)) {
+    // 会话启用生图(与本轮是否生图分开):agentic 稳定前缀的工具面/契约按
+    // 它注册,变量积压的纯变量轮与后续生图轮共享同一缓存前缀。
+    final imageCapable = features.image && imageBackend != null;
+    if (!features.variables && !imageCapable) {
       return BackgroundTurnResult.skipped('未选中可执行的维护功能,后台维护已跳过');
     }
     final allMessages = await messages.bySession(sessionId);
@@ -298,10 +327,10 @@ class Orchestrator {
         : const <Message>[];
     final batch = delta.take(maxVariableMessages).toList();
     final hasMore = delta.length > batch.length;
-    final imageDue = features.image && !hasMore;
+    final imageDue = imageCapable && !hasMore;
     final runFeatures = BackgroundFeatures(
       variables: features.variables && batch.isNotEmpty,
-      image: imageDue && imageBackend != null && recent.isNotEmpty,
+      image: imageDue && recent.isNotEmpty,
     );
     if (!runFeatures.anyEnabled ||
         (!features.variables &&
@@ -320,7 +349,9 @@ class Orchestrator {
       runFeatures.image
           ? imageGuides.bySession(sessionId)
           : Future.value(const <Never>[]),
-      runFeatures.image && memoryAnchor
+      // 记忆锚定开启时,agentic 变量-only 轮也取记忆(readMemory/proposeMemory
+      // 按需取证);image 轮进锚定段;legacy/hybrid 的变量轮不读。
+      memoryAnchor && (runFeatures.image || mode == BackgroundMode.agentic)
           ? memories.bySession(sessionId)
           : Future.value(const <Never>[]),
     ).wait;
@@ -348,6 +379,7 @@ class Orchestrator {
       return _runAgenticTurn(
         sessionId: sessionId,
         model: model,
+        imageTools: imageCapable,
         window: (
           batch: batch,
           hasMore: hasMore,
@@ -374,6 +406,9 @@ class Orchestrator {
         worldbook: worldbook,
         imageReplaceTargets: imageReplaceTargets,
         rerunContext: rerunContext,
+        variableInjection: variableInjection,
+        nextSuggestions: nextSuggestions,
+        memoryAnchor: memoryAnchor,
         onAgentStep: onAgentStep,
       );
     }
@@ -400,11 +435,19 @@ class Orchestrator {
       rerunContext: rerunContext,
     );
     if (outcome is BackgroundRunFailure) {
-      return BackgroundTurnResult.failed(outcome.reason, outcome.detail);
+      return BackgroundTurnResult.failed(
+        outcome.reason,
+        outcome.detail,
+        outcome.usage,
+      );
     }
     var result = (outcome as BackgroundRunSuccess).result;
     if (shouldCancel?.call() ?? false) {
-      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+      return BackgroundTurnResult.failed(
+        BackgroundFailureReason.cancelled,
+        null,
+        result.usage,
+      );
     }
     if (runFeatures.variables) {
       final applied = await variables.compareAndApply(
@@ -417,8 +460,12 @@ class Orchestrator {
       );
       if (!applied.applied) {
         return (shouldCancel?.call() ?? false)
-            ? BackgroundTurnResult.failed(BackgroundFailureReason.cancelled)
-            : BackgroundTurnResult.conflict();
+            ? BackgroundTurnResult.failed(
+                BackgroundFailureReason.cancelled,
+                null,
+                result.usage,
+              )
+            : BackgroundTurnResult.conflict(usage: result.usage);
       }
       // 摘要与落库结果必须一致:被权限拒绝的更新、超过上限的删除、严格模式
       // 下只生成提案的删除,都不能在摘要里冒充"已应用"。
@@ -434,7 +481,10 @@ class Orchestrator {
         imageGuide: result.imageGuide,
       );
     }
-    var prompts = _imagePrompts(result);
+    var prompts = _clampImagePrompts(_imagePrompts(result), imageCount);
+    // 补调即使没产出描述(或失败)也可能已计费:用量必须并回本轮结果,
+    // 不能只在成功产出描述时记账。
+    TokenUsage? retryUsage;
     // 变量与生图同开时,模型偶发只回变量对象、把图像描述整段漏掉:
     // 变量任务成功不能顺带作废本轮生图机会。这里补一次**仅图像**的调用 ——
     // 没有变量块分散注意力,也不受"整个响应只取到第一个 JSON 对象"的解析
@@ -465,7 +515,11 @@ class Orchestrator {
       );
       if (retry is BackgroundRunSuccess) {
         final retried = retry.result;
-        final retriedPrompts = _imagePrompts(retried);
+        final retriedPrompts = _clampImagePrompts(
+          _imagePrompts(retried),
+          imageCount,
+          source: '补调',
+        );
         if (retriedPrompts.isNotEmpty) {
           prompts = retriedPrompts;
           result = BackgroundResult(
@@ -475,18 +529,17 @@ class Orchestrator {
             variableRemovalProposals: result.variableRemovalProposals,
             imagePrompt: retried.imagePrompt,
             imagePrompts: retried.imagePrompts,
-            usage: TokenUsage(
-              inputTokens: result.usage.inputTokens + retried.usage.inputTokens,
-              outputTokens:
-                  result.usage.outputTokens + retried.usage.outputTokens,
-              cachedInputTokens:
-                  result.usage.cachedInputTokens +
-                  retried.usage.cachedInputTokens,
-            ),
+            usage: result.usage + retried.usage,
+            memoryProposal: result.memoryProposal,
           );
+        } else {
+          retryUsage = retried.usage;
         }
+      } else if (retry is BackgroundRunFailure) {
+        retryUsage = retry.usage;
       }
     }
+    if (retryUsage != null) result = result.withAddedUsage(retryUsage);
     final backend = imageBackend;
     final imageTask = backend != null && runFeatures.image && prompts.isNotEmpty
         ? _generateImage(
@@ -494,6 +547,7 @@ class Orchestrator {
             prompts,
             backend,
             replaceTargets: imageReplaceTargets,
+            shouldCancel: shouldCancel,
           )
         : null;
     return BackgroundTurnResult.applied(
@@ -518,6 +572,7 @@ class Orchestrator {
     required String model,
     required _PreparedWindow window,
     required bool confirmVariableDeletions,
+    required bool imageTools,
     int? throughSeq,
     bool Function()? shouldCancel,
     Future<void>? cancelSignal,
@@ -530,6 +585,9 @@ class Orchestrator {
     List<WorldbookEntry> worldbook = const [],
     List<ImageReplaceTarget> imageReplaceTargets = const [],
     RerunContext? rerunContext,
+    bool variableInjection = false,
+    bool nextSuggestions = false,
+    bool memoryAnchor = true,
     void Function(AgentStepEvent)? onAgentStep,
   }) async {
     final batch = window.batch;
@@ -544,13 +602,60 @@ class Orchestrator {
 
     // 读历史只读回调:绑定本会话 + clamp 到本轮窗口上界(throughSeq 缺省
     // 用全会话最大 seq),技能 token 与主上下文同样剥离。内核不 import data
-    // 层 —— 读库经此注入闭包。
-    Future<List<Message>> readHistory({int? beforeSeq, required int limit}) {
+    // 层 —— 读库经此注入闭包。afterSeq 走向下分页,供 aroundSeq 邻近窗口。
+    Future<List<Message>> readHistory({
+      int? beforeSeq,
+      int? afterSeq,
+      required int limit,
+    }) {
       final cap = (throughSeq ?? maxSeq) + 1;
+      if (afterSeq != null) {
+        if (afterSeq >= cap) return Future.value(const []);
+        return messages
+            .bySessionPageAfter(
+              sessionId,
+              afterSeq: afterSeq,
+              beforeSeq: cap,
+              limit: limit,
+            )
+            .then(strip);
+      }
       final before = beforeSeq == null || beforeSeq > cap ? cap : beforeSeq;
       return messages
           .bySessionPageBefore(sessionId, beforeSeq: before, limit: limit)
           .then(strip);
+    }
+
+    Future<List<HistorySearchHit>> searchHistory(
+      String query, {
+      int limit = 5,
+    }) async {
+      final cap = (throughSeq ?? maxSeq) + 1;
+      final hits = await messages.searchInSession(
+        sessionId,
+        query,
+        limit: limit,
+        beforeSeq: cap,
+      );
+      return [
+        for (final hit in hits)
+          (
+            seq: hit.seq,
+            role: hit.role,
+            content: ContextAssembler.withoutSkillTokens(
+              hit.content,
+              stripSkillNames,
+            ),
+          ),
+      ];
+    }
+
+    // 严格模式下待确认删除键:validateStaged 用它在提交前提示重复占帽。
+    Future<Set<String>> Function()? pendingDeletions;
+    if (confirmVariableDeletions) {
+      pendingDeletions = () async => (await variables.pendingDeletions(
+        sessionId,
+      )).map((proposal) => proposal.key).toSet();
     }
 
     final built = MaintenanceProfile.build(
@@ -562,6 +667,7 @@ class Orchestrator {
       variableHistory: strip(batch),
       features: runFeatures,
       imageCount: imageCount,
+      imageTools: imageTools,
       imageGuide: guideList.isEmpty ? null : guideList.first.content,
       memory: memoryRows.isEmpty
           ? null
@@ -569,7 +675,12 @@ class Orchestrator {
       character: character,
       worldbook: worldbook,
       rerunContext: rerunContext,
+      variableInjection: runFeatures.variables && variableInjection,
+      nextSuggestions: nextSuggestions,
+      memoryTools: memoryAnchor,
       readHistory: readHistory,
+      searchHistory: searchHistory,
+      pendingDeletions: pendingDeletions,
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
@@ -584,16 +695,26 @@ class Orchestrator {
         AgentFailureReason.backendError => BackgroundFailureReason.backendError,
         AgentFailureReason.guardrail => BackgroundFailureReason.parseFailure,
       };
-      return BackgroundTurnResult.failed(reason, outcome.detail);
+      return BackgroundTurnResult.failed(
+        reason,
+        outcome.detail,
+        outcome.totalUsage,
+      );
     }
     if (shouldCancel?.call() ?? false) {
-      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+      return BackgroundTurnResult.failed(
+        BackgroundFailureReason.cancelled,
+        null,
+        (outcome as AgentRunSuccess).totalUsage,
+      );
     }
     final staging = built.staging;
     var result = BackgroundResult(
       variableUpdates: staging.updates,
       variableRemovals: staging.removals,
       imagePrompts: staging.imagePrompts,
+      nextSuggestions: staging.nextSuggestions ?? const [],
+      memoryProposal: staging.memoryProposal,
       usage: (outcome as AgentRunSuccess).totalUsage,
     );
     if (runFeatures.variables) {
@@ -607,8 +728,23 @@ class Orchestrator {
       );
       if (!applied.applied) {
         return (shouldCancel?.call() ?? false)
-            ? BackgroundTurnResult.failed(BackgroundFailureReason.cancelled)
-            : BackgroundTurnResult.conflict();
+            ? BackgroundTurnResult.failed(
+                BackgroundFailureReason.cancelled,
+                null,
+                result.usage,
+              )
+            : BackgroundTurnResult.conflict(usage: result.usage);
+      }
+      // 注入值必须按提交后的最终板解析:权限拒绝的更新保留基线,执行的删除
+      // 剔除对应键,严格模式下仅生成提案的删除仍留在板上。
+      final finalBoard = {...snapshot.values, ...applied.updates};
+      for (final key in applied.removals) {
+        finalBoard.remove(key);
+      }
+      final injected = <String, String>{};
+      for (final key in staging.injectionKeys ?? const <String>[]) {
+        final value = finalBoard[key];
+        if (value != null) injected[key] = value;
       }
       // 摘要与落库结果一致:权限拒绝/超限/严格提案不得冒充"已应用"。
       result = BackgroundResult(
@@ -617,10 +753,17 @@ class Orchestrator {
         variableRemovals: applied.removals,
         variableRemovalProposals: applied.proposedRemovals,
         imagePrompts: staging.imagePrompts,
+        injectedVariables: injected,
+        nextSuggestions: staging.nextSuggestions ?? const [],
+        memoryProposal: staging.memoryProposal,
         usage: result.usage,
       );
     }
-    final prompts = staging.imagePrompts ?? const <String>[];
+    final prompts = _clampImagePrompts(
+      staging.imagePrompts ?? const <String>[],
+      imageCount,
+      source: 'agentic',
+    );
     final backend = imageBackend;
     final imageTask = backend != null && runFeatures.image && prompts.isNotEmpty
         ? _generateImage(
@@ -628,6 +771,7 @@ class Orchestrator {
             prompts,
             backend,
             replaceTargets: imageReplaceTargets,
+            shouldCancel: shouldCancel,
           )
         : null;
     return BackgroundTurnResult.applied(
@@ -695,12 +839,58 @@ class Orchestrator {
     ];
     final maxSeq = conversation.last.seq;
     // 读历史只读回调:绑定本会话 + clamp 到审计窗上界(同 _runAgenticTurn)。
-    Future<List<Message>> readHistory({int? beforeSeq, required int limit}) {
+    Future<List<Message>> readHistory({
+      int? beforeSeq,
+      int? afterSeq,
+      required int limit,
+    }) {
       final cap = (throughSeq ?? maxSeq) + 1;
+      if (afterSeq != null) {
+        if (afterSeq >= cap) return Future.value(const []);
+        return messages
+            .bySessionPageAfter(
+              sessionId,
+              afterSeq: afterSeq,
+              beforeSeq: cap,
+              limit: limit,
+            )
+            .then(strip);
+      }
       final before = beforeSeq == null || beforeSeq > cap ? cap : beforeSeq;
       return messages
           .bySessionPageBefore(sessionId, beforeSeq: before, limit: limit)
           .then(strip);
+    }
+
+    Future<List<HistorySearchHit>> searchHistory(
+      String query, {
+      int limit = 5,
+    }) async {
+      final cap = (throughSeq ?? maxSeq) + 1;
+      final hits = await messages.searchInSession(
+        sessionId,
+        query,
+        limit: limit,
+        beforeSeq: cap,
+      );
+      return [
+        for (final hit in hits)
+          (
+            seq: hit.seq,
+            role: hit.role,
+            content: ContextAssembler.withoutSkillTokens(
+              hit.content,
+              stripSkillNames,
+            ),
+          ),
+      ];
+    }
+
+    Future<Set<String>> Function()? pendingDeletions;
+    if (confirmVariableDeletions) {
+      pendingDeletions = () async => (await variables.pendingDeletions(
+        sessionId,
+      )).map((proposal) => proposal.key).toSet();
     }
 
     final built = AuditProfile.build(
@@ -710,6 +900,8 @@ class Orchestrator {
       access: snapshot.access,
       history: strip(history),
       readHistory: readHistory,
+      searchHistory: searchHistory,
+      pendingDeletions: pendingDeletions,
       temperature: temperature,
       maxTokens: maxTokens,
       reasoningLevel: reasoningLevel,
@@ -724,10 +916,18 @@ class Orchestrator {
         AgentFailureReason.backendError => BackgroundFailureReason.backendError,
         AgentFailureReason.guardrail => BackgroundFailureReason.parseFailure,
       };
-      return BackgroundTurnResult.failed(reason, outcome.detail);
+      return BackgroundTurnResult.failed(
+        reason,
+        outcome.detail,
+        outcome.totalUsage,
+      );
     }
     if (shouldCancel?.call() ?? false) {
-      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+      return BackgroundTurnResult.failed(
+        BackgroundFailureReason.cancelled,
+        null,
+        (outcome as AgentRunSuccess).totalUsage,
+      );
     }
     final staging = built.staging;
     final applied = await variables.compareAndApply(
@@ -740,8 +940,14 @@ class Orchestrator {
     );
     if (!applied.applied) {
       return (shouldCancel?.call() ?? false)
-          ? BackgroundTurnResult.failed(BackgroundFailureReason.cancelled)
-          : BackgroundTurnResult.conflict();
+          ? BackgroundTurnResult.failed(
+              BackgroundFailureReason.cancelled,
+              null,
+              (outcome as AgentRunSuccess).totalUsage,
+            )
+          : BackgroundTurnResult.conflict(
+              usage: (outcome as AgentRunSuccess).totalUsage,
+            );
     }
     // 摘要与落库结果一致:权限拒绝/超限/严格提案不得冒充"已应用"。
     final result = BackgroundResult(
@@ -751,6 +957,116 @@ class Orchestrator {
       variableRemovalProposals: applied.proposedRemovals,
       usage: (outcome as AgentRunSuccess).totalUsage,
     );
+    return BackgroundTurnResult.applied(result);
+  }
+
+  /// 单张图片的提示词修订:读取目标图片**生成时点之前**的对话窗口 + 生图指导/
+  /// 角色/记忆锚定,交给后台引擎产出一段新的英文描述。只读 + 一次 LLM 调用,
+  /// 不写库、不生图;是否重绘由用户确认后走控制器的单图替换路径。
+  ///
+  /// [messageId] 用于定位目标行并以其 [Message.seq] 截断转录 —— 老图不会被后来
+  /// 的剧情改写成另一幕。目标不存在/描述为空/方向为空时返回良性跳过。
+  Future<BackgroundTurnResult> reviseImagePrompt({
+    required int sessionId,
+    required int messageId,
+    required String currentPrompt,
+    required String direction,
+    required String model,
+    Set<String> stripSkillNames = const {},
+    CharacterCard? character,
+    List<WorldbookEntry> worldbook = const [],
+    bool characterAnchor = true,
+    bool memoryAnchor = true,
+    bool Function()? shouldCancel,
+    Future<void>? cancelSignal,
+    double temperature = LlmModelEntry.defaultTemperature,
+    int? maxTokens,
+    ReasoningLevel reasoningLevel = ReasoningLevel.off,
+  }) async {
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+    }
+    if (currentPrompt.trim().isEmpty) {
+      return BackgroundTurnResult.skipped('这张图片没有可用的原始描述');
+    }
+    if (direction.trim().isEmpty) {
+      return BackgroundTurnResult.skipped('缺少图片修改要求');
+    }
+    final allMessages = await messages.bySession(sessionId);
+    Message? target;
+    for (final m in allMessages) {
+      if (m.id == messageId) {
+        target = m;
+        break;
+      }
+    }
+    if (target == null) {
+      return BackgroundTurnResult.skipped('目标图片已不存在');
+    }
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+    }
+    final conversation = allMessages
+        .where(
+          (m) =>
+              m.isChat &&
+              m.role != 'system' &&
+              m.content.isNotEmpty &&
+              !m.isCompacted &&
+              m.id != messageId &&
+              m.seq <= target!.seq,
+        )
+        .toList();
+    final history = _trim(conversation, _imageRevisionHistoryLimit);
+    final (guideList, memoryRows) = await (
+      imageGuides.bySession(sessionId),
+      memoryAnchor
+          ? memories.bySession(sessionId)
+          : Future.value(const <Never>[]),
+    ).wait;
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+    }
+    final outcome = await engine.runImagePromptRevision(
+      model: model,
+      currentPrompt: currentPrompt.trim(),
+      direction: direction.trim(),
+      history: [
+        for (final m in history)
+          m.copyWith(
+            content: ContextAssembler.withoutSkillTokens(
+              m.content,
+              stripSkillNames,
+            ),
+          ),
+      ],
+      imageGuide: guideList.isEmpty ? null : guideList.first.content,
+      memory: memoryRows.isEmpty
+          ? null
+          : memoryRows.map((m) => m.content).join('\n'),
+      character: characterAnchor ? character : null,
+      worldbook: worldbook,
+      shouldCancel: shouldCancel,
+      cancelSignal: cancelSignal,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      reasoningLevel: reasoningLevel,
+    );
+    if (outcome is BackgroundRunFailure) {
+      return BackgroundTurnResult.failed(
+        outcome.reason,
+        outcome.detail,
+        outcome.usage,
+      );
+    }
+    final result = (outcome as BackgroundRunSuccess).result;
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(
+        BackgroundFailureReason.cancelled,
+        null,
+        result.usage,
+      );
+    }
     return BackgroundTurnResult.applied(result);
   }
 
@@ -765,6 +1081,21 @@ class Orchestrator {
   static List<String> _imagePrompts(BackgroundResult result) =>
       result.imagePrompts ??
       (result.imagePrompt == null ? const <String>[] : [result.imagePrompt!]);
+
+  /// 描述条数超过配置时截断并留诊断日志 —— legacy 对每条描述并发生图
+  /// (付费),多给的描述一律不生成。补调与 agentic 共用同一口径。
+  static List<String> _clampImagePrompts(
+    List<String> prompts,
+    int max, {
+    String? source,
+  }) {
+    if (prompts.length <= max) return prompts;
+    debugPrint(
+      '[background] ${source == null ? '' : '$source '}imagePrompts '
+      '${prompts.length} 条超过配置 $max,已截断',
+    );
+    return prompts.take(max).toList();
+  }
 
   /// 主动初始化会话长期记忆:新会话记忆为空时,用户点击「生成初始记忆」触发一次,
   /// 依据**角色卡 + 常驻(恒定)世界书**生成一份初始长期记忆并落库;之后用户可
@@ -795,11 +1126,19 @@ class Orchestrator {
       reasoningLevel: reasoningLevel,
     );
     if (outcome is BackgroundRunFailure) {
-      return BackgroundTurnResult.failed(outcome.reason, outcome.detail);
+      return BackgroundTurnResult.failed(
+        outcome.reason,
+        outcome.detail,
+        outcome.usage,
+      );
     }
     final result = (outcome as BackgroundRunSuccess).result;
     if (shouldCancel?.call() ?? false) {
-      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+      return BackgroundTurnResult.failed(
+        BackgroundFailureReason.cancelled,
+        null,
+        result.usage,
+      );
     }
     final mem = result.memoryUpdate;
     if (mem == null || mem.trim().isEmpty) {
@@ -855,11 +1194,19 @@ class Orchestrator {
       reasoningLevel: reasoningLevel,
     );
     if (outcome is BackgroundRunFailure) {
-      return BackgroundTurnResult.failed(outcome.reason, outcome.detail);
+      return BackgroundTurnResult.failed(
+        outcome.reason,
+        outcome.detail,
+        outcome.usage,
+      );
     }
     final result = (outcome as BackgroundRunSuccess).result;
     if (shouldCancel?.call() ?? false) {
-      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+      return BackgroundTurnResult.failed(
+        BackgroundFailureReason.cancelled,
+        null,
+        result.usage,
+      );
     }
     final mem = result.memoryUpdate;
     if (mem == null || mem.trim().isEmpty) {
@@ -893,15 +1240,90 @@ class Orchestrator {
       reasoningLevel: reasoningLevel,
     );
     if (outcome is BackgroundRunFailure) {
-      return BackgroundTurnResult.failed(outcome.reason, outcome.detail);
+      return BackgroundTurnResult.failed(
+        outcome.reason,
+        outcome.detail,
+        outcome.usage,
+      );
     }
     final result = (outcome as BackgroundRunSuccess).result;
     if (shouldCancel?.call() ?? false) {
-      return BackgroundTurnResult.failed(BackgroundFailureReason.cancelled);
+      return BackgroundTurnResult.failed(
+        BackgroundFailureReason.cancelled,
+        null,
+        result.usage,
+      );
     }
     final guide = result.imageGuide;
     if (guide == null || guide.trim().isEmpty) {
       return BackgroundTurnResult.skipped('初始化未产出有效生图指导,请重试');
+    }
+    await imageGuides.set(sessionId, guide);
+    return BackgroundTurnResult.applied(result);
+  }
+
+  /// 全量重生成生图指导(用户主动发起,具有所有上下文的请求):把会话全部
+  /// 活跃对话连同角色卡、常驻世界书与既有指导送入 LLM,产出新指导整段替换
+  /// 落库。用于剧情新增角色、角色外貌或世界观大幅变化后同步定妆信息。
+  /// [stripSkillNames]:转录里的 @技能名 记号剥离集合(同 [regenerateMemory])。
+  Future<BackgroundTurnResult> regenerateImageGuide({
+    required int sessionId,
+    required String model,
+    required CharacterCard character,
+    List<WorldbookEntry> worldbook = const [],
+    bool Function()? shouldCancel,
+    Future<void>? cancelSignal,
+    double temperature = LlmModelEntry.defaultTemperature,
+    int? maxTokens,
+    ReasoningLevel reasoningLevel = ReasoningLevel.off,
+    Set<String> stripSkillNames = const {},
+  }) async {
+    final (allMessages, currentGuides) = await (
+      messages.bySession(sessionId),
+      imageGuides.bySession(sessionId),
+    ).wait;
+    final currentGuide = currentGuides.map((g) => g.content).join('\n');
+    final outcome = await engine.runImageGuideRegenerate(
+      model: model,
+      character: character,
+      history: [
+        for (final m in allMessages)
+          if (m.isChat)
+            m.copyWith(
+              content: ContextAssembler.withoutSkillTokens(
+                m.content,
+                stripSkillNames,
+              ),
+            )
+          else
+            m,
+      ],
+      worldbook: worldbook,
+      currentGuide: currentGuide.isEmpty ? null : currentGuide,
+      shouldCancel: shouldCancel,
+      cancelSignal: cancelSignal,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      reasoningLevel: reasoningLevel,
+    );
+    if (outcome is BackgroundRunFailure) {
+      return BackgroundTurnResult.failed(
+        outcome.reason,
+        outcome.detail,
+        outcome.usage,
+      );
+    }
+    final result = (outcome as BackgroundRunSuccess).result;
+    if (shouldCancel?.call() ?? false) {
+      return BackgroundTurnResult.failed(
+        BackgroundFailureReason.cancelled,
+        null,
+        result.usage,
+      );
+    }
+    final guide = result.imageGuide;
+    if (guide == null || guide.trim().isEmpty) {
+      return BackgroundTurnResult.skipped('重生成未产出有效生图指导,请重试');
     }
     await imageGuides.set(sessionId, guide);
     return BackgroundTurnResult.applied(result);
@@ -921,51 +1343,120 @@ class Orchestrator {
     List<String> prompts,
     ImageBackend backend, {
     List<ImageReplaceTarget> replaceTargets = const [],
+    bool Function()? shouldCancel,
   }) async {
+    bool cancelled() => shouldCancel?.call() ?? false;
     final stopwatch = Stopwatch()..start();
+    // 切会话/历史改写会取消令牌:已发出的生成请求无法召回,但可以在下载与
+    // 落库前丢弃,避免旧剧情图片被追加到已重写的会话尾部。
+    if (cancelled()) return;
     // 先并行收集所有描述的生图结果:单描述失败只丢该张,不拖垮其余。
     // 失败原因随结果带回,全部失败时进状态摘要(此前只知道「失败」)。
     final attempts = await Future.wait([
       for (final p in prompts) _generateOneSafe(p, backend),
     ]);
+    if (cancelled()) return;
     final elapsedGen = stopwatch.elapsedMilliseconds;
     final results = [for (final a in attempts) a.result];
     var failureDetail = attempts
         .map((a) => a.error)
         .firstWhere((e) => e != null, orElse: () => null);
-    // 每张(每条链接)要落的一条消息:base64 待下载填充,URL 恒保留(下载失败
-    // 回退 URL 渲染)。同一条描述返回多张时逐张保留该描述(重新生成按它重绘)。
-    // `source` 记录来源描述下标,重跑时据此对齐替换目标(见下方落库循环)。
-    final entries = <({int source, String? base64, String? url, String prompt})>[
-      for (var i = 0; i < results.length; i++)
-        for (final image in results[i].images)
-          (source: i, base64: image.base64, url: image.url, prompt: prompts[i]),
-    ];
-    // 并行下载所有字节:多张时墙钟 = 最慢的那一张,不再串行叠加 —— 每张下载
-    // 10~20s 时,两张串行要多等一整张,并行只在最后一张等齐。
+    // 每张(每条链接)要落的一条消息:先还原/下载字节并资产化,URL 恒保留
+    // (仅下载失败时回退 URL 渲染)。`source` 记录来源描述下标,重跑时据此
+    // 对齐替换目标;同一条描述返回多张时逐张保留该描述。
+    final entries =
+        <
+          ({
+            int source,
+            String? base64,
+            String? hash,
+            String? url,
+            String prompt,
+            String? error,
+          })
+        >[
+          for (var i = 0; i < results.length; i++)
+            for (final image in results[i].images)
+              (
+                source: i,
+                base64: image.base64,
+                hash: null,
+                url: image.url,
+                prompt: prompts[i],
+                error: null,
+              ),
+        ];
+    // 并行下载与资产化:putBytes 先落零引用资产,随后业务事务才获取引用;
+    // 后续 append/replace 失败时留下的零引用文件由延迟 GC 回收。
     var downloadMs = List<int>.filled(entries.length, 0);
     await Future.wait([
       for (var i = 0; i < entries.length; i++)
         () async {
+          if (cancelled()) {
+            entries[i] = (
+              source: entries[i].source,
+              base64: null,
+              hash: null,
+              url: entries[i].url,
+              prompt: entries[i].prompt,
+              error: '已取消',
+            );
+            return;
+          }
           final sw = Stopwatch()..start();
-          var localBase64 = entries[i].base64;
-          if (localBase64 == null && entries[i].url != null) {
-            localBase64 = await downloadImageBase64(entries[i].url!);
+          final entry = entries[i];
+          try {
+            final bytes = entry.base64 != null
+                ? safeBase64Decode(entry.base64)
+                : entry.url != null
+                ? await downloadImageBytes(entry.url!)
+                : null;
+            if (entry.base64 != null && bytes == null) {
+              throw const FormatException('插件返回了无效 base64 图片');
+            }
+            final ref = bytes == null
+                ? null
+                // URL 来源保留原字节:丢失后按哈希修复时重新下载的仍是原图;
+                // 压缩会改变哈希,让修复永远失败。base64 无再取路径,可压缩。
+                : await messages.db.images.putBytes(
+                    bytes,
+                    compress: entry.base64 != null,
+                  );
+            entries[i] = (
+              source: entry.source,
+              base64: null,
+              hash: ref?.hash,
+              url: entry.url,
+              prompt: entry.prompt,
+              error: null,
+            );
+          } catch (e) {
+            entries[i] = (
+              source: entry.source,
+              base64: null,
+              hash: null,
+              url: entry.url,
+              prompt: entry.prompt,
+              error: _shortError(e),
+            );
           }
           downloadMs[i] = sw.elapsedMilliseconds;
-          entries[i] = (
-            source: entries[i].source,
-            base64: localBase64,
-            url: entries[i].url,
-            prompt: entries[i].prompt,
-          );
         }(),
     ]);
     var anyPlaced = false;
     for (var i = 0; i < entries.length; i++) {
+      if (cancelled()) return;
       final entry = entries[i];
       final sw = Stopwatch()..start();
       try {
+        if (entry.error != null) {
+          failureDetail ??= entry.error;
+          continue;
+        }
+        if (entry.hash == null && (entry.url == null || entry.url!.isEmpty)) {
+          failureDetail ??= '图片下载或资产化失败';
+          continue;
+        }
         // 重跑:原地替换上一轮为同一轮生成的图片(条件更新:id + 原描述 +
         // 仍有图)。替换目标与描述一一对应时按**来源描述**取目标 —— 某条描述
         // 本次生成失败不产出条目,按落库顺序取会让后面的图前移,覆盖到失败
@@ -979,7 +1470,7 @@ class Orchestrator {
         if (target != null) {
           final replaced = await messages.replaceImage(
             target.messageId,
-            imageBase64: entry.base64,
+            imageHash: entry.hash,
             imageUrl: entry.url,
             expectedPrompt: target.expectedPrompt,
             newImagePrompt: entry.prompt,
@@ -988,7 +1479,7 @@ class Orchestrator {
             _log(
               '#${i + 1}/${entries.length} 下载 ${downloadMs[i]}ms,原地替换消息 '
               '${target.messageId} 用时 ${sw.elapsedMilliseconds}ms,'
-              'base64 ${entry.base64?.length ?? 0} 字符',
+              'asset ${entry.hash ?? '-'}',
             );
             anyPlaced = true;
             onImagePlaced?.call((
@@ -999,19 +1490,17 @@ class Orchestrator {
             continue;
           }
         }
-        // 云端图只存 URL 时,重启/重建会反复重新拉取 —— 生成时立刻把字节
-        // 下载成 base64 随消息落库,气泡渲染永远走本地;下载失败回退 URL 渲染。
         final appended = await messages.append(
           sessionId: sessionId,
           role: 'assistant',
           content: '',
-          imageBase64: entry.base64,
+          imageHash: entry.hash,
           imageUrl: entry.url,
           imagePrompt: entry.prompt,
         );
         _log(
           '#${i + 1}/${entries.length} 下载 ${downloadMs[i]}ms,落库 ${sw.elapsedMilliseconds}ms,'
-          'base64 ${entry.base64?.length ?? 0} 字符${entry.base64 == null ? '(下载失败,回退 URL 渲染)' : ''}',
+          'asset ${entry.hash ?? '-'}${entry.hash == null ? '(下载失败,回退 URL 渲染)' : ''}',
         );
         anyPlaced = true;
         onImagePlaced?.call((
@@ -1056,6 +1545,10 @@ class Orchestrator {
     if (limit <= 0 || msgs.length <= limit) return msgs;
     return msgs.sublist(msgs.length - limit);
   }
+
+  /// 单图提示词修订的近期场景窗条数(与 image 轮 `_trim(recent, 6)` 一致):
+  /// 只取目标图片 seq 之前的最新几轮,防止老图吃到后来剧情。
+  static const int _imageRevisionHistoryLimit = 6;
 
   /// 每批送给后台的变量增量消息条数上限;剩余部分由控制器下一轮继续处理,
   /// 避免单次请求被整段长对话撑爆。

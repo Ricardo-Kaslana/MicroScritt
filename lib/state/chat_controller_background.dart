@@ -125,6 +125,25 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     );
   }
 
+  /// 采纳后台 agent 的记忆提议:只写入记忆库,不直接改上下文 —— 第 0 条记忆
+  /// 换新仍需用户在状态面板「应用到上下文」显式确认(缓存稳定语义)。
+  /// 提议是纯内存态,采纳或忽略后清除。
+  Future<void> acceptMemoryProposal() async {
+    final proposal = state.memoryProposal?.trim();
+    final sessionId = state.sessionId;
+    if (proposal == null || proposal.isEmpty || sessionId == null) return;
+    await ref.read(memoryRepositoryProvider).set(sessionId, proposal);
+    if (!ref.mounted) return;
+    state = state.copyWith(memoryProposal: null);
+    ref.invalidate(memoriesProvider(sessionId));
+  }
+
+  /// 忽略后台记忆提议(纯内存态,不写库)。
+  void dismissMemoryProposal() {
+    if (state.memoryProposal == null) return;
+    state = state.copyWith(memoryProposal: null);
+  }
+
   /// 主动初始化会话记忆:新会话记忆为空时,用户点击「生成初始记忆」触发一次,依据
   /// **角色卡 + 常驻(恒定)世界书**生成一份初始长期记忆并落库。记忆由用户主动
   /// 维护:初始化/手动编辑/全量重生成([regenerateMemory])三途,后台 agent 不再
@@ -177,7 +196,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     );
     backgroundTask = _runMemoryAction(
       sessionId: sessionId,
-      runningSummary: '正在初始化记忆…',
+      actionLabel: '记忆初始化',
+      successSummary: '记忆已初始化',
       token: token,
       action: (orchestrator, runtime) => orchestrator.initializeMemory(
         sessionId: sessionId,
@@ -224,7 +244,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     );
     backgroundTask = _runMemoryAction(
       sessionId: sessionId,
-      runningSummary: '正在依据全部对话重生成记忆…',
+      actionLabel: '记忆重生成',
+      successSummary: '记忆已重生成,下次输入将以差异通知送达',
       token: token,
       action: (orchestrator, runtime) async => orchestrator.regenerateMemory(
         sessionId: sessionId,
@@ -288,7 +309,8 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     );
     backgroundTask = _runMemoryAction(
       sessionId: sessionId,
-      runningSummary: '正在初始化生图指导…',
+      actionLabel: '生图指导初始化',
+      successSummary: '生图指导已初始化,后台生图将遵循该指导',
       token: token,
       isImageGuide: true,
       action: (orchestrator, runtime) => orchestrator.initializeImageGuide(
@@ -306,15 +328,67 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     unawaited(backgroundTask!);
   }
 
+  /// 全量重生成生图指导(用户主动发起,具有所有上下文的请求):把会话全部
+  /// 活跃对话连同角色卡、常驻世界书与既有指导送入 LLM,产出覆盖全程的新
+  /// 指导整段替换落库。用于剧情新增角色、角色外貌或世界观大幅变化后同步
+  /// 定妆信息,免去手工逐条补 tag。指导落库即生效(无冻结语义)。
+  Future<void> regenerateImageGuide() async {
+    final sessionId = state.sessionId;
+    final character = state.character;
+    if (sessionId == null || character == null) return;
+    if (ref.read(backendConfigProvider) == null ||
+        ref.read(backendProvider) == null) {
+      return;
+    }
+    if (_busy || _backgroundInFlight) {
+      state = state.copyWith(
+        backgroundStatus: BackgroundStatus.skipped,
+        backgroundSummary: '主写或后台维护正在运行,生图指导重生成已跳过',
+      );
+      return;
+    }
+    _backgroundInFlight = true;
+    // 本轮令牌:此刻无任何在飞后台轮(串行化已保证),换新实例并捕获;
+    // 闭包与结果判定都认这个实例。
+    _backgroundToken = InterruptToken();
+    final token = _backgroundToken;
+    state = state.copyWith(
+      backgroundStatus: BackgroundStatus.running,
+      backgroundSummary: '正在依据全部对话重生成生图指导…',
+    );
+    backgroundTask = _runMemoryAction(
+      sessionId: sessionId,
+      actionLabel: '生图指导重生成',
+      successSummary: '生图指导已重生成,后台生图将遵循新指导',
+      token: token,
+      isImageGuide: true,
+      action: (orchestrator, runtime) async =>
+          orchestrator.regenerateImageGuide(
+            sessionId: sessionId,
+            model: runtime.model,
+            character: character,
+            worldbook: state.worldbook,
+            temperature: runtime.temperature,
+            maxTokens: runtime.maxTokens,
+            reasoningLevel: runtime.reasoningLevel,
+            shouldCancel: () => token.cancelled,
+            cancelSignal: token.whenCancelled,
+            stripSkillNames: await enabledSkillNames(),
+          ),
+    );
+    unawaited(backgroundTask!);
+  }
+
   /// 记忆/生图指导主动轮的公共执行体(独立 future,与自动后台维护同构地解耦)。
   /// [action] 在解析出运行时后执行;[isImageGuide] 区分落库后的失效对象
   /// (记忆失效 memoriesProvider + 重算上下文;指导失效 imageGuideProvider)。
-  /// [runningSummary] 仅用于异常兜底文案。[token] 是调用方捕获的本轮中断
-  /// 令牌:结果判定只认它,不读控制器字段 —— 期间并发的其它轮换发不影响本轮
-  /// 的"已中断"判定。
+  /// [actionLabel] 用于中断/跳过/失败文案,[successSummary] 是成功落库后的
+  /// 摘要;[token] 是调用方捕获的本轮中断令牌:结果判定只认它,不读控制器
+  /// 字段 —— 期间并发的其它轮换发不影响本轮的"已中断"判定。
   Future<void> _runMemoryAction({
     required int sessionId,
-    required String runningSummary,
+    required String actionLabel,
+    required String successSummary,
     required InterruptToken token,
     required Future<BackgroundTurnResult> Function(
       Orchestrator orchestrator,
@@ -333,14 +407,18 @@ abstract class ChatControllerBackground extends ChatControllerSession {
   }) async {
     final epoch = _backgroundEpoch;
     final wake = _backgroundWake;
-    final actionLabel = isImageGuide
-        ? '生图指导初始化'
-        : (runningSummary.contains('重生成') ? '记忆重生成' : '记忆初始化');
     try {
       final runtime = await _resolveBackgroundRuntime();
-      if (runtime == null ||
-          token.cancelled ||
-          !_ownsBackground(sessionId, epoch, token)) {
+      if (token.cancelled || !_ownsBackground(sessionId, epoch, token)) {
+        return;
+      }
+      if (runtime == null) {
+        // 早退也要落终态:否则状态面板/灵动岛会永久显示「维护中」,
+        // 且此时已无在飞轮可供 interrupt() 收敛。
+        state = state.copyWith(
+          backgroundStatus: BackgroundStatus.skipped,
+          backgroundSummary: '未配置 LLM 服务，$actionLabel未执行',
+        );
         return;
       }
 
@@ -369,10 +447,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
             kind: UsageKind.background,
             config: runtime.config,
             usage: bgResult.usage,
-            reported:
-                bgResult.usage.inputTokens > 0 ||
-                bgResult.usage.outputTokens > 0 ||
-                bgResult.usage.cachedInputTokens > 0,
+            reported: bgResult.usage.hasAny,
           ),
         );
       } else if (!turn.skipped && !token.cancelled) {
@@ -392,9 +467,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
           backgroundOutputTokens: bgResult.usage.outputTokens,
           backgroundCachedInputTokens: bgResult.usage.cachedInputTokens,
           backgroundStatus: BackgroundStatus.succeeded,
-          backgroundSummary: isImageGuide
-              ? '生图指导已初始化,后台生图将遵循该指导'
-              : (actionLabel == '记忆重生成' ? '记忆已重生成,下次输入将以差异通知送达' : '记忆已初始化'),
+          backgroundSummary: successSummary,
         );
         if (ref.mounted) {
           if (isImageGuide) {
@@ -444,6 +517,18 @@ abstract class ChatControllerBackground extends ChatControllerSession {
           BackgroundFailureReason.cancelled => '$actionLabel已中断',
           null => '$actionLabel未产出可用结果',
         };
+        // 失败/取消前可能已消耗 token:按实际用量入账,不记零。
+        if (turn.usage.hasAny) {
+          unawaited(
+            _recordUsage(
+              sessionId: sessionId,
+              kind: UsageKind.background,
+              config: runtime.config,
+              usage: turn.usage,
+              reported: true,
+            ),
+          );
+        }
         state = state.copyWith(
           backgroundStatus: BackgroundStatus.failed,
           backgroundSummary: _withFailureDetail(base, turn.failureDetail),
@@ -513,7 +598,14 @@ abstract class ChatControllerBackground extends ChatControllerSession {
         _backgroundCursorSeq = rows.isEmpty ? -1 : rows[start].seq - 1;
       }
       final runtime = await _resolveBackgroundRuntime();
-      if (runtime == null || cancelled()) return;
+      if (token.cancelled || !_ownsBackground(sessionId, epoch, token)) return;
+      if (runtime == null) {
+        state = state.copyWith(
+          backgroundStatus: BackgroundStatus.skipped,
+          backgroundSummary: '未配置 LLM 服务，后台维护未执行',
+        );
+        return;
+      }
       for (var round = 0; round < _maxMaintenanceRounds; round++) {
         if (cancelled() || !ref.read(backgroundEnabledProvider)) break;
         final wake = _backgroundWake;
@@ -594,6 +686,12 @@ abstract class ChatControllerBackground extends ChatControllerSession {
               ),
               stripSkillNames: stripNames,
               mode: mode,
+              variableInjection: ref
+                  .read(appSettingsProvider)
+                  .backgroundVariableInjection,
+              nextSuggestions: ref
+                  .read(appSettingsProvider)
+                  .backgroundNextSuggestions,
               onAgentStep: (e) {
                 if (!_ownsBackground(sessionId, epoch, token)) return;
                 unawaited(
@@ -631,10 +729,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
                 kind: UsageKind.background,
                 config: runtime.config,
                 usage: result.usage,
-                reported:
-                    result.usage.inputTokens > 0 ||
-                    result.usage.outputTokens > 0 ||
-                    result.usage.cachedInputTokens > 0,
+                reported: result.usage.hasAny,
               ),
             );
           }
@@ -652,6 +747,31 @@ abstract class ChatControllerBackground extends ChatControllerSession {
           }
           _backgroundPending = _backgroundPending || turn.hasMoreVariables;
           _recordMaintenanceWindow(turn, roundImages);
+          if (mode == BackgroundMode.agentic) {
+            final injectionOn =
+                features.variables &&
+                ref.read(appSettingsProvider).backgroundVariableInjection;
+            _pendingVariableInjection =
+                injectionOn && result.injectedVariables.isNotEmpty
+                ? Map.unmodifiable(result.injectedVariables)
+                : null;
+          }
+          // 建议只在最终轮发布:多轮未完、又有新对话、用户已在生成中时不弹,
+          // 避免陈旧批次;新批覆盖旧批,空结果同样清掉旧批。
+          final publishSuggestions =
+              mode == BackgroundMode.agentic &&
+              ref.read(appSettingsProvider).backgroundNextSuggestions &&
+              !turn.hasMoreVariables &&
+              !_backgroundPending &&
+              wake == _backgroundWake &&
+              !state.streaming;
+          // 记忆提议同为最终轮发布:mid-batch 的提议基于不完整批次,不发布;
+          // 每次成功轮替换旧提议(本轮未提 = 清掉过期的待审阅提议)。
+          final publishMemoryProposal =
+              mode == BackgroundMode.agentic &&
+              !turn.hasMoreVariables &&
+              !_backgroundPending &&
+              wake == _backgroundWake;
           state = state.copyWith(
             backgroundInputTokens: inputTokens,
             backgroundOutputTokens: outputTokens,
@@ -663,36 +783,68 @@ abstract class ChatControllerBackground extends ChatControllerSession {
               replacedText: '图片已生成',
             ),
             backgroundVariableStats: _variableStats(result),
+            nextSuggestions: publishSuggestions
+                ? result.nextSuggestions
+                : const [],
+            memoryProposal: publishMemoryProposal
+                ? result.memoryProposal
+                : null,
           );
         } else if (token.cancelled) {
           _backgroundPending = false;
           _releaseImageRecord(roundImages);
-          state = state.copyWith(
-            backgroundStatus: BackgroundStatus.interrupted,
-            backgroundSummary: '后台维护已中断',
-          );
-          break;
-        } else if (turn.skipped) {
-          _backgroundPending = turn.variableConflict || _backgroundPending;
-          _releaseImageRecord(roundImages);
-          state = state.copyWith(
-            backgroundStatus: BackgroundStatus.skipped,
-            backgroundSummary: turn.skippedReason,
-          );
-          break;
-        } else {
-          _backgroundPending = true;
-          _releaseImageRecord(roundImages);
-          // 后端报错/解析失败都已真实发起请求:计请求次数,无可用用量。
-          // agentic 的失败/取消步已由 onAgentStep 计次,不另写零行。
+          // 取消前的请求同样可能已计费(含 partial usage);agentic 的逐步
+          // 入账已覆盖,legacy 这里补一条,避免取消轮从统计里消失。
           if (mode != BackgroundMode.agentic) {
             unawaited(
               _recordUsage(
                 sessionId: sessionId,
                 kind: UsageKind.background,
                 config: runtime.config,
-                usage: const TokenUsage(),
-                reported: false,
+                usage: turn.usage,
+                reported: turn.usage.hasAny,
+              ),
+            );
+          }
+          state = state.copyWith(
+            backgroundStatus: BackgroundStatus.interrupted,
+            backgroundSummary: '后台维护已中断',
+            nextSuggestions: const [],
+          );
+          break;
+        } else if (turn.skipped) {
+          _backgroundPending = turn.variableConflict || _backgroundPending;
+          _releaseImageRecord(roundImages);
+          if (mode != BackgroundMode.agentic && turn.usage.hasAny) {
+            unawaited(
+              _recordUsage(
+                sessionId: sessionId,
+                kind: UsageKind.background,
+                config: runtime.config,
+                usage: turn.usage,
+                reported: true,
+              ),
+            );
+          }
+          state = state.copyWith(
+            backgroundStatus: BackgroundStatus.skipped,
+            backgroundSummary: turn.skippedReason,
+            nextSuggestions: const [],
+          );
+          break;
+        } else {
+          _backgroundPending = true;
+          _releaseImageRecord(roundImages);
+          // 后端报错/解析失败都已真实发起请求:计请求次数并带回已计量用量。
+          // agentic 的失败/取消步已由 onAgentStep 计次,不另写轮级行。
+          if (mode != BackgroundMode.agentic) {
+            unawaited(
+              _recordUsage(
+                sessionId: sessionId,
+                kind: UsageKind.background,
+                config: runtime.config,
+                usage: turn.usage,
+                reported: turn.usage.hasAny,
               ),
             );
           }
@@ -705,6 +857,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
           state = state.copyWith(
             backgroundStatus: BackgroundStatus.failed,
             backgroundSummary: _withFailureDetail(base, turn.failureDetail),
+            nextSuggestions: const [],
           );
           if (wake == _backgroundWake) break;
         }
@@ -723,14 +876,21 @@ abstract class ChatControllerBackground extends ChatControllerSession {
             ? BackgroundStatus.interrupted
             : BackgroundStatus.failed,
         backgroundSummary: token.cancelled ? '后台维护已中断' : '后台维护异常,已安全跳过',
+        nextSuggestions: const [],
       );
     } finally {
       if (_ownsBackground(sessionId, epoch, token)) {
-        if (token.cancelled &&
-            state.backgroundStatus == BackgroundStatus.running) {
+        if (state.backgroundStatus == BackgroundStatus.running) {
+          // 早退/空转(后台关闭、无可维护内容、target 缺失)也必须收敛,
+          // 不能把 running 留给 UI 当幽灵。
           state = state.copyWith(
-            backgroundStatus: BackgroundStatus.interrupted,
-            backgroundSummary: '后台维护已中断',
+            backgroundStatus: token.cancelled
+                ? BackgroundStatus.interrupted
+                : BackgroundStatus.skipped,
+            backgroundSummary: token.cancelled
+                ? '后台维护已中断'
+                : '后台维护未运行:后台已关闭或暂无可维护内容',
+            nextSuggestions: const [],
           );
         }
         _backgroundInFlight = false;
@@ -890,10 +1050,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
         _auditCounter = 0;
         state = state.copyWith(
           backgroundStatus: BackgroundStatus.failed,
-          backgroundSummary: _withFailureDetail(
-            '审计失败,已跳过',
-            turn.failureDetail,
-          ),
+          backgroundSummary: _withFailureDetail('审计失败,已跳过', turn.failureDetail),
         );
       }
     } catch (_) {
@@ -927,6 +1084,238 @@ abstract class ChatControllerBackground extends ChatControllerSession {
         // 让位交接:审计期间来了新对话(pending=true,含让位 cancel 的情形)
         // → 补跑 delta 维护。delta 永远优先。
         if (_backgroundPending) {
+          _startPendingMaintenance();
+        }
+      }
+    }
+  }
+
+  /// 单张图片提示词改写第一步:按用户方向让后台引擎产出一段新的图片描述,
+  /// **不生成图片、不写消息**。返回的 [basePrompt] 是生成建议时的旧描述原文,
+  /// 用户确认后原样用作 `replaceImage` 的期望值,期间描述被改/图被删时安全失败。
+  ///
+  /// 与后台维护共用 [_backgroundInFlight] 单槽与令牌换发语义;占用期间用户
+  /// 可经 [interrupt] 停止(后台状态为 running),结束后有新对话则交回自动维护。
+  Future<({String? prompt, String? basePrompt, String? error})>
+  suggestImagePromptRevision(int messageId, String direction) async {
+    final sessionId = state.sessionId;
+    if (sessionId == null) {
+      return (prompt: null, basePrompt: null, error: '尚未加载会话');
+    }
+    if (state.streaming || _busy) {
+      return (prompt: null, basePrompt: null, error: '正在处理中,请稍候再修改图片描述');
+    }
+    if (_backgroundInFlight) {
+      return (prompt: null, basePrompt: null, error: '后台维护正在运行,请稍候再修改图片描述');
+    }
+    if (_backgroundImageTask != null) {
+      return (prompt: null, basePrompt: null, error: '上一张图片仍在生成,请稍候再修改图片描述');
+    }
+    if (state.regeneratingImageId != null) {
+      return (prompt: null, basePrompt: null, error: '正在重新生成另一张图片,请稍候');
+    }
+    if (ref.read(backendConfigProvider) == null ||
+        ref.read(backendProvider) == null) {
+      return (prompt: null, basePrompt: null, error: '后端未配置,无法修改图片描述');
+    }
+    final trimmedDirection = direction.trim();
+    if (trimmedDirection.isEmpty) {
+      return (prompt: null, basePrompt: null, error: '请先描述希望如何修改这张图片');
+    }
+    final target = state.messages
+        .where((m) => m.id == messageId && m.sessionId == sessionId)
+        .firstOrNull;
+    if (target == null) {
+      return (prompt: null, basePrompt: null, error: '目标图片已不存在');
+    }
+    final repo = ref.read(messageRepositoryProvider);
+    final storedPrompt = await repo.imagePromptFor(messageId);
+    if (!ref.mounted || state.sessionId != sessionId) {
+      return (prompt: null, basePrompt: null, error: null);
+    }
+    final basePrompt = storedPrompt ?? '';
+    if (basePrompt.trim().isEmpty) {
+      return (prompt: null, basePrompt: null, error: '这张图片没有可用的原始描述,无法修改');
+    }
+    // 读旧描述的 await 期间可能已有别的后台轮插入:再核一次门控。
+    if (_backgroundInFlight) {
+      return (prompt: null, basePrompt: null, error: '后台维护正在运行,请稍候再修改图片描述');
+    }
+    if (state.regeneratingImageId != null) {
+      return (prompt: null, basePrompt: null, error: '正在重新生成另一张图片,请稍候');
+    }
+
+    final epoch = _backgroundEpoch;
+    final wake = _backgroundWake;
+    _backgroundInFlight = true;
+    _backgroundToken = InterruptToken();
+    final token = _backgroundToken;
+    state = state.copyWith(
+      backgroundStatus: BackgroundStatus.running,
+      backgroundSummary: '正在按要求改写图片描述…',
+      backgroundVariableStats: null,
+      regeneratingImageId: messageId,
+    );
+    try {
+      final runtime = await _resolveBackgroundRuntime();
+      if (!_ownsBackground(sessionId, epoch, token)) {
+        return (prompt: null, basePrompt: null, error: null);
+      }
+      if (runtime == null) {
+        state = state.copyWith(
+          backgroundStatus: BackgroundStatus.failed,
+          backgroundSummary: '后台运行时不可用,图片描述修改已跳过',
+        );
+        return (prompt: null, basePrompt: null, error: '后台运行时不可用');
+      }
+      final stripNames = await enabledSkillNames();
+      if (token.cancelled || !_ownsBackground(sessionId, epoch, token)) {
+        return (prompt: null, basePrompt: null, error: null);
+      }
+      final turn =
+          await Orchestrator(
+            BackgroundEngine(runtime.backend),
+            ref.read(variableRepositoryProvider),
+            ref.read(memoryRepositoryProvider),
+            ref.read(messageRepositoryProvider),
+            ref.read(imageGuideRepositoryProvider),
+          ).reviseImagePrompt(
+            sessionId: sessionId,
+            messageId: messageId,
+            currentPrompt: basePrompt,
+            direction: trimmedDirection,
+            model: runtime.model,
+            temperature: runtime.temperature,
+            maxTokens: runtime.maxTokens,
+            reasoningLevel: runtime.reasoningLevel,
+            character: state.character,
+            worldbook: state.worldbook,
+            characterAnchor: ref
+                .read(appSettingsProvider)
+                .backgroundCharacterAnchor,
+            memoryAnchor: ref.read(appSettingsProvider).backgroundMemoryAnchor,
+            stripSkillNames: stripNames,
+            shouldCancel: () =>
+                token.cancelled || !_ownsBackground(sessionId, epoch, token),
+            cancelSignal: token.whenCancelled,
+          );
+      if (!_ownsBackground(sessionId, epoch, token)) {
+        return (prompt: null, basePrompt: null, error: null);
+      }
+      final result = turn.result;
+      if (result != null) {
+        final revised = result.imagePrompt?.trim() ?? '';
+        if (revised.isEmpty) {
+          state = state.copyWith(
+            backgroundStatus: BackgroundStatus.failed,
+            backgroundSummary: '图片描述修改未产出可用结果',
+          );
+          return (prompt: null, basePrompt: null, error: '图片描述修改未产出可用结果');
+        }
+        unawaited(
+          _recordUsage(
+            sessionId: sessionId,
+            kind: UsageKind.background,
+            config: runtime.config,
+            usage: result.usage,
+            reported: result.usage.hasAny,
+          ),
+        );
+        state = state.copyWith(
+          backgroundInputTokens:
+              state.backgroundInputTokens + result.usage.inputTokens,
+          backgroundOutputTokens:
+              state.backgroundOutputTokens + result.usage.outputTokens,
+          backgroundCachedInputTokens:
+              state.backgroundCachedInputTokens +
+              result.usage.cachedInputTokens,
+          backgroundStatus: BackgroundStatus.succeeded,
+          backgroundSummary: _kImagePromptReadySummary,
+          backgroundVariableStats: null,
+        );
+        return (prompt: revised, basePrompt: basePrompt, error: null);
+      }
+      if (token.cancelled) {
+        state = state.copyWith(
+          backgroundStatus: BackgroundStatus.interrupted,
+          backgroundSummary: '图片描述修改已中断',
+        );
+        return (prompt: null, basePrompt: null, error: null);
+      }
+      if (turn.skipped) {
+        state = state.copyWith(
+          backgroundStatus: BackgroundStatus.skipped,
+          backgroundSummary: turn.skippedReason.isEmpty
+              ? '图片描述修改未产出内容'
+              : turn.skippedReason,
+        );
+        return (
+          prompt: null,
+          basePrompt: null,
+          error: turn.skippedReason.isEmpty
+              ? '图片描述修改未产出内容'
+              : turn.skippedReason,
+        );
+      }
+      // 失败轮已真实发起请求:计一次请求次数(无可用用量),与主动记忆轮同口径。
+      if (turn.failureReason != BackgroundFailureReason.cancelled) {
+        unawaited(
+          _recordUsage(
+            sessionId: sessionId,
+            kind: UsageKind.background,
+            config: runtime.config,
+            usage: const TokenUsage(),
+            reported: false,
+          ),
+        );
+      }
+      final base = switch (turn.failureReason) {
+        BackgroundFailureReason.backendError => '图片描述修改调用出错,请重试',
+        BackgroundFailureReason.parseFailure => '图片描述修改返回解析失败,请重试',
+        BackgroundFailureReason.cancelled => '图片描述修改已中断',
+        null => '图片描述修改未产出可用结果',
+      };
+      final detail = _withFailureDetail(base, turn.failureDetail);
+      state = state.copyWith(
+        backgroundStatus: BackgroundStatus.failed,
+        backgroundSummary: detail,
+      );
+      return (prompt: null, basePrompt: null, error: detail);
+    } catch (_) {
+      if (!_ownsBackground(sessionId, epoch, token)) {
+        return (prompt: null, basePrompt: null, error: null);
+      }
+      if (token.cancelled) {
+        state = state.copyWith(
+          backgroundStatus: BackgroundStatus.interrupted,
+          backgroundSummary: '图片描述修改已中断',
+        );
+        return (prompt: null, basePrompt: null, error: null);
+      }
+      state = state.copyWith(
+        backgroundStatus: BackgroundStatus.failed,
+        backgroundSummary: '图片描述修改异常,已安全跳过',
+      );
+      return (prompt: null, basePrompt: null, error: '图片描述修改异常,已安全跳过');
+    } finally {
+      // 即使 ownership 已失效(历史改写/切会话),也要摘掉本消息的转圈;
+      // 仅当标记仍指向本消息时清理,不误伤其后新发起的另一张图。
+      if (ref.mounted && state.regeneratingImageId == messageId) {
+        state = state.copyWith(regeneratingImageId: null);
+      }
+      if (_ownsBackground(sessionId, epoch, token)) {
+        if (token.cancelled &&
+            state.backgroundStatus == BackgroundStatus.running) {
+          state = state.copyWith(
+            backgroundStatus: BackgroundStatus.interrupted,
+            backgroundSummary: '图片描述修改已中断',
+          );
+        }
+        _backgroundInFlight = false;
+        await _persistTokenUsage();
+        if (!token.cancelled &&
+            wake != _backgroundWake &&
+            _ownsBackground(sessionId, epoch, token)) {
           _startPendingMaintenance();
         }
       }
@@ -1047,6 +1436,12 @@ abstract class ChatControllerBackground extends ChatControllerSession {
         token.cancelled || !_ownsBackground(sessionId, epoch, token);
     final wake = _backgroundWake;
     final roundImages = <BackgroundImagePlacement>[];
+    // 重跑是对同一窗口的完整重评估:旧批注入/建议在入口作废,成功后再回填,
+    // 避免重跑改变变量后仍用上一批快照。
+    _pendingVariableInjection = null;
+    if (ref.mounted && state.nextSuggestions.isNotEmpty) {
+      state = state.copyWith(nextSuggestions: const []);
+    }
 
     try {
       final runtime = await _resolveBackgroundRuntime();
@@ -1115,6 +1510,12 @@ abstract class ChatControllerBackground extends ChatControllerSession {
             imageReplaceTargets: features.image ? replaceTargets : const [],
             rerunContext: rerunContext,
             mode: mode,
+            variableInjection: ref
+                .read(appSettingsProvider)
+                .backgroundVariableInjection,
+            nextSuggestions: ref
+                .read(appSettingsProvider)
+                .backgroundNextSuggestions,
             onAgentStep: (e) {
               if (!_ownsBackground(sessionId, epoch, token)) return;
               unawaited(
@@ -1147,10 +1548,7 @@ abstract class ChatControllerBackground extends ChatControllerSession {
               kind: UsageKind.background,
               config: runtime.config,
               usage: result.usage,
-              reported:
-                  result.usage.inputTokens > 0 ||
-                  result.usage.outputTokens > 0 ||
-                  result.usage.cachedInputTokens > 0,
+              reported: result.usage.hasAny,
             ),
           );
         }
@@ -1160,6 +1558,20 @@ abstract class ChatControllerBackground extends ChatControllerSession {
           _lastMaintenanceThroughSeq = turn.processedThroughSeq;
         }
         _recordMaintenanceImages(turn, roundImages);
+        if (mode == BackgroundMode.agentic) {
+          final injectionOn =
+              features.variables &&
+              ref.read(appSettingsProvider).backgroundVariableInjection;
+          _pendingVariableInjection =
+              injectionOn && result.injectedVariables.isNotEmpty
+              ? Map.unmodifiable(result.injectedVariables)
+              : null;
+        }
+        final publishSuggestions =
+            mode == BackgroundMode.agentic &&
+            ref.read(appSettingsProvider).backgroundNextSuggestions &&
+            wake == _backgroundWake &&
+            !state.streaming;
         state = state.copyWith(
           // 重跑也是真实后台调用:用量累加进后台桶(不是覆盖,与自动维护一致)。
           backgroundInputTokens:
@@ -1176,6 +1588,9 @@ abstract class ChatControllerBackground extends ChatControllerSession {
             replacedText: '图片已重绘',
           ),
           backgroundVariableStats: _variableStats(result),
+          nextSuggestions: publishSuggestions
+              ? result.nextSuggestions
+              : const [],
         );
       } else if (token.cancelled) {
         _releaseImageRecord(roundImages);
@@ -1377,6 +1792,9 @@ abstract class ChatControllerBackground extends ChatControllerSession {
     }
     if (r.variableRemovalProposals.isNotEmpty) {
       parts.add('建议删除变量 ${r.variableRemovalProposals.join(' ')},待确认');
+    }
+    if (r.injectedVariables.isNotEmpty) {
+      parts.add('注入变量 ${r.injectedVariables.keys.join(' ')}');
     }
     // 一次多张时只有 imagePrompts(没有单条 imagePrompt),同样要标出「图片
     // 生成中」,否则状态面板看起来像"只更新了变量"。
