@@ -28,7 +28,16 @@ class UserProfileForm extends ConsumerStatefulWidget {
   final bool wide;
   final VoidCallback? onSaved;
 
-  const UserProfileForm({super.key, this.wide = false, this.onSaved});
+  /// 脏状态变化回调:移动端用户页把它转给 UnsavedChangesGuard,避免表单
+  /// 私有状态导致「没改也提示未保存」。
+  final ValueChanged<bool>? onDirtyChanged;
+
+  const UserProfileForm({
+    super.key,
+    this.wide = false,
+    this.onSaved,
+    this.onDirtyChanged,
+  });
 
   @override
   ConsumerState<UserProfileForm> createState() => _UserProfileFormState();
@@ -42,6 +51,9 @@ class _UserProfileFormState extends ConsumerState<UserProfileForm> {
   late String _initialName;
   String? _initialAvatar;
   bool _saving = false;
+
+  /// 上次通知给外层的脏值,避免每次按键都回调。
+  bool _reportedDirty = false;
 
   @override
   void initState() {
@@ -62,7 +74,16 @@ class _UserProfileFormState extends ConsumerState<UserProfileForm> {
   }
 
   void _onNameChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    _notifyDirty();
+  }
+
+  void _notifyDirty() {
+    final dirty = _dirty;
+    if (dirty == _reportedDirty) return;
+    _reportedDirty = dirty;
+    widget.onDirtyChanged?.call(dirty);
   }
 
   /// 是否有未保存修改;首尾空白不计入用户名差异。
@@ -79,10 +100,16 @@ class _UserProfileFormState extends ConsumerState<UserProfileForm> {
     if (bytes == null) return;
     // 头像先缩到 1024,再写入文件资产库;保存资料时由仓储 acquire。
     final hash = await assetizeImageBytes(ref.read(databaseProvider), bytes);
-    if (hash != null && mounted) setState(() => _avatarHash = hash);
+    if (hash != null && mounted) {
+      setState(() => _avatarHash = hash);
+      _notifyDirty();
+    }
   }
 
-  void _removeAvatar() => setState(() => _avatarHash = null);
+  void _removeAvatar() {
+    setState(() => _avatarHash = null);
+    _notifyDirty();
+  }
 
   /// 保存用户资料:先落库再刷新内存快照,并回写文本配置文件
   /// (`syncAppConfigFile` 写失败只打日志,不影响本次保存)。
@@ -99,6 +126,7 @@ class _UserProfileFormState extends ConsumerState<UserProfileForm> {
         _initialName = user.name;
         _initialAvatar = user.avatarHash;
       });
+      _notifyDirty();
       showAppSnack(context, '用户信息已保存');
       widget.onSaved?.call();
     } finally {
@@ -327,6 +355,7 @@ class _UserProfileFormState extends ConsumerState<UserProfileForm> {
         _initialName = next.name;
         _initialAvatar = next.avatarHash;
       });
+      _notifyDirty();
     });
     if (widget.wide) return _wideBody(context);
     return Column(

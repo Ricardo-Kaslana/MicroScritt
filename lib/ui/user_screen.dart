@@ -9,15 +9,28 @@ import 'package:flutter/material.dart';
 import 'common/unsaved_changes_guard.dart';
 import 'user_profile_form.dart';
 
-class UserScreen extends StatelessWidget {
+class UserScreen extends StatefulWidget {
   const UserScreen({super.key});
+
+  @override
+  State<UserScreen> createState() => _UserScreenState();
+}
+
+class _UserScreenState extends State<UserScreen> {
+  /// 表单脏值由 UserProfileForm 经回调同步;没改过时返回不弹确认框。
+  final _dirty = ValueNotifier<bool>(false);
+
+  @override
+  void dispose() {
+    _dirty.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return UnsavedChangesGuard(
-      // 表单状态(用户名/头像)由 UserProfileForm 私有持有,本层无法读取
-      // 脏值;简单表单按「返回前确认」兜底,避免误触返回静默丢弃输入。
-      hasChanges: () => true,
+      hasChanges: () => _dirty.value,
+      changes: [_dirty],
       title: '离开用户设置?',
       message: '未点击「保存」时,本次输入的用户名与头像修改不会保留。',
       confirmLabel: '离开',
@@ -26,7 +39,10 @@ class UserScreen extends StatelessWidget {
         body: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            UserProfileForm(onSaved: () => Navigator.pop(context)),
+            UserProfileForm(
+              onSaved: () => Navigator.pop(context),
+              onDirtyChanged: (dirty) => _dirty.value = dirty,
+            ),
           ],
         ),
       ),

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/data/image_codec.dart';
 import 'package:microscritt/import/character_card_importer.dart';
+import 'package:microscritt/import/png_chunk_reader.dart';
 import 'package:microscritt/import/worldbook_importer.dart';
 import 'png_chunk_reader_test.dart' show buildPngWithText;
 
@@ -65,6 +66,20 @@ void main() {
     final png = buildPngWithText('chara', base64.encode(utf8.encode(json)));
     final card = CharacterCardImporter.fromBytes(png);
     expect(card.importedAvatarBase64, tinyB64);
+  });
+
+  test('relaxed text limits let an oversized PNG card through', () {
+    final b64 = base64.encode(
+      utf8.encode(jsonEncode({'name': 'Big', 'description': 'd'})),
+    );
+    final png = buildPngWithText('chara', b64);
+    const tight = PngTextLimits(maxInflateBytes: 1024, maxTextLength: 8);
+    expect(
+      () => CharacterCardImporter.fromBytes(png, textLimits: tight),
+      throwsA(isA<PngTextBudgetExceeded>()),
+    );
+    const roomy = PngTextLimits(maxInflateBytes: 1024, maxTextLength: 4096);
+    expect(CharacterCardImporter.fromBytes(png, textLimits: roomy).name, 'Big');
   });
 
   test('imports from plain JSON string', () {

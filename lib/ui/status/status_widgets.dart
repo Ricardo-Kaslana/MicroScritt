@@ -491,23 +491,36 @@ class _BackgroundSummaryViewState extends State<BackgroundSummaryView> {
           );
         }
         if (data.imageState != null) {
+          final failed = data.imageFailed;
+          final color = failed ? scheme.error : scheme.primary;
           rows.add(
             _groupRow(
               context,
               stacked: stacked,
-              icon: Icons.image_outlined,
+              icon: failed ? Icons.error_outline : Icons.image_outlined,
               label: '生图',
-              color: scheme.primary,
+              color: color,
               chips: [
                 _tagChip(
                   context,
                   label: data.imageState!,
-                  color: scheme.primary,
+                  color: color,
                   filled: true,
-                  icon: Icons.image_outlined,
+                  icon: failed ? Icons.error_outline : Icons.image_outlined,
                   maxWidth: chipMax,
                 ),
               ],
+            ),
+          );
+        }
+        if (data.diagnostic != null) {
+          rows.add(
+            Padding(
+              padding: const EdgeInsets.only(left: 19, top: 4),
+              child: Text(
+                '诊断摘要:${data.diagnostic}',
+                style: style?.copyWith(color: scheme.onSurfaceVariant),
+              ),
             ),
           );
         }

@@ -1092,7 +1092,16 @@ class _FlashSummary extends StatelessWidget {
       rows.add(_groupRow('审计', parts.auditStats.join(' · ')));
     }
     if (parts.imageState != null) {
-      rows.add(_groupRow('生图', parts.imageState!));
+      rows.add(
+        _groupRow(
+          '生图',
+          parts.imageState!,
+          valueColor: parts.imageFailed ? _toneRed : null,
+        ),
+      );
+    }
+    if (parts.diagnostic != null) {
+      rows.add(_groupRow('诊断', parts.diagnostic!));
     }
     if (parts.noChange != null) {
       rows.add(_groupRow('结果', parts.noChange!));

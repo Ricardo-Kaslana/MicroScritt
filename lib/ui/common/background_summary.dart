@@ -18,6 +18,9 @@ class BackgroundSummaryParts {
   final String? noChange;
   final String? note;
   final String? imageState;
+
+  /// 生图失败原因的诊断摘要(已从「图片生成失败,已跳过(...)」括号里拆出)。
+  final String? diagnostic;
   final List<BackgroundVariableChange> updates;
   final List<String> removed;
   final List<String> proposed;
@@ -29,6 +32,7 @@ class BackgroundSummaryParts {
     this.noChange,
     this.note,
     this.imageState,
+    this.diagnostic,
     this.updates = const [],
     this.removed = const [],
     this.proposed = const [],
@@ -41,6 +45,15 @@ class BackgroundSummaryParts {
   static const _noChangeSuffix = '(无明显变化)';
   static final _auditStat = RegExp(r'^(更新|删除|建议删除) \d+ 键(待确认)?$');
   static final _spaces = RegExp(r'\s+');
+  static final _imageFailure = RegExp(
+    r'^(图片生成失败|图片重绘失败)(?:,已跳过)?(?:\((.*)\))?$',
+  );
+
+  /// 生图失败时详情在括号里、且可能自带「 · 」(如 502 · 上游错误):
+  /// 分组行以失败态呈现,不再把整段摘要回退成纯文本(与「注入变量」同一类修复)。
+  bool get imageFailed =>
+      (imageState?.startsWith('图片生成失败') ?? false) ||
+      (imageState?.startsWith('图片重绘失败') ?? false);
 
   static BackgroundSummaryParts? parse(String raw) {
     var text = raw.trim();
@@ -97,8 +110,9 @@ class BackgroundSummaryParts {
     final proposed = <String>[];
     final injected = <String>[];
     String? imageState;
+    String? diagnostic;
     var recognized = false;
-    for (final segment in text.split(' · ')) {
+    for (final segment in _splitSegments(text)) {
       final part = segment.trim();
       if (part.isEmpty) return null;
       if (part == '图片生成中' ||
@@ -106,6 +120,17 @@ class BackgroundSummaryParts {
           part == '图片已重绘') {
         if (imageState != null) return null;
         imageState = part;
+        recognized = true;
+        continue;
+      }
+      final failure = _imageFailure.firstMatch(part);
+      if (failure != null) {
+        if (imageState != null) return null;
+        final detail = failure.group(2)?.trim();
+        imageState = detail == null || detail.isEmpty
+            ? part
+            : part.substring(0, part.indexOf('(')).trim();
+        diagnostic = detail == null || detail.isEmpty ? null : detail;
         recognized = true;
         continue;
       }
@@ -147,11 +172,38 @@ class BackgroundSummaryParts {
       headline: prefix,
       note: note,
       imageState: imageState,
+      diagnostic: diagnostic,
       updates: updates,
       removed: removed,
       proposed: proposed,
       injected: injected,
     );
+  }
+
+  /// 按 ` · ` 分段,但不拆括号内的分隔符:「图片生成失败,已跳过(502 · 上游错误)」
+  /// 必须作为一个整体识别。括号不配对时沿用朴素切分,由后续解析决定是否回退。
+  static List<String> _splitSegments(String text) {
+    final segments = <String>[];
+    var depth = 0;
+    var start = 0;
+    for (var i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (ch == '(') {
+        depth++;
+      } else if (ch == ')') {
+        if (depth > 0) depth--;
+      } else if (depth == 0 &&
+          ch == ' ' &&
+          i + 2 < text.length &&
+          text[i + 1] == '·' &&
+          text[i + 2] == ' ') {
+        segments.add(text.substring(start, i));
+        start = i + 3;
+        i += 2;
+      }
+    }
+    segments.add(text.substring(start));
+    return segments;
   }
 
   /// 解析 `k=v k2=v2`;值里允许空格,无 `=` 的 token 续接到上一个值。

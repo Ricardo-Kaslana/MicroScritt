@@ -24,48 +24,84 @@ class PngTextChunk {
 /// 全局文本预算:块数量、解压输出总量与文本总量。超限按坏卡失败,不能把
 /// 所有块无限保留在内存里。
 const int _maxTextChunkCount = 256;
-const int _maxTotalInflateBytes = 8 * 1024 * 1024;
-const int _maxTotalTextLength = 8 * 1024 * 1024;
 
-/// 破坏全局预算的异常;与普通坏块(解压失败/CRC 不符)区分,直接判坏卡。
-class _PngBudgetExceeded implements Exception {
-  final String message;
-  const _PngBudgetExceeded(this.message);
+/// PNG 文本预算的两级上限:标准档是安全线,放宽档只在用户确认风险后使用。
+///
+/// 正常角色卡远低于标准线;超过它的卡多半是内嵌了 base64 头像/超长世界书,
+/// 或是 V3 卡把同一载荷同时写进 chara 与 ccv3。放宽档仍设硬顶,避免把
+/// 压缩炸弹真正解压进内存。
+class PngTextLimits {
+  /// 解压输出总量上限(字节)。
+  final int maxInflateBytes;
 
-  @override
-  String toString() => message;
+  /// 全部文本块解码后的长度上限(UTF-16 码元数,base64/ASCII 近似字节)。
+  final int maxTextLength;
+
+  const PngTextLimits({
+    required this.maxInflateBytes,
+    required this.maxTextLength,
+  });
+
+  /// 默认安全线:8MiB。
+  static const standard = PngTextLimits(
+    maxInflateBytes: 8 * 1024 * 1024,
+    maxTextLength: 8 * 1024 * 1024,
+  );
+
+  /// 用户在警告框确认风险后的放宽线:32MiB。
+  static const relaxed = PngTextLimits(
+    maxInflateBytes: 32 * 1024 * 1024,
+    maxTextLength: 32 * 1024 * 1024,
+  );
 }
+
+/// 文本/解压体积预算超限(不含块数量)。继承 [FormatException] 以兼容既有
+/// 导入错误处理;调用方可据此在标准档超限时先询问用户,再用
+/// [PngTextLimits.relaxed] 重试。
+class PngTextBudgetExceeded extends FormatException {
+  const PngTextBudgetExceeded(super.message);
+}
+
+String _mibLabel(int bytes) => '${bytes ~/ (1024 * 1024)}MiB';
 
 /// 一次读取内共享的累计预算。
 class _TextBudget {
+  final PngTextLimits _limits;
   int _chunks = 0;
   int _inflated = 0;
   int _textLength = 0;
 
+  _TextBudget(this._limits);
+
+  PngTextLimits get limits => _limits;
+
   void startChunk() {
     _chunks++;
     if (_chunks > _maxTextChunkCount) {
-      throw const _PngBudgetExceeded(
+      // 块数量与体积无关,放宽档也不放行:直接按坏卡失败,不触发大卡确认。
+      throw const FormatException(
         'PNG 文本块数量超过 $_maxTextChunkCount 上限(疑似恶意文件)',
       );
     }
   }
 
-  int get remainingInflate => _maxTotalInflateBytes - _inflated;
+  int get remainingInflate => _limits.maxInflateBytes - _inflated;
 
   void addInflated(int bytes) {
     _inflated += bytes;
-    if (_inflated > _maxTotalInflateBytes) {
-      throw const _PngBudgetExceeded(
-        'PNG 解压输出总量超过 8MiB 上限(疑似压缩炸弹)',
+    if (_inflated > _limits.maxInflateBytes) {
+      throw PngTextBudgetExceeded(
+        'PNG 解压输出总量超过 ${_mibLabel(_limits.maxInflateBytes)} 上限(疑似压缩炸弹)',
       );
     }
   }
 
   void addText(int length) {
     _textLength += length;
-    if (_textLength > _maxTotalTextLength) {
-      throw const _PngBudgetExceeded('PNG 文本总量超过 8MiB 上限(疑似恶意文件)');
+    if (_textLength > _limits.maxTextLength) {
+      throw PngTextBudgetExceeded(
+        'PNG 文本总量超过 ${_mibLabel(_limits.maxTextLength)} 上限(疑似恶意文件)',
+      );
     }
   }
 }
@@ -79,10 +115,14 @@ class _CappedInflateSink implements Sink<List<int>> {
 
   _CappedInflateSink(this._budget);
 
+  PngTextLimits get limits => _budget.limits;
+
   @override
   void add(List<int> chunk) {
     if (chunk.length > _budget.remainingInflate) {
-      throw const _PngBudgetExceeded('PNG 解压输出总量超过 8MiB 上限(疑似压缩炸弹)');
+      throw PngTextBudgetExceeded(
+        'PNG 解压输出总量超过 ${_mibLabel(_budget.limits.maxInflateBytes)} 上限(疑似压缩炸弹)',
+      );
     }
     _budget.addInflated(chunk.length);
     builder.add(chunk);
@@ -94,7 +134,7 @@ class _CappedInflateSink implements Sink<List<int>> {
 
 /// 解压 zlib 载荷(zTXt 文本或带压缩标志的 iTXt 文本字段)。
 ///
-/// 流式解码且全局解压预算超限时抛 [_PngBudgetExceeded](直接判坏卡);非法
+/// 流式解码且全局解压预算超限时抛 [PngTextBudgetExceeded](直接判坏卡);非法
 /// zlib 数据返回 null,由调用方按坏块跳过。
 Uint8List? _inflateZlib(Uint8List data, _TextBudget budget) {
   try {
@@ -103,6 +143,8 @@ Uint8List? _inflateZlib(Uint8List data, _TextBudget budget) {
     decoder.add(data);
     decoder.close();
     return sink.builder.takeBytes();
+  } on PngTextBudgetExceeded {
+    rethrow;
   } on FormatException {
     return null;
   }
@@ -127,14 +169,17 @@ String _utf8ElseLatin1(Uint8List bytes) {
 /// 部分结果)。结构越界时提前停止并返回已读块。关键字按块类型解码(tEXt
 /// 按 Latin-1,iTXt/zTXt 优先 UTF-8 并回退 Latin-1),调用方按大小写不敏感
 /// 匹配。非 PNG 抛 [FormatException]。
-List<PngTextChunk> readPngTextChunks(Uint8List bytes) {
+List<PngTextChunk> readPngTextChunks(
+  Uint8List bytes, {
+  PngTextLimits limits = PngTextLimits.standard,
+}) {
   const signature = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
   if (bytes.length < 8) throw const FormatException('Not a PNG file');
   for (var i = 0; i < 8; i++) {
     if (bytes[i] != signature[i]) throw const FormatException('Not a PNG file');
   }
   final chunks = <PngTextChunk>[];
-  final budget = _TextBudget();
+  final budget = _TextBudget(limits);
   var offset = 8;
   // PNG 块类型大小写敏感,精确匹配四种关注的类型(避免对每个块做 sublist)。
   bool typeIs(int o, String t) =>
@@ -142,46 +187,42 @@ List<PngTextChunk> readPngTextChunks(Uint8List bytes) {
       bytes[o + 5] == t.codeUnitAt(1) &&
       bytes[o + 6] == t.codeUnitAt(2) &&
       bytes[o + 7] == t.codeUnitAt(3);
-  try {
-    while (offset + 8 <= bytes.length) {
-      final length = _readUint32(bytes, offset);
-      if (_dataEndExceeds(bytes, offset, length)) break;
-      final dataStart = offset + 8;
-      final dataEnd = dataStart + length;
-      // CRC 也必须在缓冲区里,否则属于截断文件。
-      if (dataEnd + 4 > bytes.length) break;
-      final isText =
-          typeIs(offset, 'tEXt') ||
-          typeIs(offset, 'iTXt') ||
-          typeIs(offset, 'zTXt');
-      if (isText) {
-        budget.startChunk();
-        // 只对文本块校验 CRC;不符时跳过该块,不让一个坏块炸掉整卡。
-        if (!_crcMatches(bytes, offset, dataEnd)) {
-          offset = dataEnd + 4;
-          continue;
-        }
+  while (offset + 8 <= bytes.length) {
+    final length = _readUint32(bytes, offset);
+    if (_dataEndExceeds(bytes, offset, length)) break;
+    final dataStart = offset + 8;
+    final dataEnd = dataStart + length;
+    // CRC 也必须在缓冲区里,否则属于截断文件。
+    if (dataEnd + 4 > bytes.length) break;
+    final isText =
+        typeIs(offset, 'tEXt') ||
+        typeIs(offset, 'iTXt') ||
+        typeIs(offset, 'zTXt');
+    if (isText) {
+      budget.startChunk();
+      // 只对文本块校验 CRC;不符时跳过该块,不让一个坏块炸掉整卡。
+      if (!_crcMatches(bytes, offset, dataEnd)) {
+        offset = dataEnd + 4;
+        continue;
       }
-      // 只对文本块做整块复制:IDAT 等占 PNG 绝对体积的大块不白白多拷一份
-      //(20MB 卡 ≈ 额外 20MB 峰值分配)。
-      if (typeIs(offset, 'tEXt')) {
-        _addText(
-          chunks,
-          bytes.sublist(dataStart, dataEnd),
-          latin1: true,
-          budget: budget,
-        );
-      } else if (typeIs(offset, 'iTXt')) {
-        _addItxt(chunks, bytes.sublist(dataStart, dataEnd), budget);
-      } else if (typeIs(offset, 'zTXt')) {
-        _addZtxt(chunks, bytes.sublist(dataStart, dataEnd), budget);
-      } else if (typeIs(offset, 'IEND')) {
-        break;
-      }
-      offset = dataEnd + 4; // skip CRC
     }
-  } on _PngBudgetExceeded catch (e) {
-    throw FormatException(e.message);
+    // 只对文本块做整块复制:IDAT 等占 PNG 绝对体积的大块不白白多拷一份
+    //(20MB 卡 ≈ 额外 20MB 峰值分配)。
+    if (typeIs(offset, 'tEXt')) {
+      _addText(
+        chunks,
+        bytes.sublist(dataStart, dataEnd),
+        latin1: true,
+        budget: budget,
+      );
+    } else if (typeIs(offset, 'iTXt')) {
+      _addItxt(chunks, bytes.sublist(dataStart, dataEnd), budget);
+    } else if (typeIs(offset, 'zTXt')) {
+      _addZtxt(chunks, bytes.sublist(dataStart, dataEnd), budget);
+    } else if (typeIs(offset, 'IEND')) {
+      break;
+    }
+    offset = dataEnd + 4; // skip CRC
   }
   return chunks;
 }

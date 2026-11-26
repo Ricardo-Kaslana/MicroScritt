@@ -1,4 +1,5 @@
-// 角色卡导出测试:头像回填、character_book 以本端条目重写与透传字段合并。
+// 角色卡导出测试:头像回填、character_book 以本端条目重写(含空列表清空)
+// 与透传字段合并。
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/export/character_card_exporter.dart';
@@ -140,7 +141,9 @@ void main() {
     expect(extracted.single.content, '本端改过的内容');
   });
 
-  test('keeps the raw character_book when there are no local entries', () {
+  test('clears the raw character_book when the local worldbook is empty', () {
+    // 用户在管理页删光了世界书:库中空列表是权威结果,导出必须写回空
+    // entries,不能回落 raw 旧快照,否则「全部删除」在导出的卡里不生效。
     final card = CharacterCard.fromJson({
       'spec': 'chara_card_v2',
       'data': {
@@ -153,6 +156,27 @@ void main() {
       },
     });
     final json = jsonDecode(CharacterCardExporter.export(card, worldbook: const [])) as Map<String, dynamic>;
+    final book = (json['data'] as Map<String, dynamic>)['character_book'] as Map<String, dynamic>;
+    expect(book['entries'], isEmpty);
+    // 往返:清空后的卡再导入不再带回任何世界书条目。
+    final extracted = WorldbookImporter.extract(CharacterCard.fromJson(json));
+    expect(extracted, isEmpty);
+  });
+
+  test('keeps the raw character_book when the worldbook is not supplied', () {
+    // 调用方不传(未读库)时仍保留 raw,供不带世界书管理的导出边界复用。
+    final card = CharacterCard.fromJson({
+      'spec': 'chara_card_v2',
+      'data': {
+        'name': 'Alice',
+        'character_book': {
+          'entries': [
+            {'keys': ['旧条目'], 'content': '旧内容'},
+          ],
+        },
+      },
+    });
+    final json = jsonDecode(CharacterCardExporter.export(card)) as Map<String, dynamic>;
     final book = (json['data'] as Map<String, dynamic>)['character_book'] as Map<String, dynamic>;
     expect(((book['entries'] as List).first as Map)['keys'], ['旧条目']);
   });

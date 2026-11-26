@@ -4,11 +4,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/ui/common/chat_layout.dart';
 import 'package:microscritt/ui/widgets/message_selection_bar.dart';
 
-Widget _harness() => MaterialApp(
+Widget _harness({
+  int selectedCount = 1,
+  int totalCount = 4,
+  int imageCount = 2,
+  int textCount = 2,
+}) => MaterialApp(
   home: Scaffold(
     body: Align(
       alignment: Alignment.bottomCenter,
       child: MessageSelectionBar(
+        selectedCount: selectedCount,
+        totalCount: totalCount,
+        imageCount: imageCount,
+        textCount: textCount,
         onSelectAll: () {},
         onClearSelection: () {},
         onSelectImages: () {},
@@ -58,6 +67,35 @@ void main() {
       findsNothing,
     );
     expect(bar.height, lessThan(60));
+  });
+
+  testWidgets('快捷项显示可选项数,无效项置灰', (tester) async {
+    _setView(tester, const Size(360, 640));
+    await tester.pumpWidget(
+      _harness(selectedCount: 0, totalCount: 4, imageCount: 0, textCount: 4),
+    );
+    await tester.pump();
+
+    expect(find.text('全选 4'), findsOneWidget);
+    expect(find.text('取消全选'), findsOneWidget);
+    expect(find.text('图片 0'), findsOneWidget);
+    expect(find.text('文本 4'), findsOneWidget);
+
+    ActionChip chip(String key) =>
+        tester.widget<ActionChip>(find.byKey(ValueKey(key)));
+    // 没有选中时「取消全选」不可点,没有图片时「图片」不可点。
+    expect(chip('message_selection_none').onPressed, isNull);
+    expect(chip('message_selection_images').onPressed, isNull);
+    expect(chip('message_selection_all').onPressed, isNotNull);
+    expect(chip('message_selection_text').onPressed, isNotNull);
+
+    // 全部选中后「全选」置灰,「取消全选」可用。
+    await tester.pumpWidget(
+      _harness(selectedCount: 4, totalCount: 4, textCount: 4),
+    );
+    await tester.pump();
+    expect(chip('message_selection_all').onPressed, isNull);
+    expect(chip('message_selection_none').onPressed, isNotNull);
   });
 
   testWidgets('宽屏单行居中且内容封顶', (tester) async {

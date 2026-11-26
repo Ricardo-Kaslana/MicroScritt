@@ -1269,11 +1269,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               // /compact 的「压缩中」活动态由灵动岛呈现。
               // 多选时底部换成批量操作栏,输入区整体收起,避免误发送。
               if (_selectionMode)
-                MessageSelectionBar(
-                  onSelectAll: _selectAllMessages,
-                  onClearSelection: _clearMessageSelection,
-                  onSelectImages: _selectImageMessages,
-                  onSelectText: _selectTextMessages,
+                ValueListenableBuilder<Set<int>>(
+                  valueListenable: _selectedMessageIds,
+                  builder: (context, selected, __) {
+                    final visible = _loadedVisibleMessages();
+                    final images = visible
+                        .where((m) => m.hasVisualImage)
+                        .length;
+                    return MessageSelectionBar(
+                      selectedCount: selected.length,
+                      totalCount: visible.length,
+                      imageCount: images,
+                      textCount: visible.length - images,
+                      onSelectAll: _selectAllMessages,
+                      onClearSelection: _clearMessageSelection,
+                      onSelectImages: _selectImageMessages,
+                      onSelectText: _selectTextMessages,
+                    );
+                  },
                 )
               else ...[
                 // 底部输入区(命令行 + 输入卡 + 工具底栏)整体见 ChatComposer。

@@ -85,6 +85,10 @@ class ChatBubbleFrame extends StatelessWidget {
   /// 选中态:气泡外圈描边高亮,提示"此消息已选中、下方有操作按钮"。
   final bool selected;
 
+  /// 多选模式:在气泡内侧贴一枚勾选圆点(助手在左、用户在右),让"可点选"
+  /// 与"已选"两个状态同时可见 —— 只有描边时,浅色气泡上几乎看不出选中。
+  final bool selectionMode;
+
   /// 搜索定位态:目标气泡叠强调色描边与外发光(短暂,由聊天页计时收起)。
   final bool highlighted;
 
@@ -103,6 +107,7 @@ class ChatBubbleFrame extends StatelessWidget {
     required this.groupStart,
     required this.groupEnd,
     this.selected = false,
+    this.selectionMode = false,
     this.highlighted = false,
     this.style,
     this.constraints,
@@ -114,9 +119,19 @@ class ChatBubbleFrame extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     // 角色级样式只定制助手气泡;用户气泡恒为应用统一主色。
     final effStyle = isUser ? null : style;
-    final bubbleColor = effStyle?.bubbleColor != null
+    final baseColor = effStyle?.bubbleColor != null
         ? Color(effStyle!.bubbleColor!).withValues(alpha: effStyle.opacity ?? 1)
         : (isUser ? scheme.primary : scheme.surface);
+    // 选中态给底色叠一层同侧强调色:助手浅底加深、用户主色提亮,配合
+    // 勾选圆点与描边,滚动中也能一眼看出哪些已选。
+    final bubbleColor = selected
+        ? Color.alphaBlend(
+            (isUser ? scheme.onPrimary : scheme.primary).withValues(
+              alpha: isUser ? 0.10 : 0.08,
+            ),
+            baseColor,
+          )
+        : baseColor;
     // 圆角:默认 [kChatBubbleRadius];角色定制半径只作用于"大角",
     // 尾巴小角恒为 [kChatTailRadius](分组语义不随样式变)。
     final radius = effStyle?.radius ?? kChatBubbleRadius;
@@ -170,7 +185,67 @@ class ChatBubbleFrame extends StatelessWidget {
               ]
             : null,
       ),
-      child: child,
+      child: selectionMode
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (!isUser) ...[
+                  _MessageSelectionCheck(selected: selected, isUser: isUser),
+                  const SizedBox(width: 8),
+                ],
+                Flexible(child: child),
+                if (isUser) ...[
+                  const SizedBox(width: 8),
+                  _MessageSelectionCheck(selected: selected, isUser: isUser),
+                ],
+              ],
+            )
+          : child,
+    );
+  }
+}
+
+/// 多选态的勾选圆点:未选中空心、已选中实心打勾,160ms 过渡与气泡底色同步。
+///
+/// 颜色跟随所在气泡:用户气泡在白底(主色)上用 onPrimary,助手气泡在浅色
+/// 底上用 primary。圆点只做显示,点击仍由整条气泡承担,保持点哪都能选中。
+class _MessageSelectionCheck extends StatelessWidget {
+  final bool selected;
+  final bool isUser;
+
+  const _MessageSelectionCheck({required this.selected, required this.isUser});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final accent = isUser ? scheme.onPrimary : scheme.primary;
+    return Padding(
+      padding: const EdgeInsets.only(top: 1),
+      child: AnimatedContainer(
+        key: const ValueKey('message_selection_check'),
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+        width: 20,
+        height: 20,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: selected ? accent : Colors.transparent,
+          border: Border.all(
+            color: selected ? accent : accent.withValues(alpha: 0.55),
+            width: 1.6,
+          ),
+        ),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 120),
+          opacity: selected ? 1 : 0,
+          child: Icon(
+            Icons.check_rounded,
+            size: 14,
+            color: isUser ? scheme.primary : scheme.onPrimary,
+          ),
+        ),
+      ),
     );
   }
 }
@@ -363,6 +438,7 @@ class MessageBubble extends ConsumerWidget {
               groupStart: groupStart,
               groupEnd: groupEnd,
               selected: selected,
+              selectionMode: selectionMode,
               highlighted: highlighted,
               style: style,
               // 用户与助手气泡都按内容宽度自适应(短消息是小气泡),各自有最大宽度

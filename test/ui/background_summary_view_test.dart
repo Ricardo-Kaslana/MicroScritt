@@ -1,6 +1,6 @@
 // 后台运行摘要的结构化渲染:成功摘要按变量/移除/待确认/生图分组拆条,
-// 审计与重跑有独立标题行,失败摘要把引擎诊断拆到第二行;
-// 认不出的文案仍整段回退,不丢信息。
+// 审计与重跑有独立标题行,失败摘要把引擎诊断拆到第二行;生图失败仍保留分组
+// (诊断单独成行),认不出的文案仍整段回退,不丢信息。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:microscritt/engine/background_status.dart';
@@ -80,6 +80,41 @@ void main() {
 
     expect(find.text('后台维护异常,已安全跳过'), findsOneWidget);
     expect(find.text('诊断摘要:网关 502 · 上游错误'), findsOneWidget);
+  });
+
+  testWidgets('生图失败摘要保持结构化,失败原因拆到诊断行', (tester) async {
+    await pumpSummary(
+      tester,
+      '变量 mood=calm · 图片生成失败,已跳过(网关 502 · 上游错误)',
+    );
+
+    expect(find.text('变量'), findsOneWidget);
+    expect(find.text('mood = calm', findRichText: true), findsOneWidget);
+    expect(find.text('生图'), findsOneWidget);
+    expect(find.text('图片生成失败,已跳过'), findsOneWidget);
+    // 括号里的原因含「 · 」也不能把分段拆坏;诊断单独成行。
+    expect(find.text('诊断摘要:网关 502 · 上游错误'), findsOneWidget);
+    expect(find.textContaining('变量 mood=calm · 图片生成失败'), findsNothing);
+  });
+
+  testWidgets('生图失败无诊断时仍按分组展示', (tester) async {
+    await pumpSummary(tester, '图片生成失败,已跳过');
+
+    expect(find.text('生图'), findsOneWidget);
+    expect(find.text('图片生成失败,已跳过'), findsOneWidget);
+    expect(find.textContaining('诊断摘要'), findsNothing);
+  });
+
+  testWidgets('重绘失败摘要同样保留分组与诊断', (tester) async {
+    await pumpSummary(
+      tester,
+      '重跑完成 · 变量 mood=calm · 图片重绘失败,已跳过(超时)',
+    );
+
+    expect(find.text('重跑完成'), findsOneWidget);
+    expect(find.text('生图'), findsOneWidget);
+    expect(find.text('图片重绘失败,已跳过'), findsOneWidget);
+    expect(find.text('诊断摘要:超时'), findsOneWidget);
   });
 
   testWidgets('无法识别的成功摘要保持整段文本', (tester) async {

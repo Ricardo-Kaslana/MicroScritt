@@ -42,6 +42,30 @@ Uint8List buildPngWithText(String keyword, String text) {
   return Uint8List.fromList([...sig, ..._chunk('tEXt', data), ..._chunk('IEND', [])]);
 }
 
+/// 用 BytesBuilder 拼多个 tEXt 块:大文本夹具不展开超大 spread 列表。
+Uint8List buildPngWithTextChunks(List<(String, String)> entries) {
+  const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  final out = BytesBuilder(copy: false)..add(sig);
+  for (final (keyword, text) in entries) {
+    final body = BytesBuilder(copy: false)
+      ..add(utf8.encode(keyword))
+      ..addByte(0)
+      ..add(utf8.encode(text));
+    final data = body.takeBytes();
+    final typeAndData = Uint8List(4 + data.length)
+      ..setRange(0, 4, 'tEXt'.codeUnits)
+      ..setRange(4, 4 + data.length, data);
+    final crc = _crc32(typeAndData);
+    final len = data.length;
+    out
+      ..add([(len >> 24) & 0xff, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff])
+      ..add(typeAndData)
+      ..add([(crc >> 24) & 0xff, (crc >> 16) & 0xff, (crc >> 8) & 0xff, crc & 0xff]);
+  }
+  out.add([0, 0, 0, 0, ...'IEND'.codeUnits, 0xAE, 0x42, 0x60, 0x82]);
+  return out.takeBytes();
+}
+
 /// 由 PNG 签名 + 原始块载荷拼出字节流(夹具用,不写真实 CRC)。
 Uint8List _buildPng(List<List<int>> chunks) {
   const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -162,6 +186,20 @@ void main() {
       _chunk('IEND', []),
     ]);
     expect(() => readPngTextChunks(png), throwsFormatException);
+  });
+
+  test('budget overflow is typed and the relaxed limits accept the same card', () {
+    final png = _buildPng([
+      _chunk('tEXt', [...utf8.encode('chara'), 0, ...utf8.encode('x' * 64)]),
+      _chunk('IEND', []),
+    ]);
+    const tight = PngTextLimits(maxInflateBytes: 1024, maxTextLength: 32);
+    expect(
+      () => readPngTextChunks(png, limits: tight),
+      throwsA(isA<PngTextBudgetExceeded>()),
+    );
+    const roomy = PngTextLimits(maxInflateBytes: 1024, maxTextLength: 64);
+    expect(readPngTextChunks(png, limits: roomy).single.text.length, 64);
   });
 
   test('a zlib bomb over the global inflate budget fails the whole card', () {

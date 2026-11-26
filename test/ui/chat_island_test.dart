@@ -249,6 +249,32 @@ void main() {
     }
   });
 
+  testWidgets('后台收尾闪示:生图失败仍按分组展示,不整段回退为纯文本', (tester) async {
+    const chat = ChatState(inputTokens: 100, outputTokens: 5);
+    await tester.pumpWidget(
+      host(chat.copyWith(backgroundStatus: BackgroundStatus.running)),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.pumpWidget(
+      host(
+        chat.copyWith(
+          backgroundStatus: BackgroundStatus.succeeded,
+          backgroundSummary:
+              '变量 mood=calm · 图片生成失败,已跳过(网关 502 · 上游错误)',
+          backgroundVariableStats: const BackgroundVariableStats(updated: 1),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('变量'), findsOneWidget);
+    expect(find.text('生图'), findsOneWidget);
+    expect(find.text('图片生成失败,已跳过'), findsOneWidget);
+    // 失败原因(含「 · 」)不与分组拆分冲突,作为诊断行保留。
+    expect(find.text('诊断'), findsOneWidget);
+  });
+
   testWidgets('后台收尾闪示:变量注入单独成组,组内只报键数', (tester) async {
     const chat = ChatState(inputTokens: 100, outputTokens: 5);
     await tester.pumpWidget(

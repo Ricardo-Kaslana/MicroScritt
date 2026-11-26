@@ -16,6 +16,7 @@ import '../data/character_repository.dart';
 import '../export/character_card_exporter.dart';
 import '../export/character_card_png_exporter.dart';
 import '../import/character_card_importer.dart';
+import '../import/png_chunk_reader.dart';
 import '../import/worldbook_importer.dart';
 import '../models/character_card.dart';
 import '../models/ui_prefs.dart';
@@ -96,58 +97,66 @@ class CharacterScreen extends ConsumerWidget {
       if (!context.mounted) return;
       // 分阶段进度:20MB 卡光是读文件/解码缩图就要数秒,不能只丢一个会消失的
       // SnackBar 让界面看起来卡死。任务内每个阶段先让对话框完成一帧,再干重活。
-      final card = await runWithProgress<CharacterCard?>(
+      Uint8List? bytes;
+      var needsRiskConfirm = false;
+      var card = await runWithProgress<CharacterCard?>(
         context,
         title: '正在导入角色卡',
         task: (controller) async {
           controller.report(message: '读取文件…');
-          final bytes = await pickedFileBytes(
+          final read = await pickedFileBytes(
             picked,
             onProgress: (read, total) => controller.report(
               value: total <= 0 ? null : (read / total).clamp(0.0, 1.0),
               message: _readLabel(read, total),
             ),
           );
-          if (bytes == null) {
+          if (read == null) {
             throw const FormatException('未读取到所选文件');
           }
+          bytes = read;
           if (controller.cancelled) return null;
-
-          final isPng = CharacterCardImporter.isPng(bytes);
-          controller.report(message: '解析角色卡…');
-          await WidgetsBinding.instance.endOfFrame;
-          final card0 = CharacterCardImporter.fromBytes(
-            bytes,
-            includePngImageAsAvatar: false,
-          );
-          final entries = WorldbookImporter.extract(card0);
-          if (controller.cancelled) return null;
-
-          // base64 只在外部卡协议边界出现;PNG 原字节与内嵌头像都先缩图,
-          // 再写入内容寻址资产库。卡 JSON 自带头像时优先于 PNG 图片本体。
-          controller.report(message: '处理头像与背景…');
-          await WidgetsBinding.instance.endOfFrame;
-          final db = ref.read(databaseProvider);
-          final inlineAvatar = card0.importedAvatarBase64;
-          final avatarHash = inlineAvatar != null && inlineAvatar.isNotEmpty
-              ? await assetizeBase64Image(db, inlineAvatar)
-              : isPng
-              ? await assetizeImageBytes(db, bytes)
-              : null;
-          final card = card0.replacingAvatar(avatarHash);
-          if (controller.cancelled) return null;
-
-          controller.report(message: '写入数据库…');
-          await WidgetsBinding.instance.endOfFrame;
-          // 角色与世界书在同一事务内写入:世界书写失败时整体回滚,列表不会
-          // 出现「有卡没书」的半截状态。
-          await ref
-              .read(characterRepositoryProvider)
-              .insertWithWorldbook(card, entries);
-          return card;
+          try {
+            return await _parseAndStoreCard(ref, read, controller);
+          } on PngTextBudgetExceeded {
+            // 超出安全线:先结束本轮,由外层用警告框征求用户同意后再放宽重试。
+            needsRiskConfirm = true;
+            return null;
+          }
         },
       );
       if (!context.mounted) return;
+      if (needsRiskConfirm) {
+        final safeMiB =
+            PngTextLimits.standard.maxTextLength ~/ (1024 * 1024);
+        final proceed = await showConfirmDialog(
+          context,
+          title: '角色卡超出安全上限',
+          message:
+              '这张卡的内嵌文本超过 ${safeMiB}MiB 安全上限,继续导入会一次性'
+              '占用更多内存,低内存设备可能卡顿甚至失败。确定仍然导入吗?',
+          confirmLabel: '仍然导入',
+        );
+        if (!proceed) {
+          if (context.mounted) _toast(context, '已取消导入');
+          return;
+        }
+        if (!context.mounted) return;
+        card = await runWithProgress<CharacterCard?>(
+          context,
+          title: '正在导入角色卡',
+          task: (controller) {
+            controller.report(message: '解析大卡…');
+            return _parseAndStoreCard(
+              ref,
+              bytes!,
+              controller,
+              textLimits: PngTextLimits.relaxed,
+            );
+          },
+        );
+        if (!context.mounted) return;
+      }
       if (card == null) {
         _toast(context, '已取消导入');
         return;
@@ -163,6 +172,50 @@ class CharacterScreen extends ConsumerWidget {
       if (!context.mounted) return;
       _toast(context, '导入失败:$e');
     }
+  }
+
+  /// 解析卡并落库(头像资产 + 角色 + 世界书同事务);取消返回 null。
+  ///
+  /// [textLimits] 用于 PNG 卡:标准档超限由调用方确认风险后切到放宽档重试。
+  Future<CharacterCard?> _parseAndStoreCard(
+    WidgetRef ref,
+    Uint8List bytes,
+    ProgressController controller, {
+    PngTextLimits textLimits = PngTextLimits.standard,
+  }) async {
+    final isPng = CharacterCardImporter.isPng(bytes);
+    controller.report(message: '解析角色卡…');
+    await WidgetsBinding.instance.endOfFrame;
+    final card0 = CharacterCardImporter.fromBytes(
+      bytes,
+      includePngImageAsAvatar: false,
+      textLimits: textLimits,
+    );
+    final entries = WorldbookImporter.extract(card0);
+    if (controller.cancelled) return null;
+
+    // base64 只在外部卡协议边界出现;PNG 原字节与内嵌头像都先缩图,
+    // 再写入内容寻址资产库。卡 JSON 自带头像时优先于 PNG 图片本体。
+    controller.report(message: '处理头像与背景…');
+    await WidgetsBinding.instance.endOfFrame;
+    final db = ref.read(databaseProvider);
+    final inlineAvatar = card0.importedAvatarBase64;
+    final avatarHash = inlineAvatar != null && inlineAvatar.isNotEmpty
+        ? await assetizeBase64Image(db, inlineAvatar)
+        : isPng
+        ? await assetizeImageBytes(db, bytes)
+        : null;
+    final card = card0.replacingAvatar(avatarHash);
+    if (controller.cancelled) return null;
+
+    controller.report(message: '写入数据库…');
+    await WidgetsBinding.instance.endOfFrame;
+    // 角色与世界书在同一事务内写入:世界书写失败时整体回滚,列表不会
+    // 出现「有卡没书」的半截状态。
+    await ref
+        .read(characterRepositoryProvider)
+        .insertWithWorldbook(card, entries);
+    return card;
   }
 
   Future<void> _delete(

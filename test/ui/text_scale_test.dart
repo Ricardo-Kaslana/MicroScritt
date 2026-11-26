@@ -91,6 +91,10 @@ void main() {
                 child: ChatEmptyState(character: character, onGreeting: (_) {}),
               ),
               MessageSelectionBar(
+                selectedCount: 0,
+                totalCount: 4,
+                imageCount: 2,
+                textCount: 2,
                 onSelectAll: () {},
                 onClearSelection: () {},
                 onSelectImages: () {},
@@ -103,8 +107,8 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('只选图片'), findsOneWidget);
-    expect(find.text('只选文本'), findsOneWidget);
+    expect(find.text('图片 2'), findsOneWidget);
+    expect(find.text('文本 2'), findsOneWidget);
   });
 
   testWidgets('灵岛展开明细在 2 倍字号下不横向溢出', (tester) async {

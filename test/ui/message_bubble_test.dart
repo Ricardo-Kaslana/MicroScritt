@@ -90,6 +90,42 @@ void main() {
     );
   });
 
+  testWidgets('多选态气泡内显示勾选圆点,并随选中态切换', (tester) async {
+    const msg = Message(sessionId: 1, role: 'assistant', content: '你好', seq: 0);
+    Widget bubble({required bool selected, bool selectionMode = true}) => _app(
+      home: Scaffold(
+        body: MessageBubble(
+          message: msg,
+          selectionMode: selectionMode,
+          selected: selected,
+          onTap: () {},
+        ),
+      ),
+    );
+
+    double badgeOpacity() => tester
+        .widget<AnimatedOpacity>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message_selection_check')),
+            matching: find.byType(AnimatedOpacity),
+          ),
+        )
+        .opacity;
+
+    await tester.pumpWidget(bubble(selected: false));
+    expect(find.byKey(const ValueKey('message_selection_check')), findsOneWidget);
+    expect(badgeOpacity(), 0);
+
+    await tester.pumpWidget(bubble(selected: true));
+    await tester.pumpAndSettle();
+    expect(badgeOpacity(), 1);
+
+    // 非多选态不显示勾选圆点,点击仍打开操作排。
+    await tester.pumpWidget(bubble(selected: false, selectionMode: false));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('message_selection_check')), findsNothing);
+  });
+
   testWidgets('图片消息带可读语义标签', (tester) async {
     final handle = tester.ensureSemantics();
     const msg = Message(

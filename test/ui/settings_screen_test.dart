@@ -391,6 +391,44 @@ void main() {
     await tester.runAsync(() => db.db.close());
   });
 
+  testWidgets('user screen leaves directly when nothing changed', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      db = await openTestDb();
+    });
+    await tester.pumpWidget(harness());
+    await tester.pump();
+
+    await tester.tap(find.text('用户管理'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(UserScreen), findsOneWidget);
+
+    // 未做任何修改:返回不弹「离开用户设置?」,直接回设置页。
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('离开用户设置?'), findsNothing);
+    expect(find.byType(UserScreen), findsNothing);
+    expect(find.text('用户管理'), findsOneWidget);
+
+    // 输入后又改回初始值同样算无改动,返回不拦。
+    await tester.tap(find.text('用户管理'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.enterText(find.widgetWithText(TextField, '用户名'), '临时');
+    await tester.pump();
+    await tester.enterText(find.widgetWithText(TextField, '用户名'), '');
+    await tester.pump();
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('离开用户设置?'), findsNothing);
+    expect(find.byType(UserScreen), findsNothing);
+    await tester.runAsync(() => db.db.close());
+  });
+
   testWidgets('user screen asks before leaving the edit page', (tester) async {
     await tester.runAsync(() async {
       db = await openTestDb();
@@ -403,8 +441,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.byType(UserScreen), findsOneWidget);
 
-    // 用户表单状态由表单私有持有,返回前统一确认;取消留在本页。
+    // 有未保存修改时返回统一确认;取消留在本页。
     // 设置页后台仍有异步加载动画,不能用 pumpAndSettle。
+    await tester.enterText(find.widgetWithText(TextField, '用户名'), '临时修改');
+    await tester.pump();
     await tester.pageBack();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));

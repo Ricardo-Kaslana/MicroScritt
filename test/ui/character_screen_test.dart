@@ -22,7 +22,8 @@ import 'package:microscritt/ui/common/export_helper.dart';
 import 'package:microscritt/ui/common/section_header.dart';
 import 'package:microscritt/ui/widgets/character_deck.dart';
 import 'package:path/path.dart' as p;
-import '../import/png_chunk_reader_test.dart' show buildPngWithText;
+import '../import/png_chunk_reader_test.dart'
+    show buildPngWithText, buildPngWithTextChunks;
 import '../support/fake_file_picker.dart';
 import '../support/image_fixtures.dart';
 import '../support/test_database.dart';
@@ -79,6 +80,22 @@ Future<String> _pngBase64(int width, int height) async {
 }
 
 /// 轮询直到头像预览的 Image 出现(惰性加载 + 图片解码都是真实异步)。
+/// 进度对话框的不定动画不会收敛:按条件轮询推进真实 IO。
+Future<void> _pumpUntil(
+  WidgetTester tester,
+  bool Function() condition, {
+  int polls = 300,
+}) async {
+  await tester.runAsync(() async {
+    for (var i = 0; i < polls; i++) {
+      if (condition()) return;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await tester.pump();
+    }
+  });
+  await tester.pump();
+}
+
 Future<void> _pumpAvatarUntilImage(WidgetTester tester) async {
   for (var i = 0; i < 40 && find.byType(Image).evaluate().isEmpty; i++) {
     await tester.runAsync(
@@ -753,5 +770,57 @@ void main() {
     expect(find.text('Pixel'), findsOneWidget);
     expect(find.byType(Image), findsOneWidget); // 预览显示从 PNG 提取的角色图,而非占位首字
     await tester.runAsync(() => db.db.close());
+  });
+
+  testWidgets('oversized PNG card asks for confirmation then imports relaxed', (
+    tester,
+  ) async {
+    late final AppDatabase db;
+    late final Directory temp;
+    await tester.runAsync(() async {
+      db = await openTestDb();
+      temp = await Directory.systemTemp.createTemp('microscritt_big_card');
+    });
+    // 装饰文本块先推过 8MiB 安全线;真正的 chara 很小 —— 确认风险后放宽档可导入。
+    final json = jsonEncode({
+      'spec': 'chara_card_v2',
+      'spec_version': '2.0',
+      'data': {'name': 'BigCard'},
+    });
+    final png = buildPngWithTextChunks([
+      ('Comment', 'x' * (8 * 1024 * 1024 + 1)),
+      ('chara', base64.encode(utf8.encode(json))),
+    ]);
+    final file = File('${temp.path}/big.png');
+    await tester.runAsync(() => file.writeAsBytes(png));
+    FakeFilePicker.install(pickedPath: file.path);
+
+    await tester.pumpWidget(_harness(db));
+    await _pumpUntilLoaded(tester);
+
+    await tester.tap(find.text('导入'));
+    await tester.pump();
+    await _pumpUntil(
+      tester,
+      () => find.text('角色卡超出安全上限').evaluate().isNotEmpty,
+    );
+    expect(find.text('角色卡超出安全上限'), findsOneWidget);
+    // 确认前不写库:卡还没出现在列表里。
+    expect(find.text('暂无角色'), findsOneWidget);
+
+    await tester.tap(find.text('仍然导入'));
+    await tester.pump();
+    await _pumpUntil(
+      tester,
+      () => find.textContaining('已导入').evaluate().isNotEmpty,
+    );
+
+    late String imported;
+    await tester.runAsync(() async {
+      imported = (await CharacterRepository(db).all()).single.card.name;
+      await db.db.close();
+      await temp.delete(recursive: true);
+    });
+    expect(imported, 'BigCard');
   });
 }

@@ -29,9 +29,14 @@ class CharacterCardImporter {
   static CharacterCard fromBytes(
     Uint8List bytes, {
     bool includePngImageAsAvatar = true,
+    PngTextLimits textLimits = PngTextLimits.standard,
   }) {
     if (isPng(bytes)) {
-      return fromPng(bytes, includeImageAsAvatar: includePngImageAsAvatar);
+      return fromPng(
+        bytes,
+        includeImageAsAvatar: includePngImageAsAvatar,
+        textLimits: textLimits,
+      );
     }
     return fromJsonString(utf8.decode(bytes));
   }
@@ -41,8 +46,9 @@ class CharacterCardImporter {
   static CharacterCard fromPng(
     Uint8List png, {
     bool includeImageAsAvatar = true,
+    PngTextLimits textLimits = PngTextLimits.standard,
   }) {
-    final chunks = readPngTextChunks(png);
+    final chunks = readPngTextChunks(png, limits: textLimits);
     final b64 = _find(chunks, 'ccv3') ?? _find(chunks, 'chara') ?? _findFallback(chunks);
     if (b64 == null) throw const FormatException('PNG has no character card data (chara/ccv3)');
     final jsonStr = decodeCharaPayload(b64);

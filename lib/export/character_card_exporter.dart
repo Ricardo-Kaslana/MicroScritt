@@ -13,7 +13,8 @@ import 'worldbook_exporter.dart';
 /// 角色卡 JSON 导出入口;会话导出等需要嵌套时用 [exportJson]。
 class CharacterCardExporter {
   /// [avatarBase64] 由导出边界从文件资产按需读取,模型自身不持有 base64。
-  /// [worldbook] 非空时覆盖 raw 旧快照;为空时保留 raw 原有 character_book。
+  /// [worldbook] 非 null 时以库中条目整体覆盖 raw 旧快照 —— 空列表表示用户
+  /// 删光了世界书,必须写回空 `entries` 才能让删除生效;null 时才保留 raw。
   static String export(
     CharacterCard card, {
     List<WorldbookEntry>? worldbook,
@@ -32,7 +33,7 @@ class CharacterCardExporter {
     String? avatarBase64,
   }) {
     var json = card.toExportJson(avatarBase64: avatarBase64);
-    if (worldbook != null && worldbook.isNotEmpty) {
+    if (worldbook != null) {
       json = _withCharacterBook(json, worldbook);
     }
     return json;
